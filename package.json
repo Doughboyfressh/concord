@@ -1,0 +1,16 @@
+{
+  "name": "concord-deterministic-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Policy-bound AI orchestration with recorded effects and deterministic replay",
+  "engines": { "node": ">=22" },
+  "bin": { "concord": "./src/cli.mjs" },
+  "scripts": {
+    "test": "node --test",
+    "check": "node scripts/check.mjs",
+    "demo": "node src/cli.mjs run examples/offline.plan.json --policy examples/offline.policy.json --out runs/demo.json",
+    "replay": "node src/cli.mjs replay runs/demo.json --plan examples/offline.plan.json --policy examples/offline.policy.json",
+    "e2e": "node scripts/e2e.mjs"
+  }
+}

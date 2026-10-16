@@ -1,0 +1,5 @@
+node_modules/
+runs/
+.env
+.env.*
+.agents/evidence/
