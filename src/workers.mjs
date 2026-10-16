@@ -11,8 +11,9 @@ const inputSchema = objectSchema({ prompt: text, sessionId: text, workdir: text 
 const configSchema = objectSchema({
   binary: text, args: { type: 'array', items: { type: 'string' }, maxItems: 128 }, home: text,
   env: { type: 'object', additionalProperties: { type: 'string' } }, provider: text, model: text,
-  reasoningEffort: text, maxTokens: { type: 'integer', minimum: 1 },
+  reasoningEffort: text, maxTokens: { type: 'integer', minimum: 1 }, version: text,
 }, ['binary', 'home', 'provider', 'model']);
+const serviceName = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
 const allowedNotifications = new Set(['session.event', 'session.status', 'subagent.started', 'subagent.finished']);
 const forbiddenEnv = /^(?:NODE_OPTIONS|NODE_PATH|PYTHONPATH|PYTHONHOME|PYTHONSTARTUP|LD_.*|DYLD_.*|GCONV_PATH|BASH_ENV|ENV|SHELLOPTS|COMSPEC|DSH_HOME)$/i;
 const sensitiveName = /KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|COOKIE/i;
@@ -24,7 +25,7 @@ const copy = (value) => parseJson(canonical(value));
 
 function normalize(config) {
   validateSchema(config, configSchema);
-  const result = copy({ args: ['--profile', 'sdk'], env: {}, ...config });
+  const result = copy({ args: ['--profile', 'sdk'], env: {}, version: '1.0.0', ...config });
   ensure(path.isAbsolute(result.binary) && path.isAbsolute(result.home), 'WORKER_CONFIG', 'Worker binary and home must be absolute paths');
   ensure(![result.binary, result.home, ...result.args].some(value => value.includes('\0')), 'WORKER_CONFIG', 'Worker paths and arguments cannot contain NUL');
   const names = new Set();
@@ -253,21 +254,52 @@ function runProtocol(settings, input, context, cwd) {
   });
 }
 
+/**
+ * One or many named dsh services. A single plain object is the legacy shape and becomes
+ * `dsh.run`; an array requires an explicit, unique `name` per entry so several reviewed
+ * services can be registered side by side (DeepSeek Harness's own plugin-composition role,
+ * done as a fixed, reviewed set at startup rather than runtime hot-swap — see dsh.catalog).
+ */
+function normalizeServices(dsh) {
+  const isArray = Array.isArray(dsh);
+  const list = isArray ? dsh : [dsh];
+  ensure(list.length > 0, 'WORKER_CONFIG', 'At least one dsh service is required');
+  const named = list.map((entry) => {
+    ensure(record(entry), 'WORKER_CONFIG', 'Each dsh service must be a configuration object');
+    const name = entry.name ?? (isArray ? undefined : 'dsh.run');
+    ensure(typeof name === 'string' && serviceName.test(name), 'WORKER_CONFIG', 'Invalid or missing dsh service name');
+    const { name: _omit, ...rest } = entry;
+    return { name, settings: normalize(rest) };
+  });
+  ensure(new Set(named.map((n) => n.name)).size === named.length, 'WORKER_CONFIG', 'dsh service names must be unique');
+  return named;
+}
+
 /** Register optional delegated agent processes. Registration performs no I/O. */
 export function makeAgentTools(config = {}) {
-  validateSchema(config, objectSchema({ dsh: configSchema }));
+  validateSchema(config, objectSchema({ dsh: true }));
   if (!config.dsh) return [];
-  const settings = normalize(config.dsh);
-  const { env, ...publicSettings } = settings;
-  const binding = freeze({ ...publicSettings, protocol, environmentNames: Object.keys(env).sort(), environmentHash: digest(env), adapterConfigHash: digest(settings) });
-  return [Object.freeze({
-    name: 'dsh.run', version: '1.0.0', effect: 'process', inputSchema: freeze(copy(inputSchema)), config: binding,
-    async execute(input, context) {
-      validateSchema(input, inputSchema);
-      const invocation = copy(input);
-      ensure(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(invocation.sessionId), 'WORKER_INPUT', 'Session identity must be 1-128 safe identifier characters');
-      const cwd = await workingDirectory(invocation, context.workspaceRoot);
-      return runProtocol(settings, invocation, context, cwd);
-    },
-  })];
+  const services = normalizeServices(config.dsh);
+  const tools = services.map(({ name, settings }) => {
+    const { env, ...publicSettings } = settings;
+    const binding = freeze({ ...publicSettings, protocol, environmentNames: Object.keys(env).sort(), environmentHash: digest(env), adapterConfigHash: digest(settings) });
+    return Object.freeze({
+      name, version: settings.version, effect: 'process', inputSchema: freeze(copy(inputSchema)), config: binding,
+      async execute(input, context) {
+        validateSchema(input, inputSchema);
+        const invocation = copy(input);
+        ensure(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(invocation.sessionId), 'WORKER_INPUT', 'Session identity must be 1-128 safe identifier characters');
+        const cwd = await workingDirectory(invocation, context.workspaceRoot);
+        return runProtocol(settings, invocation, context, cwd);
+      },
+    });
+  });
+  // Discoverable as inert data only: name/version/provider/model, never binary, home, or env values.
+  const catalog = freeze(services.map(({ name, settings }) => copy({ name, version: settings.version, provider: settings.provider, model: settings.model }))
+    .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const catalogTool = Object.freeze({
+    name: 'dsh.catalog', version: '1.0.0', effect: 'pure', inputSchema: freeze(objectSchema({})), config: freeze({ servicesHash: digest(catalog) }),
+    execute() { return { services: catalog }; },
+  });
+  return [...tools, catalogTool];
 }

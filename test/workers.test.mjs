@@ -107,6 +107,37 @@ test('registration is optional, strict, immutable, and binds explicit configurat
   assert.equal(output.notifications[0].params.event.authorization, '[redacted]');
 });
 
+test('an array of named dsh services registers one tool per service plus a shared dsh.catalog', () => {
+  const base = { binary: process.execPath, args: ['peer.mjs'], home: path.join(tmpdir(), 'dsh-home-a'), provider: 'fixture-provider' };
+  const tools = makeAgentTools({ dsh: [
+    { ...base, name: 'dsh.research.run', model: 'research-model', version: '2.0.0' },
+    { ...base, name: 'dsh.coder.run', model: 'coder-model' },
+  ] });
+  assert.deepEqual(tools.map(t => t.name).sort(), ['dsh.catalog', 'dsh.coder.run', 'dsh.research.run']);
+  assert.equal(tools.find(t => t.name === 'dsh.research.run').version, '2.0.0');
+  assert.equal(tools.find(t => t.name === 'dsh.coder.run').version, '1.0.0'); // defaulted
+  const catalog = tools.find(t => t.name === 'dsh.catalog');
+  assert.equal(catalog.effect, 'pure');
+  const output = catalog.execute({}, {});
+  assert.deepEqual(output.services, [
+    { name: 'dsh.coder.run', version: '1.0.0', provider: 'fixture-provider', model: 'coder-model' },
+    { name: 'dsh.research.run', version: '2.0.0', provider: 'fixture-provider', model: 'research-model' },
+  ]);
+  assert.equal(canonical(output).includes(base.home), false);
+  assert.equal(canonical(output).includes(process.execPath), false);
+});
+
+test('duplicate dsh service names are rejected at registration', () => {
+  const base = { binary: process.execPath, args: [], home: path.join(tmpdir(), 'dsh-home-b'), provider: 'p', model: 'm' };
+  assert.throws(() => makeAgentTools({ dsh: [{ ...base, name: 'dsh.run' }, { ...base, name: 'dsh.run' }] }), { code: 'WORKER_CONFIG' });
+});
+
+test('an array entry without a name, or an invalid name, is rejected at registration', () => {
+  const base = { binary: process.execPath, args: [], home: path.join(tmpdir(), 'dsh-home-c'), provider: 'p', model: 'm' };
+  assert.throws(() => makeAgentTools({ dsh: [base] }), { code: 'WORKER_CONFIG' });
+  assert.throws(() => makeAgentTools({ dsh: [{ ...base, name: 'bad name with spaces' }] }), { code: 'WORKER_CONFIG' });
+});
+
 test('DSH executes the exact initialize, prompt, wait, shutdown lifecycle and records session evidence', async t => {
   const run = await setup(t);
   const previous = process.env.CONCORD_AMBIENT_TEST;
