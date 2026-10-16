@@ -1,7 +1,10 @@
 {
   "name": "concord-deterministic-harness",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.2.0",
+  "private": false,
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/Doughboyfressh/concord.git" },
+  "homepage": "https://github.com/Doughboyfressh/concord",
   "type": "module",
   "description": "Policy-bound AI orchestration with recorded effects and deterministic replay",
   "engines": { "node": ">=22" },

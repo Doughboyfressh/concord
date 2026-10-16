@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # No npm dependency is installed here, in keeping with Concord's zero-dependency
+      # rule — this downloads a standalone Chromium binary outside the project itself,
+      # only so browser.snapshot's real-browser tests run for real instead of skipping.
+      # windows-latest runners already ship Microsoft Edge; browser.test.mjs auto-detects
+      # it, so no explicit install is needed on that OS.
+      - name: Install a real Chromium for browser.snapshot's live tests
+        if: matrix.os == 'ubuntu-latest'
+        id: chromium
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
+      - name: Validate (check, test, e2e)
+        shell: bash
+        env:
+          CONCORD_TEST_BROWSER: ${{ steps.chromium.outputs.chrome-path }}
+        run: node scripts/validate.mjs
+
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-evidence-${{ matrix.os }}
+          path: .agents/evidence/
+          if-no-files-found: ignore
