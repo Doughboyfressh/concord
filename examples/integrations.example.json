@@ -16,5 +16,14 @@
     "timeoutMs": 60000,
     "maxOutputBytes": 1048576
   },
-  "workers": []
+  "registry": {
+    "name": "ui.components.search",
+    "origin": "https://21st.dev",
+    "path": "/v1/components/search",
+    "apiKeyEnv": "CONCORD_REGISTRY_API_KEY",
+    "timeoutMs": 30000,
+    "maxOutputBytes": 1048576
+  },
+  "workers": [],
+  "processes": []
 }

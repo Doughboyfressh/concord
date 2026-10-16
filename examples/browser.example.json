@@ -1,0 +1,5 @@
+{
+  "executable": "C:/Program Files/Google/Chrome/Application/chrome.exe",
+  "timeoutMs": 20000,
+  "maxOutputBytes": 1048576
+}

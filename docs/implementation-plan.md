@@ -8,9 +8,13 @@ The user authorized a unified harness across twelve supplied references. Default
 | External transports | src/integrations.mjs, test/integrations.test.mjs, docs/adapters.md, examples/integrations.example.json | Base contract |
 | Provenance and skill snapshots | src/sources.mjs, sources.lock.json, test/sources.test.mjs, docs/sources.md | Base contract, source audit |
 | Adversarial verification | test/core.test.mjs, docs/review.md | All slices |
-| Source-derived chat context | src/chat-context.mjs, instructions/, test/chat-context.test.mjs | All pinned source corpus |
-| Chat session and action broker | src/chat.mjs, test/chat.test.mjs | Kernel, instruction context |
+| Source-derived chat context | src/chat-context.mjs, instructions/, test/chat-flow.test.mjs | All pinned source corpus |
+| Chat session and action broker | src/chat.mjs, test/chat-flow.test.mjs | Kernel, instruction context |
 | Local chat interface | src/server.mjs, app/, test/server.test.mjs | Chat session and broker |
+| Artifact inspection | src/workspace-fs.mjs, src/artifacts.mjs, test/artifacts.test.mjs, docs/artifacts.md | Base contract |
+| Browser snapshot | src/browser.mjs, test/browser.test.mjs, docs/browser.md | Base contract |
+| Generic process runner and UI registry client | src/integrations.mjs (`process.run`, `ui.components.search`), test/integrations.test.mjs | External transports |
+| Persistent memory | src/builtins.mjs (`memory.promote`, `memory.recall`), test/memory.test.mjs, docs/memory.md | Base contract |
 
 Determinism means stable DAG order and content-addressed inputs, policies, sources, tool declarations, implementation files, workspace identity, and recorded outputs. Live inference and external effects remain nondeterministic. Replays validate a hash chain and return the recorded result without tool execution. No unattended arbitrary shell, automatic source hooks, autonomous privilege escalation, or claim of binary-level sandboxing.
 

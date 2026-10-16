@@ -46,6 +46,37 @@ Example worker configuration (replace the paths and digest with reviewed local a
 
 Hashing only the interpreter does not pin the bridge script or its dependencies. Their bytes must be included in your reviewed source lock and execution environment. Path and digest checks do not eliminate concurrent filesystem replacement races; enforce a stable, protected execution environment for production use. On timeout/cancellation the adapter kills its immediate child and closes its pipes. Descendant cleanup remains the bridge/runtime's responsibility.
 
+## Generic process runner
+
+`processes` items (sibling to `workers`) run `process.run`: a generic bounded local-command executor for any reviewed command, not the JSON subprocess bridge's one-document protocol. Configuration is identical to a worker's — `name`, `version`, absolute `executable`, fixed `args`, workspace-relative `cwd`, noncredential literal `env`, `allowedEnv`, `timeoutMs`, `maxOutputBytes` — with one difference: `executableSha256` is **mandatory** here, not optional, because this adapter accepts arbitrary reviewed commands rather than one pinned protocol binary. Task input is never read for argv; a plan cannot add or change arguments.
+
+The child's stdout and stderr are captured separately and returned as `{exitCode, signal, stdout, stderr}`. Output must decode as strict UTF-8 or the call fails closed (`INTEGRATION_OUTPUT`) — there is no base64 fallback for binary output in this version. A nonzero exit or a signal termination is a distinct failure (`INTEGRATION_EXIT`), matching the worker bridge's posture. Never point `executable` at a path a `write`-effect tool in the same policy can also populate — two individually policy-correct tasks (write the file, then run it) can otherwise compose into arbitrary code execution; the mandatory digest pin only protects what's already on disk when the tool is configured, not what might be written later.
+
+Credential-echo rejection checks environment values against both a name heuristic (`token`/`password`/`secret`/`api(_)key`) and a small set of credential-shaped value patterns (AWS access key IDs, PEM private key headers, JWTs, basic-auth-in-URL) — this catches common credential shapes landing under an unrelated variable name, but is still not a general secret scanner.
+
+Example configuration (replace the path and digest with a reviewed local artifact; `executableSha256` is required, not optional):
+
+```json
+{
+  "processes": [{
+    "name": "process.run",
+    "version": "1",
+    "executable": "C:/Program Files/Git/usr/bin/grep.exe",
+    "args": ["-c", "TODO"],
+    "cwd": ".",
+    "executableSha256": "REPLACE_WITH_THE_REVIEWED_BINARY_DIGEST",
+    "timeoutMs": 10000,
+    "maxOutputBytes": 1048576
+  }]
+}
+```
+
+## UI component registry
+
+The optional `registry` configuration runs a UI component search client (21st-style) under the same `origin`/`apiKeyEnv`/`timeoutMs`/`maxOutputBytes` transport discipline as TypeSafe and the model adapter, minus a model ID (there is no model here). Input is `{query, limit?}`; the adapter POSTs `{query, limit}` to the configured path (default `/v1/components/search`) and validates the response as `{components: [{name, registryPath, dependencies?}]}` — not a bare passthrough. A response with more components than the requested limit, or any component missing `name`/`registryPath`, or a malformed `dependencies` array, is rejected (`INTEGRATION_OUTPUT`).
+
+This is Concord's own defined contract, tested only against a local HTTP fixture. Real `21st.dev` wire compatibility is unverified — the live API's actual request/response shape has not been confirmed against this adapter.
+
 ## Policy and limits
 
 `context.policy.allowedOrigins` must contain the exact normalized origin, including a nondefault port, for every HTTP call. Wildcards and origin prefixes are not accepted. Redirects are never followed. HTTP input is capped at 32 MiB, UTF-8 JSON is strict, response headers are capped at 16 KiB, TLS certificate verification remains enabled, and adapter requests use a fresh direct agent rather than a mutable global agent. HTTPS is appropriate for remote credentials; HTTP supports explicit local endpoints and test fixtures.
@@ -58,11 +89,12 @@ Hashing only the interpreter does not pin the bridge script or its dependencies.
 | --- | --- | --- |
 | TypeSafe | Real bounded HTTP protocol using local fixtures; typed answers validated | Authenticated live API and model quality untested |
 | Compatible chat model | Local HTTP request and strict JSON proposal response | Real inference, provider compatibility and immutable model availability untested |
-| REA | Generic local JSON worker bridge transport | Native REA `mcp` is JSON-RPC/MCP, not this worker protocol. A real MCP client/bridge must initialize, discover tools, preserve evidence contracts and manage sessions. No REA analysis engine was run. |
-| Orca | Generic local JSON worker bridge transport | Orca CLI uses fixed subcommands and a running runtime. Add a reviewed command/receipt bridge. Experimental orchestration has Run/task/dispatch lifecycle and acknowledgments; no live Orca runtime was controlled. |
-| ego-lite | Source/provenance belongs in the source catalog | No runtime-specific bridge implemented or executed |
-| Hermes | Source/provenance belongs in the source catalog | CLI/chat/session tooling needs a dedicated bridge and session lifecycle; no agent was run |
+| REA | Generic local JSON worker bridge transport, plus `artifact.inspect` (native, read-effect: magic-byte identification and bounds-checked ELF/PE header parsing) | Native REA `mcp` is JSON-RPC/MCP, not this worker protocol. A real MCP client/bridge must initialize, discover tools, preserve evidence contracts and manage sessions. No REA analysis engine was run; no disassembler or managed/JS/browser inspection path exists. |
+| Orca | Generic local JSON worker bridge transport, plus `process.run` (native, process-effect: generic bounded command execution with a mandatory executable digest) | Orca CLI uses fixed subcommands and a running runtime. Orca's own worktree/terminal/desktop/mobile/SSH session model is not implemented; `process.run` covers the shared "execute a reviewed command" primitive only. |
+| ego-lite | `browser.snapshot` (native, process-effect: launches a configured local Chrome/Chromium, drives it over raw CDP, extracts a bounded text snapshot) — verified against a real local browser, not just a fixture | One page open-and-extract capability. No click/type/multi-step scripting, shared logins, or persistent profiles. |
+| Hermes | `memory.promote`/`memory.recall` (native, write/read-effect: persistent, content-addressed local memory store) | CLI/chat/session tooling needs a dedicated bridge and session lifecycle; no agent was run. Delegation, scheduling, and channels remain source corpus only. |
 | DeepSeek Harness | Source/provenance belongs in the source catalog | ACP and persistent agent sessions require their actual handshake, messages, cancellation and lifecycle. They are not a one-document JSON subprocess call. No DSH/ACP integration is claimed. |
+| 21st | `ui.components.search` (native, network-effect: Concord's own defined request/response contract with real schema enforcement) | Fixture-tested only; real 21st.dev wire compatibility unverified. |
 
 Useful primary references: [REA MCP contracts](https://github.com/morluto/rea/blob/main/docs/mcp-contracts.md), [REA installation/release boundaries](https://github.com/morluto/rea/blob/main/docs/installation.md), [Orca CLI](https://www.onorca.dev/docs/cli/overview), [Orca orchestration](https://www.onorca.dev/docs/cli/orchestration), and [TypeSafe's Hermes skill-selection example](https://docs.typesafe.ai/cookbooks/skill_suggestion).
 
