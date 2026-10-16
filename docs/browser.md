@@ -40,14 +40,51 @@ profile) unreached — leaking a running browser process and its open local debu
 indefinitely. `test/browser.test.mjs` exercises this exact scenario against a real browser and a
 page that hangs on purpose.
 
+## browser.automate
+
+A second `process`-effect tool, sibling to `browser.snapshot` and sharing its launch/discover/
+teardown scaffold. Input is `{url, actions}`, where `actions` is a bounded list (at most 20) of
+`{type: 'click'|'fill'|'wait'|'extract', selector?, value?}`. The entire action sequence runs
+inside **one** CDP session — one launch, one attach, one teardown — exactly like `dsh.run`'s own
+multi-step protocol (initialize→prompt→wait→shutdown) runs inside one call. That is deliberate,
+not a shortcut: Concord's kernel requires every tool's output to be a pure function of its
+declared input so a recorded run can be independently replayed, and a browser session held open
+*across* two separately approved calls would break that guarantee — see
+[the architecture notes](architecture.md) on why a persistent multi-call session was rejected in
+favor of this shape.
+
+`click` and `fill` never string-interpolate the caller's `selector`/`value` into executable CDP
+expression text (the way the snapshot's own `maxChars` is interpolated above — safe there only
+because it is a server-controlled integer, never caller text). Instead, the tool resolves
+`document`'s CDP object handle once, then calls a **fixed** `Runtime.callFunctionOn` function
+body with the selector/value passed only as CDP `arguments` (JSON values). CDP serializes
+`arguments` as data, never as source, so a crafted selector like `'); window.x=1; //` can never
+break out of the function body — it just fails to match any element, or throws an ordinary
+"selector not found" inside the function, surfaced as a clean `BROWSER_ACTION` error. The session
+attaches to exactly one CDP target for the whole sequence and never re-discovers mid-script, so a
+page that opens a popup via `window.open()` cannot pull the automation onto a different target.
+
+`extract` returns the `innerText` of the matched selector (or the whole page body if `selector` is
+omitted), bounded per call and contributing to the same `maxOutputBytes` ceiling as everything
+else in the result. `wait` polls for a selector to exist in the DOM, bounded by the same overall
+deadline as the rest of the call — there is no open-ended arbitrary sleep action.
+
+**`fill` values are journaled as ordinary task input, in plaintext, like every other tool's
+input.** Never type credentials through this tool; there is no redaction path for action values
+the way there is for named credential environment variables elsewhere in this codebase.
+
 ## What is and isn't covered
 
 - **Covered, tested against a real browser:** launch, port discovery, loopback re-verification,
   navigation, text extraction, timeout/abort mid-session, teardown, independent profiles across
-  sequential calls.
-- **Not covered:** click/type/scripted multi-step interaction, screenshots, shared logins or
-  persisted cookies/storage across calls (a fresh profile is used and deleted every time),
-  accessibility-tree extraction (this returns rendered text, not an AX tree).
+  sequential calls (`browser.snapshot`); a click→fill→extract round trip, a crafted
+  injection-shaped selector proving `Runtime.callFunctionOn` argument-passing prevents script
+  breakout, a `window.open()` popup leaving the session attached to the original target, and the
+  same hang/timeout/cleanup guarantee mid-sequence (`browser.automate`).
+- **Not covered:** screenshots, shared logins or persisted cookies/storage across calls (a fresh
+  profile is used and deleted every time), accessibility-tree extraction (this returns rendered
+  text, not an AX tree), drag/drop or keyboard-only interaction, and any session held open across
+  two separate tool calls (a deliberate boundary, not an oversight — see above).
 - **Residual, disclosed risk:** the local DevTools port is unauthenticated for the lifetime of one
   call — any other local process that reaches it during that window could attach. This is the same
   exposure class every other `process`-effect tool in this codebase already discloses, bounded by

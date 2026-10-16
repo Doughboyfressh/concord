@@ -10,6 +10,8 @@ Configure an exact `origin`, a versioned Jev `model` such as `jev-1.13.0`, and a
 
 Input is `{state, questions}`. State is a string, object or array. Supported question types are `noul`, `choice`, and `score`. The adapter POSTs `{model,state,questions}` and returns the parsed `{model,answers,...}` response. It verifies the returned model and answer types, closed choice options, distribution keys and probability bounds. Choice/Score confidence is a statistic supplied by the model, not proof of correctness. Score ranges from zero to `criteria.length - 1`.
 
+Rubric content is already fully caller-supplied per call, not fixed at registration: only `origin`, `model`, and `apiKeyEnv` are pinned when the adapter is configured. Every call's own `questions` — labels, `choice` option sets, `score` level count and wording, `instructions` text — is whatever the caller sends that turn. There is no separate "custom rubric" feature to add; `examples/typesafe-custom-rubric.plan.json` (with `examples/typesafe-custom-rubric.policy.json`) demonstrates a genuinely domain-specific rubric — a 5-level maintainability score and a 4-option merge recommendation, neither a generic pre-built evaluator — using exactly this existing contract.
+
 The implementation uses Node's HTTP(S) libraries, with no SDK dependency. Its protocol and failure behavior have been tested against real local HTTP fixtures. No authenticated TypeSafe request was made. Remote availability, account access, billing and live model quality remain unverified. Official contracts: [HTTP API](https://docs.typesafe.ai/api), [models and aliases](https://docs.typesafe.ai/models), [Score semantics](https://docs.typesafe.ai/primitives/score).
 
 ## Model proposals
@@ -71,6 +73,40 @@ Example configuration (replace the path and digest with a reviewed local artifac
 }
 ```
 
+## Parallel process batches (Orca)
+
+`processesBatch` (sibling to `processes`) registers `process.runMany`: concurrent execution of
+several already-reviewed, named entries inside **one** bounded `process`-effect call — Orca's
+parallel-workstream role ("try several approaches, compare the results"). Each entry is validated
+exactly like a `process.run` entry (fixed absolute executable, fixed args, contained cwd,
+mandatory executable digest); task input selects which already-registered names to run, never new
+argv. The children run concurrently via `Promise.allSettled` entirely inside this one tool's
+`execute()` — this is not a change to the kernel's own task scheduling, which stays strictly
+sequential across separate plan tasks; the parallelism is internal to one atomic, replay-safe call.
+
+Every child's outcome comes back as **data**, never as a thrown exception — a deliberate departure
+from `process.run`'s throw-on-any-failure contract, so one failing or slow child never discards the
+others' evidence: `{results: [{name, exitCode, signal, stdout, stderr} | {name, failed: true,
+code}, ...]}`. Each child's own output budget is the call's aggregate `maxOutputBytes` divided by
+the number of selected names (mirroring `files.read`/`memory.recall`'s existing per-call division),
+and each child's own timeout is clamped to the call's policy-bound timeout — so one slow or hung
+child cannot starve the others' budget or wall-clock time, and the worst-case aggregate output can
+never trip the kernel's own output-limit check.
+
+Example configuration (replace paths and digests with reviewed local artifacts):
+
+```json
+{
+  "processesBatch": [
+    { "name": "lint.eslint", "version": "1", "executable": "C:/Program Files/nodejs/node.exe", "args": ["C:/reviewed/eslint-cli.mjs"], "executableSha256": "REPLACE", "timeoutMs": 10000 },
+    { "name": "lint.typecheck", "version": "1", "executable": "C:/Program Files/nodejs/node.exe", "args": ["C:/reviewed/tsc-cli.mjs"], "executableSha256": "REPLACE", "timeoutMs": 10000 }
+  ]
+}
+```
+
+A task calling `process.runMany` with `{"names": ["lint.eslint", "lint.typecheck"]}` runs both
+concurrently and returns both outcomes, succeeding or failing independently.
+
 ## UI component registry
 
 The optional `registry` configuration runs a UI component search client (21st-style) under the same `origin`/`apiKeyEnv`/`timeoutMs`/`maxOutputBytes` transport discipline as TypeSafe and the model adapter, minus a model ID (there is no model here). Input is `{query, limit?}`; the adapter POSTs `{query, limit}` to the configured path (default `/v1/components/search`) and validates the response as `{components: [{name, registryPath, dependencies?}]}` — not a bare passthrough. A response with more components than the requested limit, or any component missing `name`/`registryPath`, or a malformed `dependencies` array, is rejected (`INTEGRATION_OUTPUT`).
@@ -90,10 +126,10 @@ This is Concord's own defined contract, tested only against a local HTTP fixture
 | TypeSafe | Real bounded HTTP protocol using local fixtures; typed answers validated | Authenticated live API and model quality untested |
 | Compatible chat model | Local HTTP request and strict JSON proposal response | Real inference, provider compatibility and immutable model availability untested |
 | REA | Generic local JSON worker bridge transport, plus `artifact.inspect` (native, read-effect: magic-byte identification and bounds-checked ELF/PE header parsing) | Native REA `mcp` is JSON-RPC/MCP, not this worker protocol. A real MCP client/bridge must initialize, discover tools, preserve evidence contracts and manage sessions. No REA analysis engine was run; no disassembler or managed/JS/browser inspection path exists. |
-| Orca | Generic local JSON worker bridge transport, plus `process.run` (native, process-effect: generic bounded command execution with a mandatory executable digest) | Orca CLI uses fixed subcommands and a running runtime. Orca's own worktree/terminal/desktop/mobile/SSH session model is not implemented; `process.run` covers the shared "execute a reviewed command" primitive only. |
-| ego-lite | `browser.snapshot` (native, process-effect: launches a configured local Chrome/Chromium, drives it over raw CDP, extracts a bounded text snapshot) — verified against a real local browser, not just a fixture | One page open-and-extract capability. No click/type/multi-step scripting, shared logins, or persistent profiles. |
-| Hermes | `memory.promote`/`memory.recall` (native, write/read-effect: persistent, content-addressed local memory store) | CLI/chat/session tooling needs a dedicated bridge and session lifecycle; no agent was run. Delegation, scheduling, and channels remain source corpus only. |
-| DeepSeek Harness | Source/provenance belongs in the source catalog | ACP and persistent agent sessions require their actual handshake, messages, cancellation and lifecycle. They are not a one-document JSON subprocess call. No DSH/ACP integration is claimed. |
+| Orca | Generic local JSON worker bridge transport, plus `process.run` and `process.runMany` (native, process-effect: generic bounded command execution with a mandatory executable digest; `process.runMany` runs several named reviewed entries concurrently inside one call, with per-child output-budget division and timeout clamping, reporting partial failures as data) | Orca CLI uses fixed subcommands and a running runtime. Orca's own worktree/terminal/desktop/mobile/SSH session model is not implemented; `process.run`/`process.runMany` cover the shared "execute reviewed commands, optionally concurrently" primitive only. |
+| ego-lite | `browser.snapshot` and `browser.automate` (native, process-effect: launches a configured local Chrome/Chromium, drives it over raw CDP; `browser.automate` runs a bounded click/fill/wait/extract action sequence inside one CDP session, selector/value data passed only as CDP arguments, never interpolated into executable script) — verified against a real local browser, not just a fixture | No shared logins, persistent profiles, or any session held open across two separate calls — a deliberate replay-safety boundary, see [docs/browser.md](browser.md). |
+| Hermes | `memory.promote`/`memory.recall` (native, write/read-effect: persistent, content-addressed local memory store), plus automatic recall: each chat turn fetches the best-scoring stored lesson and splices it into context, mirroring the existing skill-excerpt enrichment | CLI/chat/session tooling needs a dedicated bridge and session lifecycle; no agent was run. Delegation, scheduling, and channels remain source corpus only. |
+| DeepSeek Harness | `dsh.run` now accepts one or several named, versioned services; `dsh.catalog` (native, pure-effect) lists the registered services' name/version/provider/model as inert discoverable data, with no secrets or paths exposed | Runtime hot-swap/registration of an unreviewed service at call time is a deliberate non-goal, not a gap: `replayPlan` asserts the registry's digest hasn't changed between a run and its replay, so a hot-swapped tool would break replay verification by design. ACP and persistent agent sessions still require their actual handshake, messages, cancellation and lifecycle; they are not a one-document JSON subprocess call. No DSH/ACP integration is claimed. |
 | 21st | `ui.components.search` (native, network-effect: Concord's own defined request/response contract with real schema enforcement) | Fixture-tested only; real 21st.dev wire compatibility unverified. |
 
 Useful primary references: [REA MCP contracts](https://github.com/morluto/rea/blob/main/docs/mcp-contracts.md), [REA installation/release boundaries](https://github.com/morluto/rea/blob/main/docs/installation.md), [Orca CLI](https://www.onorca.dev/docs/cli/overview), [Orca orchestration](https://www.onorca.dev/docs/cli/orchestration), and [TypeSafe's Hermes skill-selection example](https://docs.typesafe.ai/cookbooks/skill_suggestion).

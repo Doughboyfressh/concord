@@ -21,6 +21,32 @@ const tools = makeAgentTools({
 
 For a Node-distributed DSH executable, select the absolute Node binary and fixed arguments naming the reviewed DSH entrypoint followed by `--profile sdk`. Paths and argument arrays belong to adapter configuration, never task input. Configured arguments must not contain credentials. The caller provisions a compatible runtime and its profile beforehand; this adapter never downloads, installs, or updates upstream packages.
 
+`dsh` also accepts an **array** of named services instead of one plain object — DeepSeek Harness's
+own plugin-composition role, done as a fixed, reviewed set at startup rather than runtime hot-swap:
+
+```js
+const tools = makeAgentTools({
+  dsh: [
+    { name: 'dsh.research.run', binary: 'C:/reviewed-dsh/dsh.exe', home: 'C:/dsh-home-research', provider: 'deepseek-official', model: 'research-model' },
+    { name: 'dsh.coder.run', binary: 'C:/reviewed-dsh/dsh.exe', home: 'C:/dsh-home-coder', provider: 'deepseek-official', model: 'coder-model' },
+  ],
+});
+```
+
+Each array entry requires a unique explicit `name`; duplicate names are rejected at registration.
+A single plain object (no `name` field) remains the legacy shape and still becomes `dsh.run`. An
+optional `version` field on any entry is surfaced on its tool and in the catalog below; it defaults
+to `1.0.0` when omitted.
+
+Registering one or more services also registers one shared **pure**-effect `dsh.catalog` tool,
+mirroring `sources.catalog`'s own inert-data pattern: it returns `{services: [{name, version,
+provider, model}, ...]}` for every registered service — never `binary`, `home`, or any
+environment value — so a model can discover what's available before choosing which to invoke.
+Discovery is deliberately limited to this reviewed, fixed set: registering a *new*, unreviewed
+service at call time is not supported, because `replayPlan` asserts the recorded run's registry
+digest matches the registry's current digest exactly, so a hot-swapped tool would break replay
+verification between a run and its later replay.
+
 The descriptor is `dsh.run`, version `1.0.0`, with effect `process`. A task input is:
 
 ```json
