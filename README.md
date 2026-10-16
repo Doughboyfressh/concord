@@ -28,6 +28,18 @@ The example also contains TypeSafe configuration; remove unused sections rather 
 
 Chat evidence and snapshots persist under the printed local store. This version does not automatically resume interrupted tool effects or reconstruct old sessions into a new process. Preserve local run evidence for audit/replay.
 
+## Connect an MCP client
+
+```powershell
+node src/mcp.mjs --workspace C:/path/to/your/project
+```
+
+Any MCP client (Claude Code, Claude Desktop, or another MCP-speaking provider) can connect over stdio to
+call Concord's tools directly, read its 12 reviewed source instructions as resources, and hold a chat
+session through five `concord_*` tools backed by the same `createChatHarness` the HTTP interface uses. See
+[the MCP server](docs/mcp.md) for the exact client configuration and how write/network/process approval
+surfaces through a protocol with no native "pending" primitive.
+
 ## Verify the execution kernel
 
 ```powershell
@@ -98,6 +110,6 @@ API callers must provide a fully qualified canonical real workspace path and pin
 
 ## Project map
 
-`src/engine.mjs` owns compilation, execution and replay. `src/value.mjs` owns values/schemas. Builtins provide verification, skill ranking, memory candidates and file effects. Source tools snapshot inert skills. Capability tools search the inventory. Integrations and workers own external transports. On top of that kernel, `src/chat-context.mjs` assembles the twelve reviewed instruction modules each turn (see [source-derived instructions](docs/chat-instructions.md)), `src/chat.mjs` is the session broker that proposes, blocks, approves and replays (see [chat sessions](docs/chat-session.md)), and `src/server.mjs` plus `app/` are the local HTTP interface (see [the local interface](docs/chat-ui.md)). [The architecture artifact](plans/concord/index.html) predates the chat layer and exports only the kernel/transport/source annotations below it; it has not been regenerated since.
+`src/engine.mjs` owns compilation, execution and replay. `src/value.mjs` owns values/schemas. Builtins provide verification, skill ranking, memory candidates and file effects. Source tools snapshot inert skills. Capability tools search the inventory. Integrations and workers own external transports. On top of that kernel, `src/chat-context.mjs` assembles the twelve reviewed instruction modules each turn (see [source-derived instructions](docs/chat-instructions.md)), `src/chat.mjs` is the session broker that proposes, blocks, approves and replays (see [chat sessions](docs/chat-session.md)), `src/server.mjs` plus `app/` are the local HTTP interface (see [the local interface](docs/chat-ui.md)), and `src/mcp.mjs` is a third transport — a hand-rolled stdio [MCP server](docs/mcp.md) so external MCP clients can call Concord's tools, read its reviewed instructions as resources, and drive the same chat harness. [The architecture artifact](plans/concord/index.html) predates the chat layer and exports only the kernel/transport/source annotations below it; it has not been regenerated since.
 
 Tests cover local HTTP, fixture subprocesses, policy/approval changes, tampered and rehashed traces, pointers, links, credentials, deadlines and output bounds. The test runner selects Concord's tests explicitly and never discovers tests in downloaded source trees. See [validation evidence](docs/validation.md).
