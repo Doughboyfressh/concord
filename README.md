@@ -59,7 +59,7 @@ The demo selects skills with deterministic scoring, checks a postcondition, prop
 | [awesome-cyber-skills](https://github.com/joe-shenouda/awesome-cyber-skills) | Searchable security skill corpus |
 | [Awesome-Hacking](https://github.com/Hack-with-Github/Awesome-Hacking) | Categorized security references and labs |
 
-Exact audited revisions and license boundaries are in [sources.lock.json](sources.lock.json). Original source trees and ZIP archives are under `upstream/`, with acquisition metadata and per-file SHA-256 inventory. Git history, Git LFS object payloads, submodule contents and linked external services are not part of GitHub source archives. Symbolic links are retained as inert text and disclosed in the manifest; original ZIPs retain their source representation.
+Exact audited revisions and license boundaries are in [sources.lock.json](sources.lock.json). Original source trees and ZIP archives are under `upstream/` after you run `./scripts/acquire-upstreams.ps1` (see [source intake](docs/source-intake.md)); `upstream/` is git-ignored and is not part of a fresh clone, with acquisition metadata and per-file SHA-256 inventory written alongside it once acquired. Git history, Git LFS object payloads, submodule contents and linked external services are not part of GitHub source archives. Symbolic links are retained as inert text and disclosed in the manifest; original ZIPs retain their source representation.
 
 After acquisition, [capabilities.lock.json](capabilities.lock.json) indexes skills, agents, commands, plugins and documentation headings from every source tree. Entries are inert, unreviewed source material; search never executes them.
 
@@ -98,6 +98,6 @@ API callers must provide a fully qualified canonical real workspace path and pin
 
 ## Project map
 
-`src/engine.mjs` owns compilation, execution and replay. `src/value.mjs` owns values/schemas. Builtins provide verification, skill ranking, memory candidates and file effects. Source tools snapshot inert skills. Capability tools search the inventory. Integrations and workers own external transports. [The architecture artifact](plans/concord/index.html) exports annotations.
+`src/engine.mjs` owns compilation, execution and replay. `src/value.mjs` owns values/schemas. Builtins provide verification, skill ranking, memory candidates and file effects. Source tools snapshot inert skills. Capability tools search the inventory. Integrations and workers own external transports. On top of that kernel, `src/chat-context.mjs` assembles the twelve reviewed instruction modules each turn (see [source-derived instructions](docs/chat-instructions.md)), `src/chat.mjs` is the session broker that proposes, blocks, approves and replays (see [chat sessions](docs/chat-session.md)), and `src/server.mjs` plus `app/` are the local HTTP interface (see [the local interface](docs/chat-ui.md)). [The architecture artifact](plans/concord/index.html) predates the chat layer and exports only the kernel/transport/source annotations below it; it has not been regenerated since.
 
 Tests cover local HTTP, fixture subprocesses, policy/approval changes, tampered and rehashed traces, pointers, links, credentials, deadlines and output bounds. The test runner selects Concord's tests explicitly and never discovers tests in downloaded source trees. See [validation evidence](docs/validation.md).
