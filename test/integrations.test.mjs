@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, writeFile, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, realpath, readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeIntegrationTools } from '../src/integrations.mjs';
@@ -39,6 +40,19 @@ async function processFixture(source, fn) {
   finally { await rm(directory, { recursive: true, force: true }); }
 }
 const worker = (config, extra = {}) => makeIntegrationTools({ workers: [{ ...config, ...extra }] })[0];
+const executableSha256 = createHash('sha256').update(await readFile(executable)).digest('hex');
+const run = (config, extra = {}) => makeIntegrationTools({ processes: [{ ...config, executableSha256, ...extra }] })[0];
+async function runFixture(source, fn) {
+  const directory = await mkdtemp(join(tmpdir(), 'concord-integrations-run-'));
+  const script = join(directory, 'run.mjs');
+  await writeFile(script, source, 'utf8');
+  const config = { name: 'fixture.process', version: 'fixture-1', executable, args: [script], timeoutMs: 5000 };
+  try { return await fn(config, { workspaceRoot: directory, policy: { allowedEffects: ['process'] } }, directory); }
+  finally { await rm(directory, { recursive: true, force: true }); }
+}
+function registry(origin, extra = {}) {
+  return makeIntegrationTools({ registry: { origin, apiKeyEnv: credentialName, ...extra } })[0];
+}
 
 test('registration is data-only and rejects aliases, inline credentials, names and unsafe paths', () => {
   const config = { origin: 'https://api.typesafe.ai', model: 'jev-1.13.0', apiKeyEnv: 'MISSING_TEST_KEY' };
@@ -237,4 +251,163 @@ test('duplicate names and malformed fixed arguments are rejected', () => {
   const config = { name: 'worker', version: '1', executable, args: [] };
   assert.throws(() => makeIntegrationTools({ workers: [config, config] }), checkCode('INTEGRATION_CONFIG'));
   assert.throws(() => worker(config, { args: ['valid', 12] }), checkCode('INTEGRATION_CONFIG'));
+});
+
+// Regression for a confirmed security review finding: a credential-shaped value under a
+// non-keyword env key name (e.g. CONFIG_FLAG set to an AWS access key) must be caught by
+// value pattern, not only by the "token/password/secret/apikey" key-name heuristic.
+const awsKeyLookingValue = 'AKIAIOSFODNN7EXAMPLE';
+
+test('a credential-shaped literal env value under an innocuous key name is rejected at worker/process.run registration', () => {
+  assert.throws(() => worker({ name: 'worker', version: '1', executable, args: [] }, { env: { CONFIG_FLAG: awsKeyLookingValue } }), checkCode('INTEGRATION_CONFIG'));
+  assert.throws(() => run({ name: 'run', version: '1', executable, args: [] }, { env: { CONFIG_FLAG: awsKeyLookingValue } }), checkCode('INTEGRATION_CONFIG'));
+});
+
+test('a credential-shaped value reaching the child via allowedEnv under an innocuous name is still redacted if echoed', async () => {
+  await processFixture('process.stdout.write(JSON.stringify({ value: process.env.CONFIG_FLAG ?? null }))', async (config, context) => {
+    const previous = process.env.CONFIG_FLAG;
+    process.env.CONFIG_FLAG = awsKeyLookingValue;
+    try { await assert.rejects(worker(config, { allowedEnv: ['CONFIG_FLAG'] }).execute({}, context), checkCode('INTEGRATION_SECRET')); }
+    finally { if (previous === undefined) delete process.env.CONFIG_FLAG; else process.env.CONFIG_FLAG = previous; }
+  });
+  await runFixture('process.stdout.write(process.env.CONFIG_FLAG ?? "")', async (config, context) => {
+    const previous = process.env.CONFIG_FLAG;
+    process.env.CONFIG_FLAG = awsKeyLookingValue;
+    try { await assert.rejects(run(config, { allowedEnv: ['CONFIG_FLAG'] }).execute({}, context), checkCode('INTEGRATION_SECRET')); }
+    finally { if (previous === undefined) delete process.env.CONFIG_FLAG; else process.env.CONFIG_FLAG = previous; }
+  });
+});
+
+test('an allowed ambient value that merely resembles the real value, not a known credential shape, is still delivered unredacted', async () => {
+  // Regression guard the other direction: the existing intentional-echo test must keep working —
+  // a plain, non-credential-shaped allowed value should never be caught by the broadened check.
+  await processFixture('process.stdout.write(JSON.stringify({ value: process.env.CONFIG_FLAG ?? null }))', async (config, context) => {
+    const previous = process.env.CONFIG_FLAG;
+    process.env.CONFIG_FLAG = 'plainly-not-a-credential';
+    try {
+      const result = await worker(config, { allowedEnv: ['CONFIG_FLAG'] }).execute({}, context);
+      assert.deepEqual(result, { value: 'plainly-not-a-credential' });
+    } finally { if (previous === undefined) delete process.env.CONFIG_FLAG; else process.env.CONFIG_FLAG = previous; }
+  });
+});
+
+test('process.run registration rejects a relative executable, non-array args, credential-named env, and requires an exact digest', () => {
+  const base = { name: 'run', version: '1', executable, args: [], executableSha256 };
+  assert.throws(() => makeIntegrationTools({ processes: [{ ...base, executable: 'node' }] }), checkCode('INTEGRATION_CONFIG'));
+  assert.throws(() => makeIntegrationTools({ processes: [{ ...base, args: ['ok', 12] }] }), checkCode('INTEGRATION_CONFIG'));
+  assert.throws(() => makeIntegrationTools({ processes: [{ ...base, env: { API_KEY: token } }] }), checkCode('INTEGRATION_CONFIG'));
+  assert.throws(() => makeIntegrationTools({ processes: [{ name: 'run', version: '1', executable, args: [] }] }), checkCode('INTEGRATION_CONFIG'));
+  assert.throws(() => makeIntegrationTools({ processes: [base, base] }), checkCode('INTEGRATION_CONFIG'));
+  const tool = makeIntegrationTools({ processes: [base] })[0];
+  assert.equal(tool.effect, 'process');
+  assert.ok(Object.isFrozen(tool.config));
+});
+
+test('process.run captures exact stdout, stderr, and exit code; task input never reaches argv', async () => {
+  await runFixture('process.stdout.write("out-line\\n"); process.stderr.write("err-line\\n");', async (config, context) => {
+    const a = await run(config).execute({}, context);
+    const b = await run(config).execute({ ignored: 'anything, even shell; $() syntax' }, context);
+    assert.deepEqual(a, { exitCode: 0, signal: null, stdout: 'out-line\n', stderr: 'err-line\n' });
+    assert.deepEqual(b, a);
+  });
+});
+
+test('process.run surfaces a nonzero exit as a distinct, structured failure', async () => {
+  await runFixture('process.exitCode = 3;', async (config, context) => {
+    await assert.rejects(run(config).execute({}, context), checkCode('INTEGRATION_EXIT'));
+  });
+});
+
+test('process.run bounds combined stdout/stderr output and rejects non-UTF-8 output', async () => {
+  await runFixture('process.stdout.write("x".repeat(1024)); process.stderr.write("y".repeat(1024));', async (config, context) => {
+    await assert.rejects(run(config, { maxOutputBytes: 64 }).execute({}, context), checkCode('INTEGRATION_OUTPUT_LIMIT'));
+  });
+  await runFixture('process.stdout.write(Buffer.from([0xff, 0xfe, 0x80]));', async (config, context) => {
+    await assert.rejects(run(config).execute({}, context), checkCode('INTEGRATION_OUTPUT'));
+  });
+});
+
+test('process.run timeout, cancellation, missing executable, and digest mismatch are bounded', async () => {
+  await runFixture('setInterval(() => {}, 1000)', async (config, context) => {
+    await assert.rejects(run(config, { timeoutMs: 50 }).execute({}, context), checkCode('INTEGRATION_TIMEOUT'));
+    const controller = new AbortController();
+    const pending = run(config).execute({}, { ...context, signal: controller.signal });
+    setTimeout(() => controller.abort(), 25);
+    await assert.rejects(pending, checkCode('INTEGRATION_ABORTED'));
+    await assert.rejects(run(config, { executable: join(context.workspaceRoot, 'missing.exe') }).execute({}, context), checkCode('INTEGRATION_PATH'));
+    await assert.rejects(run(config, { executableSha256: '0'.repeat(64) }).execute({}, context), checkCode('INTEGRATION_EXECUTABLE'));
+  });
+});
+
+test('process.run cwd cannot escape the workspace', async () => {
+  await runFixture('process.stdout.write("")', async (config, context) => {
+    await assert.rejects(run(config, { cwd: '..' }).execute({}, context), checkCode('INTEGRATION_CWD'));
+  });
+});
+
+test('process.run passes only named ambient values and refuses echoed credentials', async () => {
+  await runFixture('process.stdout.write(process.env.CONCORD_RUN_SELECTED ?? "")', async (config, context) => {
+    const previousSelected = process.env.CONCORD_RUN_SELECTED;
+    process.env.CONCORD_RUN_SELECTED = 'explicitly-selected';
+    try {
+      const result = await run(config, { allowedEnv: ['CONCORD_RUN_SELECTED'] }).execute({}, context);
+      assert.equal(result.stdout, 'explicitly-selected');
+    } finally {
+      if (previousSelected === undefined) delete process.env.CONCORD_RUN_SELECTED; else process.env.CONCORD_RUN_SELECTED = previousSelected;
+    }
+  });
+  await runFixture('process.stdout.write(process.env.CONCORD_RUN_TOKEN ?? "")', async (config, context) => {
+    const previousToken = process.env.CONCORD_RUN_TOKEN;
+    process.env.CONCORD_RUN_TOKEN = token;
+    try { await assert.rejects(run(config, { allowedEnv: ['CONCORD_RUN_TOKEN'] }).execute({}, context), checkCode('INTEGRATION_SECRET')); }
+    finally { if (previousToken === undefined) delete process.env.CONCORD_RUN_TOKEN; else process.env.CONCORD_RUN_TOKEN = previousToken; }
+  });
+});
+
+const components = { components: [{ name: 'accordion', registryPath: 'r/shadcn/accordion', dependencies: ['radix-ui'] }] };
+
+test('the UI component registry client makes a real bounded local HTTP request and enforces a real response schema', async () => {
+  let received;
+  await httpFixture(async (request, response) => {
+    assert.equal(request.url, '/v1/components/search');
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    received = JSON.parse(Buffer.concat(chunks));
+    response.end(JSON.stringify(components));
+  }, async origin => {
+    const result = await registry(origin).execute({ query: 'accordion' }, networkContext(origin));
+    assert.deepEqual(result, components);
+  });
+  assert.deepEqual(received, { query: 'accordion', limit: 10 });
+});
+
+test('the registry client rejects a response that is not a real schema-conforming component list', async () => {
+  for (const bad of [
+    { components: 'not an array' },
+    { components: [{ registryPath: 'r/x' }] },
+    { components: [{ name: 'x', registryPath: 'r/x', dependencies: [1, 2] }] },
+    { components: [{ name: 'x', registryPath: 'r/x' }, { name: 'y', registryPath: 'r/y' }, { name: 'z', registryPath: 'r/z' }] },
+  ]) {
+    await httpFixture((request, response) => response.end(JSON.stringify(bad)), async origin => {
+      await assert.rejects(registry(origin).execute({ query: 'x', limit: 2 }, networkContext(origin)), checkCode('INTEGRATION_OUTPUT'));
+    });
+  }
+});
+
+test('the registry client rejects an empty or overlong query before any request is made', async () => {
+  let hits = 0;
+  await httpFixture(() => { hits++; }, async origin => {
+    await assert.rejects(registry(origin).execute({ query: '' }, networkContext(origin)), () => true);
+    await assert.rejects(registry(origin).execute({ query: 'x'.repeat(5000) }, networkContext(origin)), () => true);
+  });
+  assert.equal(hits, 0);
+});
+
+test('the registry client enforces the exact-origin allowlist and rejects credential echoes', async () => {
+  await httpFixture((request, response) => response.end(JSON.stringify(components)), async origin => {
+    await assert.rejects(registry(origin).execute({ query: 'x' }, networkContext(`${origin}/`)), checkCode('INTEGRATION_ORIGIN'));
+  });
+  await httpFixture((request, response) => response.end(JSON.stringify({ components: [], echoed: token })), async origin => {
+    await assert.rejects(registry(origin).execute({ query: 'x' }, networkContext(origin)), checkCode('INTEGRATION_SECRET'));
+  });
 });

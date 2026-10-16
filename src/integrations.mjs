@@ -12,6 +12,19 @@ const MAX_INPUT = 32 * 1_048_576;
 const objectSchema = { type: 'object' };
 const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const toolName = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
+const sensitiveName = /token|password|secret|api_?key/i;
+// A credential-shaped value under a non-keyword name (e.g. config.env.CONFIG_FLAG set to an
+// AWS access key) would otherwise bypass both the "no credentials in literal env" registration
+// check and the runtime echo-rejection, since both were keyed only on the variable name.
+const sensitiveValuePatterns = [
+  /^AKIA[0-9A-Z]{16}$/, // AWS access key ID
+  /-----BEGIN (?:RSA |EC |OPENSSH |DSA |)PRIVATE KEY-----/, // PEM private key block
+  /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/, // JWT
+  /:\/\/[^\s:@/]+:[^\s:@/]+@/, // basic-auth-in-URL (user:pass@host)
+];
+function looksLikeSecret(key, value) {
+  return sensitiveName.test(key) || (typeof value === 'string' && sensitiveValuePatterns.some((p) => p.test(value)));
+}
 
 function fail(code, message) { throw new HarnessError(code, message); }
 function positive(value, fallback, label) {
@@ -148,11 +161,10 @@ async function postJson(config, input, context) {
   });
 }
 
-function networkSettings(value, defaultName, defaultPath) {
-  keys(value, ['name', 'origin', 'model', 'apiKeyEnv', 'path', 'timeoutMs', 'maxOutputBytes'], 'network');
+function baseNetworkSettings(value, allowedFields, defaultName, defaultPath) {
+  keys(value, allowedFields, 'network');
   const config = settings(value, defaultName);
   config.origin = origin(config.origin);
-  config.model = text(config.model, 'model');
   config.apiKeyEnv = text(config.apiKeyEnv, 'apiKeyEnv');
   if (!envName.test(config.apiKeyEnv)) fail('INTEGRATION_CONFIG', 'Invalid credential environment variable name');
   config.path = config.path ?? defaultPath;
@@ -161,6 +173,11 @@ function networkSettings(value, defaultName, defaultPath) {
       new URL(config.path, `${config.origin}/`).origin !== config.origin) {
     fail('INTEGRATION_CONFIG', 'Integration endpoint must be an absolute path on the configured origin');
   }
+  return config;
+}
+function networkSettings(value, defaultName, defaultPath) {
+  const config = baseNetworkSettings(value, ['name', 'origin', 'model', 'apiKeyEnv', 'path', 'timeoutMs', 'maxOutputBytes'], defaultName, defaultPath);
+  config.model = text(config.model, 'model');
   return config;
 }
 
@@ -250,6 +267,41 @@ function model(value) {
   };
 }
 
+/**
+ * A UI component registry client (21st-style). This is Concord's own defined
+ * request/response contract, fixture-tested only; real 21st.dev wire compatibility
+ * is unverified. Never a bare passthrough — every returned component entry is
+ * schema-checked before this returns.
+ */
+function registryClient(value) {
+  const config = baseNetworkSettings(value, ['name', 'origin', 'apiKeyEnv', 'path', 'timeoutMs', 'maxOutputBytes'], 'ui.components.search', '/v1/components/search');
+  const inputSchema = {
+    type: 'object', required: ['query'], additionalProperties: false,
+    properties: { query: { type: 'string', minLength: 1, maxLength: 4096 }, limit: { type: 'integer', minimum: 1, maximum: 50 } },
+  };
+  return {
+    name: config.name, version: '1', effect: 'network', inputSchema, config,
+    async execute(input, context) {
+      validateSchema(input, inputSchema);
+      const limit = input.limit ?? 10;
+      const result = await postJson(config, { query: input.query, limit }, context);
+      if (!result || !Array.isArray(result.components) || result.components.length > limit) {
+        fail('INTEGRATION_OUTPUT', 'Component registry response does not match the pinned request');
+      }
+      for (const component of result.components) {
+        if (!component || typeof component !== 'object' || Array.isArray(component) ||
+            typeof component.name !== 'string' || !component.name ||
+            typeof component.registryPath !== 'string' || !component.registryPath ||
+            (component.dependencies !== undefined && (!Array.isArray(component.dependencies) ||
+              component.dependencies.length > 100 || component.dependencies.some((d) => typeof d !== 'string')))) {
+          fail('INTEGRATION_OUTPUT', 'Component registry returned a malformed component entry');
+        }
+      }
+      return result;
+    },
+  };
+}
+
 function contained(root, target) {
   const path = relative(root, target);
   return path === '' || (path !== '..' && !path.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) && !isAbsolute(path));
@@ -268,7 +320,7 @@ function worker(value) {
   config.env = config.env ?? {};
   config.allowedEnv = config.allowedEnv ?? [];
   if (!config.env || Array.isArray(config.env) || typeof config.env !== 'object' ||
-      Object.entries(config.env).some(([key, value]) => !envName.test(key) || typeof value !== 'string' || value.includes('\0') || /token|password|secret|api_?key/i.test(key))) {
+      Object.entries(config.env).some(([key, value]) => !envName.test(key) || typeof value !== 'string' || value.includes('\0') || looksLikeSecret(key, value))) {
     fail('INTEGRATION_CONFIG', 'Worker literal env must contain noncredential string values');
   }
   if (!Array.isArray(config.allowedEnv) || config.allowedEnv.some(key => !envName.test(key))) fail('INTEGRATION_CONFIG', 'Worker allowedEnv must list environment names');
@@ -295,7 +347,7 @@ function worker(value) {
       if (context?.signal?.aborted) fail('INTEGRATION_ABORTED', 'Worker was cancelled');
       const env = { ...config.env };
       for (const key of config.allowedEnv) if (process.env[key] !== undefined) env[key] = process.env[key];
-      const secrets = Object.entries(env).filter(([key]) => /token|password|secret|api_?key/i.test(key)).map(([, value]) => value);
+      const secrets = Object.entries(env).filter(([key, value]) => looksLikeSecret(key, value)).map(([, value]) => value);
       return new Promise((resolveWorker, reject) => {
         const child = spawn(executable, config.args, { cwd, env, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
         let outcome;
@@ -338,15 +390,109 @@ function worker(value) {
   };
 }
 
+/**
+ * A generic bounded local-command runner (Orca-style), sibling to worker() but for
+ * raw stdout/stderr/exit-code capture instead of a single-JSON-document protocol.
+ * Task input is never read — argv comes only from this reviewed configuration, never
+ * from a plan. executableSha256 is mandatory here (optional on worker()) because this
+ * accepts arbitrary reviewed commands, not one pinned protocol binary.
+ */
+function processRun(value) {
+  keys(value, ['name', 'version', 'executable', 'args', 'cwd', 'env', 'allowedEnv', 'executableSha256', 'timeoutMs', 'maxOutputBytes'], 'process');
+  const config = settings(value, undefined);
+  config.version = text(config.version, 'process version');
+  config.executable = text(config.executable, 'process executable');
+  if (!isAbsolute(config.executable)) fail('INTEGRATION_CONFIG', 'Process executable must be an absolute path');
+  config.args = config.args ?? [];
+  if (!Array.isArray(config.args) || config.args.some(arg => typeof arg !== 'string' || arg.includes('\0'))) fail('INTEGRATION_CONFIG', 'Process args must be fixed strings');
+  config.cwd = text(config.cwd ?? '.', 'process cwd');
+  if (isAbsolute(config.cwd)) fail('INTEGRATION_CONFIG', 'Process cwd must be relative to the workspace');
+  config.env = config.env ?? {};
+  config.allowedEnv = config.allowedEnv ?? [];
+  if (!config.env || Array.isArray(config.env) || typeof config.env !== 'object' ||
+      Object.entries(config.env).some(([key, value]) => !envName.test(key) || typeof value !== 'string' || value.includes('\0') || looksLikeSecret(key, value))) {
+    fail('INTEGRATION_CONFIG', 'Process literal env must contain noncredential string values');
+  }
+  if (!Array.isArray(config.allowedEnv) || config.allowedEnv.some(key => !envName.test(key))) fail('INTEGRATION_CONFIG', 'Process allowedEnv must list environment names');
+  if (!/^[a-f0-9]{64}$/.test(config.executableSha256 ?? '')) fail('INTEGRATION_CONFIG', 'process.run requires an exact executable digest');
+  return {
+    name: config.name, version: config.version, effect: 'process', inputSchema: objectSchema, config,
+    async execute(input, context) {
+      validateSchema(input, objectSchema);
+      const bound = limits(config, context, config.name, 'process');
+      let executable, cwd;
+      try {
+        executable = await realpath(config.executable);
+        if (resolve(executable) !== resolve(config.executable) || !(await stat(executable)).isFile()) fail('INTEGRATION_EXECUTABLE', 'Process executable must be an existing regular file without path aliases');
+        const root = await realpath(context.workspaceRoot);
+        cwd = await realpath(resolve(root, config.cwd));
+        if (!contained(root, cwd) || !(await stat(cwd)).isDirectory()) fail('INTEGRATION_CWD', 'Process cwd must remain inside the workspace');
+        if (createHash('sha256').update(await readFile(executable)).digest('hex') !== config.executableSha256) fail('INTEGRATION_EXECUTABLE', 'Process executable digest does not match');
+      } catch (error) {
+        if (error instanceof HarnessError) throw error;
+        fail('INTEGRATION_PATH', 'Process executable or working directory is unavailable');
+      }
+      if (context?.signal?.aborted) fail('INTEGRATION_ABORTED', 'Process was cancelled');
+      const env = { ...config.env };
+      for (const key of config.allowedEnv) if (process.env[key] !== undefined) env[key] = process.env[key];
+      const secrets = Object.entries(env).filter(([key, value]) => looksLikeSecret(key, value)).map(([, value]) => value);
+      return new Promise((resolveProcess, reject) => {
+        const child = spawn(executable, config.args, { cwd, env, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+        let outcome;
+        let total = 0;
+        const stdoutChunks = [];
+        const stderrChunks = [];
+        let timer;
+        const cancelled = () => stop('INTEGRATION_ABORTED', 'Process was cancelled');
+        const stop = (code, message) => {
+          outcome ??= new HarnessError(code, message);
+          child.kill('SIGKILL');
+          child.stdout.destroy();
+          child.stderr.destroy();
+        };
+        const collect = (chunk, chunks) => {
+          total += chunk.length;
+          if (total > bound.maxOutputBytes) stop('INTEGRATION_OUTPUT_LIMIT', 'Process output exceeds the combined stdout/stderr byte limit');
+          else chunks.push(chunk);
+        };
+        child.stdout.on('data', chunk => collect(chunk, stdoutChunks));
+        child.stderr.on('data', chunk => collect(chunk, stderrChunks));
+        child.stdout.on('error', () => stop('INTEGRATION_IO', 'Process output failed'));
+        child.stderr.on('error', () => stop('INTEGRATION_IO', 'Process diagnostics failed'));
+        child.on('error', () => { outcome ??= new HarnessError('INTEGRATION_PROCESS', 'Process could not start'); });
+        child.on('close', (code, signal) => {
+          clearTimeout(timer);
+          context?.signal?.removeEventListener('abort', cancelled);
+          if (outcome) { reject(outcome); return; }
+          if (code !== 0) { reject(new HarnessError('INTEGRATION_EXIT', 'Process exited unsuccessfully')); return; }
+          let stdout, stderr;
+          try {
+            stdout = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(stdoutChunks));
+            stderr = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(stderrChunks));
+          } catch { reject(new HarnessError('INTEGRATION_OUTPUT', 'Process output must be valid UTF-8')); return; }
+          try { resolveProcess(rejectSecrets({ exitCode: code, signal: signal ?? null, stdout, stderr }, secrets)); }
+          catch (error) { reject(error); }
+        });
+        timer = setTimeout(() => stop('INTEGRATION_TIMEOUT', 'Process timed out'), bound.timeoutMs);
+        context?.signal?.addEventListener('abort', cancelled, { once: true });
+        if (context?.signal?.aborted) cancelled();
+      });
+    },
+  };
+}
+
 /** Registration is data-only. Credentials and all effects are deferred until execute. */
 export function makeIntegrationTools(config = {}) {
-  keys(config, ['typesafe', 'model', 'workers'], 'integration');
+  keys(config, ['typesafe', 'model', 'registry', 'workers', 'processes'], 'integration');
   config = json(config);
   const tools = [];
   if (config.typesafe) tools.push(typeSafe(config.typesafe));
   if (config.model) tools.push(model(config.model));
+  if (config.registry) tools.push(registryClient(config.registry));
   if (config.workers !== undefined && !Array.isArray(config.workers)) fail('INTEGRATION_CONFIG', 'workers must be an array');
   for (const value of config.workers ?? []) tools.push(worker(value));
+  if (config.processes !== undefined && !Array.isArray(config.processes)) fail('INTEGRATION_CONFIG', 'processes must be an array');
+  for (const value of config.processes ?? []) tools.push(processRun(value));
   const names = tools.map(tool => tool.name);
   if (new Set(names).size !== names.length) fail('INTEGRATION_CONFIG', 'Integration tool names must be unique');
   for (const tool of tools) {
