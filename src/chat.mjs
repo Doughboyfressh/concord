@@ -2,8 +2,14 @@ import { digest, clone, HarnessError } from './value.mjs';
 import { runPlan, replayPlan, inspectPlan } from './engine.mjs';
 
 const MODEL_TOOL = 'model.propose';
+const MAX_SKILL_EXCERPT_CHARS = 1500;
 
-function offlineDemoPlan(context, message) {
+function excerptNote(skillExcerpt) {
+  if (!skillExcerpt) return '';
+  return ` Untrusted reference skill (${skillExcerpt.sourceId}): ${skillExcerpt.title} — "${skillExcerpt.text}"`;
+}
+
+function offlineDemoPlan(context, message, skillExcerpt) {
   return {
     version: 1,
     name: 'offline-demo',
@@ -14,7 +20,7 @@ function offlineDemoPlan(context, message) {
         id: 'memory', tool: 'memory.candidate', dependsOn: ['coverage', 'capabilities'],
         input: {
           lesson: `Offline deterministic demonstration selected all ${context.sourceCoverage.length} reviewed ` +
-            'source modules and executed a pure-tool evidence plan.',
+            'source modules and executed a pure-tool evidence plan.' + excerptNote(skillExcerpt),
           evidence: [{ $task: 'coverage' }, { $task: 'capabilities' }],
         },
       },
@@ -22,10 +28,16 @@ function offlineDemoPlan(context, message) {
   };
 }
 
-function livePlan(message, context) {
+function livePlan(message, context, skillExcerpt) {
   const input = { prompt: message };
-  if (context.systemPrompt) input.system = context.systemPrompt;
+  const system = (context.systemPrompt ?? '') + excerptNote(skillExcerpt);
+  if (system) input.system = system;
   return { version: 1, name: 'live-proposal', tasks: [{ id: 'propose', tool: MODEL_TOOL, input }] };
+}
+
+/** The top kind:'skill' entry in `selected`, if any, with the path/sourceId skills.snapshot needs. */
+function topSkillMatch(selected) {
+  return (selected ?? []).find((s) => s && s.kind === 'skill' && typeof s.path === 'string' && typeof s.sourceId === 'string');
 }
 
 function blockedDetail(result) {
@@ -92,18 +104,34 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
     }
   }
 
+  async function fetchSkillExcerpt() {
+    const match = topSkillMatch(selected);
+    if (!match || !registry.has('skills.snapshot')) return null;
+    try {
+      const plan = { version: 1, name: 'skill-enrichment', tasks: [{ id: 'skill', tool: 'skills.snapshot', input: { path: match.path, sourceId: match.sourceId } }] };
+      const record = await attempt(plan);
+      if (record.status !== 'completed') return null;
+      const snapshotResult = record.result.results.skill;
+      const entrypoint = snapshotResult?.files?.find((f) => f.path === 'SKILL.md');
+      if (!entrypoint || typeof entrypoint.content !== 'string') return null;
+      // Prefer the capability index's human-readable title over the SKILL.md frontmatter's machine slug.
+      return { sourceId: match.sourceId, title: match.title ?? snapshotResult.metadata?.name, text: entrypoint.content.slice(0, MAX_SKILL_EXCERPT_CHARS) };
+    } catch { return null; } // Imported source skill text is untrusted reference material; a failed fetch never breaks the turn.
+  }
+
   async function send(message) {
     if (typeof message !== 'string' || !message.trim()) throw new HarnessError('CHAT_INPUT', 'A nonempty chat message is required');
     history.push({ role: 'user', content: message });
     const context = await buildContext({ message, history: [...history] });
     sourceCoverage = Array.isArray(context.sourceCoverage) ? [...context.sourceCoverage] : [];
     selected = Array.isArray(context.selected) ? [...context.selected] : [];
+    const skillExcerpt = await fetchSkillExcerpt();
     mode = isLive() ? 'live' : 'offline-demo';
     if (mode === 'offline-demo') {
-      adoptPlan(offlineDemoPlan(context, message));
+      adoptPlan(offlineDemoPlan(context, message, skillExcerpt));
       if (typeof context.reply === 'string' && context.reply.trim()) history.push({ role: 'assistant', content: context.reply });
     } else {
-      adoptPlan(livePlan(message, context));
+      adoptPlan(livePlan(message, context, skillExcerpt));
     }
     applyOutcome(await attempt(proposedPlan));
     return snapshot();

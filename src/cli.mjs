@@ -10,6 +10,8 @@ import { loadSourceLock, makeSourceTools } from './sources.mjs';
 import { makeIntegrationTools } from './integrations.mjs';
 import { makeAgentTools } from './workers.mjs';
 import { makeCapabilityTools } from './capabilities.mjs';
+import { makeArtifactTools } from './artifacts.mjs';
+import { makeBrowserTools } from './browser.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const usage = `Concord — evidence-bound AI harness
@@ -18,13 +20,14 @@ const usage = `Concord — evidence-bound AI harness
   node src/cli.mjs replay RUN --plan PLAN --policy POLICY [options]
   node src/cli.mjs validate PLAN --policy POLICY [options]
   node src/cli.mjs inspect RUN
-  node src/cli.mjs tools [--integrations CONFIG] [--workers CONFIG]
+  node src/cli.mjs tools [--integrations CONFIG] [--workers CONFIG] [--browser CONFIG]
   node src/cli.mjs sources
 
 Options:
   --workspace DIR     Explicit tool workspace (default: current directory)
   --integrations FILE Reviewed HTTP/process adapter configuration
   --workers FILE      Reviewed DeepSeek/Hermes worker configuration
+  --browser FILE      Reviewed browser.snapshot configuration (executable, etc.)
   --approvals FILE    JSON array of exact request hashes (run only)
   --journal FILE      Exclusive, fsynced JSONL intent/receipt log (run only)
   --root SHA256       Independent terminal commitment (replay only)
@@ -54,7 +57,7 @@ function readJson(filename) {
 function parseArgs(argv) {
   const [command = 'help', ...rest] = argv;
   const positional = [], flags = {};
-  const allowed = new Set(['policy', 'out', 'workspace', 'integrations', 'workers', 'approvals', 'journal', 'plan', 'root']);
+  const allowed = new Set(['policy', 'out', 'workspace', 'integrations', 'workers', 'browser', 'approvals', 'journal', 'plan', 'root']);
   for (let i = 0; i < rest.length; i++) {
     if (!rest[i].startsWith('--')) { positional.push(rest[i]); continue; }
     const name = rest[i].slice(2);
@@ -72,7 +75,12 @@ function runtimeLock(catalog) {
 function registryFor(catalog, flags) {
   const inventoryPath = path.join(root, 'capabilities.lock.json');
   const inventory = fs.existsSync(inventoryPath) ? readJson(inventoryPath) : undefined;
-  const tools = [...makeBuiltinTools(), ...makeSourceTools(catalog), ...makeCapabilityTools(inventory), ...makeIntegrationTools(flags.integrations ? readJson(flags.integrations) : {}), ...makeAgentTools(flags.workers ? readJson(flags.workers) : {})];
+  const tools = [
+    ...makeBuiltinTools(), ...makeSourceTools(catalog), ...makeCapabilityTools(inventory), ...makeArtifactTools(),
+    ...makeIntegrationTools(flags.integrations ? readJson(flags.integrations) : {}),
+    ...makeAgentTools(flags.workers ? readJson(flags.workers) : {}),
+    ...makeBrowserTools(flags.browser ? readJson(flags.browser) : undefined),
+  ];
   const registry = new Map();
   for (const tool of tools) {
     if (registry.has(tool.name)) throw new HarnessError('INVALID_REGISTRY', 'Duplicate tool name');
@@ -97,11 +105,11 @@ export async function main(argv = process.argv.slice(2)) {
   }
   const registry = registryFor(catalog, flags);
   if (command === 'tools') {
-    if (positional.length || Object.keys(flags).some(k => !['integrations', 'workers'].includes(k))) throw new HarnessError('CLI_USAGE', 'tools accepts adapter configuration flags only');
+    if (positional.length || Object.keys(flags).some(k => !['integrations', 'workers', 'browser'].includes(k))) throw new HarnessError('CLI_USAGE', 'tools accepts adapter configuration flags only');
     console.log(JSON.stringify(registryManifest(registry), null, 2)); return 0;
   }
   if (!['run', 'replay', 'validate'].includes(command) || positional.length !== 1 || !flags.policy || (command === 'run' && !flags.out) || (command === 'replay' && !flags.plan)) throw new HarnessError('CLI_USAGE', usage);
-  const commandFlags = { run: ['policy','out','workspace','integrations','workers','approvals','journal'], replay: ['plan','policy','workspace','integrations','workers','root'], validate: ['policy','workspace','integrations','workers'] };
+  const commandFlags = { run: ['policy','out','workspace','integrations','workers','browser','approvals','journal'], replay: ['plan','policy','workspace','integrations','workers','browser','root'], validate: ['policy','workspace','integrations','workers','browser'] };
   if (Object.keys(flags).some(k => !commandFlags[command].includes(k))) throw new HarnessError('CLI_USAGE', 'Flag does not apply to this command');
   const workspaceRoot = fs.realpathSync(path.resolve(flags.workspace ?? process.cwd()));
   const options = { plan: readJson(command === 'replay' ? flags.plan : positional[0]), policy: readJson(flags.policy), registry, sourceLock: runtimeLock(catalog), workspaceRoot };

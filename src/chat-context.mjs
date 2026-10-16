@@ -69,7 +69,7 @@ export function buildChatContext({ message, history, sourceLock, inventory, regi
     try {
       const result = search.execute({ query: message, limit: 5 }, { policy: { maxOutputBytes: 1048576 } });
       if (result && Array.isArray(result.results)) {
-        selected = result.results.map(r => ({ id: r.id, title: r.title, sourceId: r.sourceId, kind: r.kind, score: r.score }));
+        selected = result.results.map(r => ({ id: r.id, title: r.title, sourceId: r.sourceId, kind: r.kind, score: r.score, path: r.path }));
       }
     } catch { selected = []; }
   }

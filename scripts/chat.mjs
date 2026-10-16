@@ -9,6 +9,8 @@ import { makeSourceTools, loadSourceLock } from '../src/sources.mjs';
 import { makeCapabilityTools } from '../src/capabilities.mjs';
 import { makeIntegrationTools } from '../src/integrations.mjs';
 import { makeAgentTools } from '../src/workers.mjs';
+import { makeArtifactTools } from '../src/artifacts.mjs';
+import { makeBrowserTools } from '../src/browser.mjs';
 import { buildChatContext } from '../src/chat-context.mjs';
 import { createChatHarness } from '../src/chat.mjs';
 import { createServer, listenServer } from '../src/server.mjs';
@@ -29,10 +31,10 @@ function readJson(file) {
 
 async function start() {
   const flags = {};
-  const allowed = ['workspace','policy','integrations','workers','port','store'];
+  const allowed = ['workspace','policy','integrations','workers','browser','port','store'];
   for (let i = 2; i < process.argv.length; i += 2) {
     const key = process.argv[i]?.replace(/^--/, '');
-    if (!process.argv[i]?.startsWith('--') || !allowed.includes(key) || !process.argv[i + 1] || flags[key]) throw new HarnessError('CHAT_USAGE', 'Usage: node scripts/chat.mjs [--workspace DIR] [--port 8787] [--policy FILE] [--integrations FILE] [--workers FILE] [--store DIR]');
+    if (!process.argv[i]?.startsWith('--') || !allowed.includes(key) || !process.argv[i + 1] || flags[key]) throw new HarnessError('CHAT_USAGE', 'Usage: node scripts/chat.mjs [--workspace DIR] [--port 8787] [--policy FILE] [--integrations FILE] [--workers FILE] [--browser FILE] [--store DIR]');
     flags[key] = process.argv[i + 1];
   }
   const port = flags.port === undefined ? 8787 : Number(flags.port);
@@ -44,7 +46,11 @@ async function start() {
   const inventory = readJson(path.join(root, 'capabilities.lock.json'));
   const integrations = flags.integrations ? readJson(flags.integrations) : {};
   const workers = flags.workers ? readJson(flags.workers) : {};
-  const descriptors = [...makeBuiltinTools(), ...makeSourceTools(catalog), ...makeCapabilityTools(inventory), ...makeIntegrationTools(integrations), ...makeAgentTools(workers)];
+  const browser = flags.browser ? readJson(flags.browser) : undefined;
+  const descriptors = [
+    ...makeBuiltinTools(), ...makeSourceTools(catalog), ...makeCapabilityTools(inventory), ...makeArtifactTools(),
+    ...makeIntegrationTools(integrations), ...makeAgentTools(workers), ...makeBrowserTools(browser),
+  ];
   const registry = new Map(descriptors.map(d => [d.name, d]));
   if (registry.size !== descriptors.length) throw new HarnessError('CHAT_CONFIG', 'Duplicate tool name');
   const policy = flags.policy ? readJson(flags.policy) : {

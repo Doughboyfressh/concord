@@ -58,3 +58,76 @@ test('live chat proposal and file effect have separate exact grants; replay repe
     assert.equal(calls,1); assert.equal(fs.readFileSync(path.join(temp,'memory.json'),'utf8'),prior);
   } finally { fs.rmSync(temp, {recursive:true,force:true}); }
 });
+
+const SKILL_QUERY = 'Review this change for security vulnerabilities before shipping it.';
+
+test('selected retains the capability path needed to fetch a skill body', async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-chat-flow-'));
+  try {
+    const harness = setup(temp);
+    const turn = await harness.send(SKILL_QUERY);
+    const skillMatch = turn.selected.find((s) => s.kind === 'skill');
+    assert.ok(skillMatch, 'expected at least one skill-kind match for a security-review query');
+    assert.equal(typeof skillMatch.path, 'string');
+    assert.ok(skillMatch.path.endsWith('SKILL.md'));
+  } finally { fs.rmSync(temp, {recursive:true,force:true}); }
+});
+
+test('a resolvable skill match enriches the offline memory-candidate lesson with its untrusted excerpt, recorded as its own run', async () => {
+  const harness = setup(root); // the real repo root, where upstream/ is actually acquired
+  const turn = await harness.send(SKILL_QUERY);
+  assert.equal(turn.runs.length, 2, 'expected a skill-enrichment attempt plus the primary offline-demo attempt');
+  assert.equal(turn.runs[0].status, 'completed');
+  assert.equal(turn.runs.at(-1).status, 'completed');
+  const memoryTask = turn.proposedPlan.tasks.find((t) => t.id === 'memory');
+  assert.match(memoryTask.input.lesson, /Untrusted reference skill \(ecc\)/);
+  assert.match(memoryTask.input.lesson, /Security Review Skill/);
+});
+
+test('an unresolvable skill path (the default fresh-clone state) soft-fails without breaking the primary turn', async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-chat-flow-'));
+  try {
+    const harness = setup(temp); // no upstream/ under this fresh workspace
+    const turn = await harness.send(SKILL_QUERY);
+    assert.equal(turn.mode, 'offline-demo');
+    assert.ok(turn.history.some((m) => m.role === 'assistant' && m.content.length), 'the primary turn still produced a reply');
+    const memoryTask = turn.proposedPlan.tasks.find((t) => t.id === 'memory');
+    assert.doesNotMatch(memoryTask.input.lesson, /Untrusted reference skill/);
+    assert.ok(turn.runs.some((r) => r.status === 'completed'), 'the primary plan still completed');
+  } finally { fs.rmSync(temp, {recursive:true,force:true}); }
+});
+
+test('the skill-enrichment read effect never produces a pending approval', async () => {
+  const harness = setup(root);
+  const turn = await harness.send(SKILL_QUERY);
+  assert.equal(turn.pending, null);
+});
+
+test('live mode splices the untrusted skill excerpt into the system prompt only when the fetch actually succeeds', async () => {
+  let receivedSystem;
+  const model = { name: 'model.propose', version: 'fixture-1', effect: 'network', inputSchema: { type: 'object' }, config: { fixture: true },
+    execute(input) { receivedSystem = input.system; return { model: 'fixture-1', proposal: { reply: 'ok' } }; } };
+
+  const resolvable = setup(root, [model]);
+  let state = await resolvable.send(SKILL_QUERY);
+  await resolvable.approve(state.pending.requestHash); // unblocks the network effect so execute() actually runs
+  assert.match(receivedSystem, /Untrusted reference skill \(ecc\): Security Review Skill/);
+
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-chat-flow-'));
+  try {
+    const unresolvable = setup(temp, [model]);
+    state = await unresolvable.send(SKILL_QUERY);
+    await unresolvable.approve(state.pending.requestHash);
+    assert.doesNotMatch(receivedSystem, /Untrusted reference skill/);
+  } finally { fs.rmSync(temp, {recursive:true,force:true}); }
+});
+
+test('replay reproduces both the skill-enrichment run and the primary run byte-identically', async () => {
+  const harness = setup(root);
+  const turn = await harness.send(SKILL_QUERY);
+  assert.equal(turn.runs.length, 2);
+  for (const run of turn.runs) {
+    const replay = await harness.replay(run.id);
+    assert.equal(replay.replayed, true);
+  }
+});
