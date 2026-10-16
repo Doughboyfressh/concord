@@ -1,0 +1,1 @@
+{"version":1,"allowedTools":["typesafe.evaluate"],"allowedEffects":["network"],"allowedOrigins":["https://api.typesafe.ai"],"maxTasks":1,"timeoutMs":30000,"maxOutputBytes":1048576,"maxJournalBytes":16777216}
