@@ -53,6 +53,18 @@ async function runFixture(source, fn) {
 function registry(origin, extra = {}) {
   return makeIntegrationTools({ registry: { origin, apiKeyEnv: credentialName, ...extra } })[0];
 }
+async function batchFixture(sources, fn) {
+  const directory = await mkdtemp(join(tmpdir(), 'concord-integrations-batch-'));
+  const entries = [];
+  for (const [name, source] of Object.entries(sources)) {
+    const script = join(directory, `${name}.mjs`);
+    await writeFile(script, source, 'utf8');
+    entries.push({ name, version: 'fixture-1', executable, args: [script], executableSha256, timeoutMs: 5000 });
+  }
+  const [tool] = makeIntegrationTools({ processesBatch: entries });
+  try { return await fn(tool, { workspaceRoot: directory, policy: { allowedEffects: ['process'] } }, directory); }
+  finally { await rm(directory, { recursive: true, force: true }); }
+}
 
 test('registration is data-only and rejects aliases, inline credentials, names and unsafe paths', () => {
   const config = { origin: 'https://api.typesafe.ai', model: 'jev-1.13.0', apiKeyEnv: 'MISSING_TEST_KEY' };
@@ -361,6 +373,71 @@ test('process.run passes only named ambient values and refuses echoed credential
     process.env.CONCORD_RUN_TOKEN = token;
     try { await assert.rejects(run(config, { allowedEnv: ['CONCORD_RUN_TOKEN'] }).execute({}, context), checkCode('INTEGRATION_SECRET')); }
     finally { if (previousToken === undefined) delete process.env.CONCORD_RUN_TOKEN; else process.env.CONCORD_RUN_TOKEN = previousToken; }
+  });
+});
+
+test('process.runMany executes selected entries concurrently, not sequentially', async () => {
+  await batchFixture({
+    a: 'await new Promise(r => setTimeout(r, 300)); process.stdout.write("a-done");',
+    b: 'await new Promise(r => setTimeout(r, 300)); process.stdout.write("b-done");',
+  }, async (tool, context) => {
+    const start = Date.now();
+    const output = await tool.execute({ names: ['a', 'b'] }, context);
+    const elapsed = Date.now() - start;
+    assert.ok(elapsed < 550, `expected concurrent children to finish in ~300ms, took ${elapsed}ms`);
+    const byName = Object.fromEntries(output.results.map(r => [r.name, r]));
+    assert.equal(byName.a.stdout, 'a-done');
+    assert.equal(byName.b.stdout, 'b-done');
+  });
+});
+
+test('one failing or timing-out child does not suppress the others\' results', async () => {
+  await batchFixture({
+    good: 'process.stdout.write("ok");',
+    bad: 'process.exitCode = 3;',
+  }, async (tool, context) => {
+    const output = await tool.execute({ names: ['good', 'bad'] }, context);
+    const byName = Object.fromEntries(output.results.map(r => [r.name, r]));
+    assert.equal(byName.good.stdout, 'ok');
+    assert.equal(byName.bad.failed, true);
+    assert.equal(byName.bad.code, 'INTEGRATION_EXIT');
+  });
+});
+
+test('per-child output budget is the aggregate policy budget divided by the selected count', async () => {
+  await batchFixture({
+    small: 'process.stdout.write("x".repeat(100));',
+    big: 'process.stdout.write("y".repeat(600));',
+  }, async (tool, context) => {
+    const bounded = { ...context, policy: { ...context.policy, maxOutputBytes: 1000 } }; // 500 bytes/child after division
+    const output = await tool.execute({ names: ['small', 'big'] }, bounded);
+    const byName = Object.fromEntries(output.results.map(r => [r.name, r]));
+    assert.equal(byName.small.stdout, 'x'.repeat(100));
+    assert.equal(byName.big.failed, true);
+    assert.equal(byName.big.code, 'INTEGRATION_OUTPUT_LIMIT');
+  });
+});
+
+test('an unknown requested name is rejected before any process launches', async () => {
+  await batchFixture({ a: 'process.stdout.write("should not run");' }, async (tool, context) => {
+    await assert.rejects(() => tool.execute({ names: ['does-not-exist'] }, context), { code: 'SCHEMA_MISMATCH' });
+  });
+});
+
+test('abort kills every still-running child in the batch', async () => {
+  await batchFixture({
+    a: 'await new Promise(r => setTimeout(r, 5000)); process.stdout.write("should not finish");',
+    b: 'await new Promise(r => setTimeout(r, 5000)); process.stdout.write("should not finish");',
+  }, async (tool, context) => {
+    const controller = new AbortController();
+    const promise = tool.execute({ names: ['a', 'b'] }, { ...context, signal: controller.signal });
+    setTimeout(() => controller.abort(), 100);
+    const output = await promise;
+    const byName = Object.fromEntries(output.results.map(r => [r.name, r]));
+    assert.equal(byName.a.failed, true);
+    assert.equal(byName.a.code, 'INTEGRATION_ABORTED');
+    assert.equal(byName.b.failed, true);
+    assert.equal(byName.b.code, 'INTEGRATION_ABORTED');
   });
 });
 

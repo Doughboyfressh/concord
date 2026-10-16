@@ -391,13 +391,13 @@ function worker(value) {
 }
 
 /**
- * A generic bounded local-command runner (Orca-style), sibling to worker() but for
- * raw stdout/stderr/exit-code capture instead of a single-JSON-document protocol.
- * Task input is never read — argv comes only from this reviewed configuration, never
- * from a plan. executableSha256 is mandatory here (optional on worker()) because this
- * accepts arbitrary reviewed commands, not one pinned protocol binary.
+ * Validates and normalizes one reviewed process-command entry: fixed absolute executable,
+ * fixed args, contained cwd, noncredential literal env plus explicit allowedEnv passthrough,
+ * and a mandatory executable digest (unlike worker(), which accepts arbitrary reviewed
+ * commands rather than one pinned protocol binary). Shared by process.run and
+ * process.runMany so both validate identically rather than duplicating this.
  */
-function processRun(value) {
+function processConfig(value) {
   keys(value, ['name', 'version', 'executable', 'args', 'cwd', 'env', 'allowedEnv', 'executableSha256', 'timeoutMs', 'maxOutputBytes'], 'process');
   const config = settings(value, undefined);
   config.version = text(config.version, 'process version');
@@ -414,76 +414,159 @@ function processRun(value) {
     fail('INTEGRATION_CONFIG', 'Process literal env must contain noncredential string values');
   }
   if (!Array.isArray(config.allowedEnv) || config.allowedEnv.some(key => !envName.test(key))) fail('INTEGRATION_CONFIG', 'Process allowedEnv must list environment names');
-  if (!/^[a-f0-9]{64}$/.test(config.executableSha256 ?? '')) fail('INTEGRATION_CONFIG', 'process.run requires an exact executable digest');
+  if (!/^[a-f0-9]{64}$/.test(config.executableSha256 ?? '')) fail('INTEGRATION_CONFIG', 'A reviewed process entry requires an exact executable digest');
+  return config;
+}
+
+/** Resolves and digest-verifies one process entry's executable and workspace-contained cwd. */
+async function resolveExecutable(config, workspaceRoot) {
+  let executable, cwd;
+  try {
+    executable = await realpath(config.executable);
+    if (resolve(executable) !== resolve(config.executable) || !(await stat(executable)).isFile()) fail('INTEGRATION_EXECUTABLE', 'Process executable must be an existing regular file without path aliases');
+    const root = await realpath(workspaceRoot);
+    cwd = await realpath(resolve(root, config.cwd));
+    if (!contained(root, cwd) || !(await stat(cwd)).isDirectory()) fail('INTEGRATION_CWD', 'Process cwd must remain inside the workspace');
+    if (createHash('sha256').update(await readFile(executable)).digest('hex') !== config.executableSha256) fail('INTEGRATION_EXECUTABLE', 'Process executable digest does not match');
+  } catch (error) {
+    if (error instanceof HarnessError) throw error;
+    fail('INTEGRATION_PATH', 'Process executable or working directory is unavailable');
+  }
+  return { executable, cwd };
+}
+
+function processEnv(config) {
+  const env = { ...config.env };
+  for (const key of config.allowedEnv) if (process.env[key] !== undefined) env[key] = process.env[key];
+  const secrets = Object.entries(env).filter(([key, value]) => looksLikeSecret(key, value)).map(([, value]) => value);
+  return { env, secrets };
+}
+
+/** One bounded child process: spawn, collect stdout/stderr under a shared byte budget, enforce a deadline. */
+function spawnBounded({ executable, args, cwd, env, secrets, timeoutMs, maxOutputBytes, signal }) {
+  return new Promise((resolveSpawn, reject) => {
+    const child = spawn(executable, args, { cwd, env, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let outcome;
+    let total = 0;
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let timer;
+    const cancelled = () => stop('INTEGRATION_ABORTED', 'Process was cancelled');
+    const stop = (code, message) => {
+      outcome ??= new HarnessError(code, message);
+      child.kill('SIGKILL');
+      child.stdout.destroy();
+      child.stderr.destroy();
+    };
+    const collect = (chunk, chunks) => {
+      total += chunk.length;
+      if (total > maxOutputBytes) stop('INTEGRATION_OUTPUT_LIMIT', 'Process output exceeds the combined stdout/stderr byte limit');
+      else chunks.push(chunk);
+    };
+    child.stdout.on('data', chunk => collect(chunk, stdoutChunks));
+    child.stderr.on('data', chunk => collect(chunk, stderrChunks));
+    child.stdout.on('error', () => stop('INTEGRATION_IO', 'Process output failed'));
+    child.stderr.on('error', () => stop('INTEGRATION_IO', 'Process diagnostics failed'));
+    child.on('error', () => { outcome ??= new HarnessError('INTEGRATION_PROCESS', 'Process could not start'); });
+    child.on('close', (code, sig) => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', cancelled);
+      if (outcome) { reject(outcome); return; }
+      if (code !== 0) { reject(new HarnessError('INTEGRATION_EXIT', 'Process exited unsuccessfully')); return; }
+      let stdout, stderr;
+      try {
+        stdout = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(stdoutChunks));
+        stderr = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(stderrChunks));
+      } catch { reject(new HarnessError('INTEGRATION_OUTPUT', 'Process output must be valid UTF-8')); return; }
+      try { resolveSpawn(rejectSecrets({ exitCode: code, signal: sig ?? null, stdout, stderr }, secrets)); }
+      catch (error) { reject(error); }
+    });
+    timer = setTimeout(() => stop('INTEGRATION_TIMEOUT', 'Process timed out'), timeoutMs);
+    signal?.addEventListener('abort', cancelled, { once: true });
+    if (signal?.aborted) cancelled();
+  });
+}
+
+/**
+ * A generic bounded local-command runner (Orca-style), sibling to worker() but for
+ * raw stdout/stderr/exit-code capture instead of a single-JSON-document protocol.
+ * Task input is never read — argv comes only from this reviewed configuration, never
+ * from a plan. executableSha256 is mandatory here (optional on worker()) because this
+ * accepts arbitrary reviewed commands, not one pinned protocol binary.
+ */
+function processRun(value) {
+  const config = processConfig(value);
   return {
     name: config.name, version: config.version, effect: 'process', inputSchema: objectSchema, config,
     async execute(input, context) {
       validateSchema(input, objectSchema);
       const bound = limits(config, context, config.name, 'process');
-      let executable, cwd;
-      try {
-        executable = await realpath(config.executable);
-        if (resolve(executable) !== resolve(config.executable) || !(await stat(executable)).isFile()) fail('INTEGRATION_EXECUTABLE', 'Process executable must be an existing regular file without path aliases');
-        const root = await realpath(context.workspaceRoot);
-        cwd = await realpath(resolve(root, config.cwd));
-        if (!contained(root, cwd) || !(await stat(cwd)).isDirectory()) fail('INTEGRATION_CWD', 'Process cwd must remain inside the workspace');
-        if (createHash('sha256').update(await readFile(executable)).digest('hex') !== config.executableSha256) fail('INTEGRATION_EXECUTABLE', 'Process executable digest does not match');
-      } catch (error) {
-        if (error instanceof HarnessError) throw error;
-        fail('INTEGRATION_PATH', 'Process executable or working directory is unavailable');
-      }
+      const { executable, cwd } = await resolveExecutable(config, context.workspaceRoot);
       if (context?.signal?.aborted) fail('INTEGRATION_ABORTED', 'Process was cancelled');
-      const env = { ...config.env };
-      for (const key of config.allowedEnv) if (process.env[key] !== undefined) env[key] = process.env[key];
-      const secrets = Object.entries(env).filter(([key, value]) => looksLikeSecret(key, value)).map(([, value]) => value);
-      return new Promise((resolveProcess, reject) => {
-        const child = spawn(executable, config.args, { cwd, env, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-        let outcome;
-        let total = 0;
-        const stdoutChunks = [];
-        const stderrChunks = [];
-        let timer;
-        const cancelled = () => stop('INTEGRATION_ABORTED', 'Process was cancelled');
-        const stop = (code, message) => {
-          outcome ??= new HarnessError(code, message);
-          child.kill('SIGKILL');
-          child.stdout.destroy();
-          child.stderr.destroy();
-        };
-        const collect = (chunk, chunks) => {
-          total += chunk.length;
-          if (total > bound.maxOutputBytes) stop('INTEGRATION_OUTPUT_LIMIT', 'Process output exceeds the combined stdout/stderr byte limit');
-          else chunks.push(chunk);
-        };
-        child.stdout.on('data', chunk => collect(chunk, stdoutChunks));
-        child.stderr.on('data', chunk => collect(chunk, stderrChunks));
-        child.stdout.on('error', () => stop('INTEGRATION_IO', 'Process output failed'));
-        child.stderr.on('error', () => stop('INTEGRATION_IO', 'Process diagnostics failed'));
-        child.on('error', () => { outcome ??= new HarnessError('INTEGRATION_PROCESS', 'Process could not start'); });
-        child.on('close', (code, signal) => {
-          clearTimeout(timer);
-          context?.signal?.removeEventListener('abort', cancelled);
-          if (outcome) { reject(outcome); return; }
-          if (code !== 0) { reject(new HarnessError('INTEGRATION_EXIT', 'Process exited unsuccessfully')); return; }
-          let stdout, stderr;
-          try {
-            stdout = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(stdoutChunks));
-            stderr = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(stderrChunks));
-          } catch { reject(new HarnessError('INTEGRATION_OUTPUT', 'Process output must be valid UTF-8')); return; }
-          try { resolveProcess(rejectSecrets({ exitCode: code, signal: signal ?? null, stdout, stderr }, secrets)); }
-          catch (error) { reject(error); }
+      const { env, secrets } = processEnv(config);
+      return spawnBounded({ executable, args: config.args, cwd, env, secrets, timeoutMs: bound.timeoutMs, maxOutputBytes: bound.maxOutputBytes, signal: context?.signal });
+    },
+  };
+}
+
+/**
+ * Concurrent execution of several already-reviewed `processesBatch` entries, by name, inside
+ * one bounded process-effect call (Orca's parallel-workstream role). This is not an
+ * engine.mjs change: runPlan's own cross-task execution stays strictly sequential; the
+ * concurrency happens entirely inside this one tool's execute(), so the whole batch remains
+ * a pure function of its declared input/output and stays replay-safe. Every child outcome is
+ * returned as data, never thrown — a deliberate departure from process.run's
+ * throw-on-any-failure contract, so one failing or slow child never discards the others'
+ * evidence. Task input selects only which reviewed, named entries to run, never new argv.
+ * Each child's own output budget is the aggregate budget divided by the selected count
+ * (mirroring files.read/memory.recall's existing per-call division), and its own timeout is
+ * clamped to the tool's policy-bound timeout — so one slow child cannot starve the others,
+ * and the worst-case aggregate output can never trip the kernel's own output-limit check.
+ */
+function processRunMany(entries) {
+  if (!Array.isArray(entries) || !entries.length) fail('INTEGRATION_CONFIG', 'processesBatch requires at least one entry');
+  const byName = new Map();
+  for (const value of entries) {
+    const config = processConfig(value);
+    if (byName.has(config.name)) fail('INTEGRATION_CONFIG', 'processesBatch entry names must be unique');
+    byName.set(config.name, config);
+  }
+  const names = [...byName.keys()].sort();
+  const inputSchema = {
+    type: 'object', required: ['names'], additionalProperties: false,
+    properties: { names: { type: 'array', minItems: 1, maxItems: names.length, items: { enum: names } } },
+  };
+  const toolConfig = { name: 'process.runMany', timeoutMs: DEFAULT_TIMEOUT, maxOutputBytes: DEFAULT_OUTPUT, entries: names };
+  return {
+    name: 'process.runMany', version: '1.0.0', effect: 'process', inputSchema, config: toolConfig,
+    async execute(input, context) {
+      validateSchema(input, inputSchema);
+      const selected = [...new Set(input.names)];
+      const bound = limits(toolConfig, context, 'process.runMany', 'process');
+      const perChildBytes = Math.max(1, Math.floor(bound.maxOutputBytes / selected.length));
+      const outcomes = await Promise.allSettled(selected.map(async (name) => {
+        const config = byName.get(name);
+        const { executable, cwd } = await resolveExecutable(config, context.workspaceRoot);
+        if (context?.signal?.aborted) fail('INTEGRATION_ABORTED', 'Process was cancelled');
+        const { env, secrets } = processEnv(config);
+        const result = await spawnBounded({
+          executable, args: config.args, cwd, env, secrets, signal: context?.signal,
+          timeoutMs: Math.min(config.timeoutMs, bound.timeoutMs), maxOutputBytes: Math.min(config.maxOutputBytes, perChildBytes),
         });
-        timer = setTimeout(() => stop('INTEGRATION_TIMEOUT', 'Process timed out'), bound.timeoutMs);
-        context?.signal?.addEventListener('abort', cancelled, { once: true });
-        if (context?.signal?.aborted) cancelled();
-      });
+        return { name, ...result };
+      }));
+      return {
+        results: outcomes.map((outcome, index) => outcome.status === 'fulfilled'
+          ? outcome.value
+          : { name: selected[index], failed: true, code: outcome.reason instanceof HarnessError ? outcome.reason.code : 'INTEGRATION_PROCESS' }),
+      };
     },
   };
 }
 
 /** Registration is data-only. Credentials and all effects are deferred until execute. */
 export function makeIntegrationTools(config = {}) {
-  keys(config, ['typesafe', 'model', 'registry', 'workers', 'processes'], 'integration');
+  keys(config, ['typesafe', 'model', 'registry', 'workers', 'processes', 'processesBatch'], 'integration');
   config = json(config);
   const tools = [];
   if (config.typesafe) tools.push(typeSafe(config.typesafe));
@@ -493,6 +576,7 @@ export function makeIntegrationTools(config = {}) {
   for (const value of config.workers ?? []) tools.push(worker(value));
   if (config.processes !== undefined && !Array.isArray(config.processes)) fail('INTEGRATION_CONFIG', 'processes must be an array');
   for (const value of config.processes ?? []) tools.push(processRun(value));
+  if (config.processesBatch !== undefined) tools.push(processRunMany(config.processesBatch));
   const names = tools.map(tool => tool.name);
   if (new Set(names).size !== names.length) fail('INTEGRATION_CONFIG', 'Integration tool names must be unique');
   for (const tool of tools) {
