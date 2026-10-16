@@ -83,16 +83,17 @@ export async function discoverPageTarget(port, signal) {
 }
 
 /**
- * One bounded CDP session over one WebSocket: connect, navigate, wait for load, extract
- * text, disconnect. `stop()` is the single choke point every failure path funnels
- * through: it rejects every in-flight call, clears the pending map, and closes the
- * socket — so a page whose JS hangs forever (e.g. an infinite loop blocking the
- * renderer's main thread, which never answers a Runtime.evaluate call) cannot leave
- * this function stuck waiting on a response that will never arrive. Without this, the
- * caller's try/finally that kills the browser process and deletes its profile directory
- * would never run, leaking the process and its unauthenticated local CDP port forever.
+ * Opens one bounded CDP session over one WebSocket and exposes its raw `call(method,
+ * params)`. `stop()` is the single choke point every failure path funnels through: it
+ * rejects every in-flight call, clears the pending map, and closes the socket — so a page
+ * whose JS hangs forever (e.g. an infinite loop blocking the renderer's main thread, which
+ * never answers a Runtime.evaluate call) cannot leave a caller stuck waiting on a response
+ * that will never arrive. Without this, a caller's try/finally that kills the browser
+ * process and deletes its profile directory would never run, leaking the process and its
+ * unauthenticated local CDP port forever. Shared by every tool built on this session, so
+ * every one of them gets this guarantee identically rather than reimplementing it.
  */
-async function runCdpSession(wsUrl, url, deadline, signal, maxChars) {
+function openCdpSession(wsUrl, deadline, signal) {
   const socket = new WebSocket(wsUrl);
   let nextId = 1;
   const pending = new Map();
@@ -137,112 +138,238 @@ async function runCdpSession(wsUrl, url, deadline, signal, maxChars) {
   const onAbort = () => stop(new HarnessError('BROWSER_ABORTED', 'Browser snapshot was cancelled'));
   if (signal?.aborted) onAbort(); else signal?.addEventListener('abort', onAbort, { once: true });
 
-  try {
-    if (stopped) throw stopped;
-    await new Promise((resolveOpen, reject) => {
-      if (socket.readyState === WebSocket.OPEN) { resolveOpen(); return; }
-      socket.addEventListener('open', resolveOpen, { once: true });
-      // The shared close/error listeners above already call stop(); this just gives the
-      // open-wait itself a direct path to reject once stop() has recorded the reason.
-      const onOpenSettle = () => { if (stopped) reject(stopped); };
-      socket.addEventListener('close', onOpenSettle, { once: true });
-      socket.addEventListener('error', onOpenSettle, { once: true });
-    });
-    if (stopped) throw stopped;
+  const ready = new Promise((resolveOpen, reject) => {
+    if (socket.readyState === WebSocket.OPEN) { resolveOpen(); return; }
+    socket.addEventListener('open', resolveOpen, { once: true });
+    // The shared close/error listeners above already call stop(); this just gives the
+    // open-wait itself a direct path to reject once stop() has recorded the reason.
+    const onOpenSettle = () => { if (stopped) reject(stopped); };
+    socket.addEventListener('close', onOpenSettle, { once: true });
+    socket.addEventListener('error', onOpenSettle, { once: true });
+  });
 
-    await call('Page.navigate', { url });
+  async function close() {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
+    stop(new HarnessError('BROWSER_CDP', 'Session ended')); // No-op if already stopped; otherwise guarantees the socket closes.
+  }
+
+  return { call, ready, close, get stopped() { return stopped; } };
+}
+
+/** Connect, navigate, wait for load, extract a bounded text snapshot, disconnect. */
+async function runCdpSession(wsUrl, url, deadline, signal, maxChars) {
+  const session = openCdpSession(wsUrl, deadline, signal);
+  try {
+    if (session.stopped) throw session.stopped;
+    await session.ready;
+    if (session.stopped) throw session.stopped;
+
+    await session.call('Page.navigate', { url });
     for (;;) {
-      if (stopped) throw stopped;
-      const ready = await call('Runtime.evaluate', { expression: 'document.readyState', returnByValue: true });
+      if (session.stopped) throw session.stopped;
+      const ready = await session.call('Runtime.evaluate', { expression: 'document.readyState', returnByValue: true });
       if (ready?.result?.value === 'complete') break;
       await new Promise((r) => setTimeout(r, 100));
     }
-    const extracted = await call('Runtime.evaluate', {
+    const extracted = await session.call('Runtime.evaluate', {
       expression: `(() => ({ title: document.title, url: document.location.href, text: (document.body ? document.body.innerText : '').slice(0, ${maxChars}) }))()`,
       returnByValue: true,
     });
     const value = extracted?.result?.value;
     if (!value || typeof value !== 'object' || typeof value.text !== 'string') fail('BROWSER_CDP', 'Page snapshot had an unexpected shape');
     return { title: typeof value.title === 'string' ? value.title : '', url: typeof value.url === 'string' ? value.url : '', text: value.text };
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener('abort', onAbort);
-    stop(new HarnessError('BROWSER_CDP', 'Session ended')); // No-op if already stopped; otherwise guarantees the socket closes.
-  }
+  } finally { await session.close(); }
+}
+
+const MAX_ACTIONS = 20;
+const MAX_EXTRACT_CHARS = 20_000;
+// Fixed function bodies: caller-supplied selector/value always travel as CDP `arguments`
+// (JSON values), never interpolated into source text, so a crafted selector or value can
+// never break out of the function body (unlike the `maxChars` interpolation above, which
+// is safe only because it is a server-controlled integer, never caller text).
+const CLICK_FUNCTION = "function(sel){var el=document.querySelector(sel); if(!el) throw new Error('selector not found'); el.scrollIntoView({block:'center'}); el.click();}";
+const FILL_FUNCTION = "function(sel,val){var el=document.querySelector(sel); if(!el) throw new Error('selector not found'); el.focus(); el.value=val; el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true}));}";
+const EXISTS_FUNCTION = "function(sel){return !!document.querySelector(sel);}";
+const EXTRACT_FUNCTION = "function(sel,max){var el=sel?document.querySelector(sel):document.body; if(sel&&!el) throw new Error('selector not found'); return (el?el.innerText:'').slice(0,max);}";
+
+/**
+ * Connect, navigate, then run a bounded sequence of click/fill/wait/extract actions over
+ * one CDP session — the whole action list is the declared input and the whole result list
+ * is the output, so this stays a pure function of its input and replay-safe; nothing is
+ * session state held open across separate calls. Attaches to exactly one CDP target for the
+ * entire sequence (never re-discovers mid-script), so a hostile page's `window.open()`
+ * cannot pull the automation onto a different, unintended target.
+ */
+async function runCdpAutomation(wsUrl, url, actions, deadline, signal, maxExtractChars) {
+  const session = openCdpSession(wsUrl, deadline, signal);
+  try {
+    if (session.stopped) throw session.stopped;
+    await session.ready;
+    if (session.stopped) throw session.stopped;
+
+    await session.call('Page.navigate', { url });
+    for (;;) {
+      if (session.stopped) throw session.stopped;
+      const ready = await session.call('Runtime.evaluate', { expression: 'document.readyState', returnByValue: true });
+      if (ready?.result?.value === 'complete') break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const documentHandle = await session.call('Runtime.evaluate', { expression: 'document', returnByValue: false });
+    const documentObjectId = documentHandle?.result?.objectId;
+    if (typeof documentObjectId !== 'string') fail('BROWSER_CDP', 'Browser did not return a usable document handle');
+
+    async function callOn(functionDeclaration, args) {
+      if (session.stopped) throw session.stopped;
+      const result = await session.call('Runtime.callFunctionOn', {
+        objectId: documentObjectId, functionDeclaration, arguments: args.map((value) => ({ value })), returnByValue: true,
+      });
+      if (result?.exceptionDetails) fail('BROWSER_ACTION', String(result.exceptionDetails.exception?.description ?? 'Browser action failed'));
+      return result?.result?.value;
+    }
+
+    const results = [];
+    for (const action of actions) {
+      if (action.type === 'click') {
+        await callOn(CLICK_FUNCTION, [action.selector]);
+        results.push({ type: 'click', selector: action.selector, ok: true });
+      } else if (action.type === 'fill') {
+        await callOn(FILL_FUNCTION, [action.selector, action.value ?? '']);
+        results.push({ type: 'fill', selector: action.selector, ok: true });
+      } else if (action.type === 'wait') {
+        for (;;) {
+          if (session.stopped) throw session.stopped;
+          if (Date.now() >= deadline) fail('BROWSER_TIMEOUT', 'Browser session exceeded its time budget');
+          if (await callOn(EXISTS_FUNCTION, [action.selector])) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        results.push({ type: 'wait', selector: action.selector, ok: true });
+      } else {
+        const text = await callOn(EXTRACT_FUNCTION, [action.selector ?? null, maxExtractChars]);
+        results.push({ type: 'extract', selector: action.selector ?? null, text: typeof text === 'string' ? text : '' });
+      }
+    }
+    return { url, actions: results };
+  } finally { await session.close(); }
 }
 
 /**
+ * Launches a configured local Chrome/Chromium headless, opens one real page, discovers its
+ * CDP endpoint, hands the open WebSocket to `run(wsUrl, deadline)`, then guarantees
+ * teardown regardless of outcome. Shared by every `process`-effect browser tool so each one
+ * gets the same launch/discover/kill/profile-cleanup discipline identically.
+ */
+async function launchBrowserSession(settings, bound, context, run) {
+  const deadline = Date.now() + bound.timeoutMs;
+  let executable;
+  try {
+    executable = await realpath(settings.executable);
+    if (resolvePath(executable) !== resolvePath(settings.executable) || !(await stat(executable)).isFile()) fail('BROWSER_EXECUTABLE', 'Browser executable must be an existing regular file without path aliases');
+    if (settings.executableSha256 && createHash('sha256').update(await readFile(executable)).digest('hex') !== settings.executableSha256) fail('BROWSER_EXECUTABLE', 'Browser executable digest does not match');
+  } catch (error) {
+    if (error instanceof HarnessError) throw error;
+    fail('BROWSER_PATH', 'Browser executable is unavailable');
+  }
+  const profileDir = await mkdtemp(join(tmpdir(), 'concord-browser-'));
+  let child;
+  let result;
+  let profileCleanupFailed = false;
+  try {
+    child = spawn(executable, [
+      '--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profileDir}`,
+      '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--disable-extensions', 'about:blank',
+    ], { env: {}, shell: false, windowsHide: true, stdio: 'ignore' });
+    const started = new Promise((_, reject) => child.once('error', () => reject(new HarnessError('BROWSER_PROCESS', 'Browser could not start'))));
+    const onAbort = () => fail('BROWSER_ABORTED', 'Browser snapshot was cancelled');
+    if (context?.signal?.aborted) onAbort();
+    const port = await Promise.race([
+      waitForDevToolsPort(join(profileDir, 'DevToolsActivePort'), deadline, context?.signal),
+      started,
+    ]);
+    const wsUrl = await discoverPageTarget(port, context?.signal);
+    result = await run(wsUrl, deadline);
+    const text = JSON.stringify(result);
+    if (Buffer.byteLength(text) > bound.maxOutputBytes) fail('BROWSER_OUTPUT_LIMIT', 'Browser result exceeds the output byte limit');
+  } finally {
+    if (child) {
+      const exited = new Promise((r) => child.once('exit', r));
+      if (!child.killed) child.kill('SIGKILL');
+      // Windows releases a killed process's open file handles asynchronously;
+      // wait for the real exit (bounded) before touching its profile directory.
+      await Promise.race([exited, new Promise((r) => setTimeout(r, 3000))]);
+    }
+    profileCleanupFailed = true;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try { await rm(profileDir, { recursive: true, force: true }); profileCleanupFailed = false; break; }
+      catch { if (attempt === 2) break; await new Promise((r) => setTimeout(r, 250)); }
+    }
+  }
+  // Surfaced as evidence rather than silently discarded: a persistent cleanup failure
+  // (AV scanning, disk contention, a lingering OS-level handle) means the deleted-every-call
+  // profile-directory guarantee did not hold for this one call, even though it still succeeded.
+  return profileCleanupFailed ? { ...result, profileCleanupFailed: true } : result;
+}
+
+const actionSchema = {
+  type: 'object', additionalProperties: false, required: ['type'],
+  properties: {
+    type: { enum: ['click', 'fill', 'wait', 'extract'] },
+    selector: { type: 'string', minLength: 1, maxLength: 1024 },
+    value: { type: 'string', maxLength: 8192 },
+  },
+};
+const automateInputSchema = object({
+  url: { type: 'string', minLength: 1, maxLength: 8192 },
+  actions: { type: 'array', minItems: 1, maxItems: MAX_ACTIONS, items: actionSchema },
+});
+
+/**
  * Launches a configured local Chrome/Chromium headless, opens one real page, and returns
- * a bounded text snapshot. One call owns the browser's entire lifetime: launch, discover,
- * navigate, extract, and guaranteed teardown. No click/type/multi-step scripting in v1 —
- * this is one real capability, not a browser-automation framework. The local DevTools port
- * is unauthenticated for the lifetime of this call; any other local process that reaches it
- * during that window could attach. No real user profile or credentials are ever used — a
- * fresh, isolated profile directory is created and deleted for every call.
+ * a bounded text snapshot (`browser.snapshot`), or runs a bounded click/fill/wait/extract
+ * action sequence over the same page in one session (`browser.automate`, ego-lite's
+ * multi-step-interaction role). Each call owns the browser's entire lifetime: launch,
+ * discover, act, and guaranteed teardown — no session state is ever held open across two
+ * separate calls (see `docs/browser.md` for why: it would break replay). The local DevTools
+ * port is unauthenticated for the lifetime of a call; any other local process that reaches
+ * it during that window could attach. No real user profile or credentials are ever used — a
+ * fresh, isolated profile directory is created and deleted for every call. `fill` values are
+ * journaled as ordinary task input like any other tool's input — never type credentials
+ * through this tool.
  */
 export function makeBrowserTools(config) {
   if (config === undefined) return [];
   const settings = browserSettings(config);
-  const inputSchema = object({ url: { type: 'string', minLength: 1, maxLength: 8192 } });
-  const tool = {
-    name: settings.name, version: '1', effect: 'process', inputSchema, config: settings,
+  const snapshotSchema = object({ url: { type: 'string', minLength: 1, maxLength: 8192 } });
+  const snapshotTool = {
+    name: settings.name, version: '1', effect: 'process', inputSchema: snapshotSchema, config: settings,
     async execute(input, context) {
       let parsedUrl;
       try { parsedUrl = new URL(input.url); } catch { fail('BROWSER_INPUT', 'url must be an absolute URL'); }
       if (!['http:', 'https:'].includes(parsedUrl.protocol)) fail('BROWSER_INPUT', 'url must use http or https');
       const bound = limits(settings, context, settings.name);
-      const deadline = Date.now() + bound.timeoutMs;
-      let executable;
-      try {
-        executable = await realpath(settings.executable);
-        if (resolvePath(executable) !== resolvePath(settings.executable) || !(await stat(executable)).isFile()) fail('BROWSER_EXECUTABLE', 'Browser executable must be an existing regular file without path aliases');
-        if (settings.executableSha256 && createHash('sha256').update(await readFile(executable)).digest('hex') !== settings.executableSha256) fail('BROWSER_EXECUTABLE', 'Browser executable digest does not match');
-      } catch (error) {
-        if (error instanceof HarnessError) throw error;
-        fail('BROWSER_PATH', 'Browser executable is unavailable');
-      }
-      const profileDir = await mkdtemp(join(tmpdir(), 'concord-browser-'));
-      let child;
-      let snapshot;
-      let profileCleanupFailed = false;
-      try {
-        child = spawn(executable, [
-          '--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profileDir}`,
-          '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--disable-extensions', 'about:blank',
-        ], { env: {}, shell: false, windowsHide: true, stdio: 'ignore' });
-        const started = new Promise((_, reject) => child.once('error', () => reject(new HarnessError('BROWSER_PROCESS', 'Browser could not start'))));
-        const onAbort = () => fail('BROWSER_ABORTED', 'Browser snapshot was cancelled');
-        if (context?.signal?.aborted) onAbort();
-        const port = await Promise.race([
-          waitForDevToolsPort(join(profileDir, 'DevToolsActivePort'), deadline, context?.signal),
-          started,
-        ]);
-        const wsUrl = await discoverPageTarget(port, context?.signal);
-        snapshot = await runCdpSession(wsUrl, parsedUrl.toString(), deadline, context?.signal, Math.min(MAX_SNAPSHOT_CHARS, bound.maxOutputBytes));
-        const text = JSON.stringify(snapshot);
-        if (Buffer.byteLength(text) > bound.maxOutputBytes) fail('BROWSER_OUTPUT_LIMIT', 'Browser snapshot exceeds the output byte limit');
-      } finally {
-        if (child) {
-          const exited = new Promise((r) => child.once('exit', r));
-          if (!child.killed) child.kill('SIGKILL');
-          // Windows releases a killed process's open file handles asynchronously;
-          // wait for the real exit (bounded) before touching its profile directory.
-          await Promise.race([exited, new Promise((r) => setTimeout(r, 3000))]);
-        }
-        profileCleanupFailed = true;
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-          try { await rm(profileDir, { recursive: true, force: true }); profileCleanupFailed = false; break; }
-          catch { if (attempt === 2) break; await new Promise((r) => setTimeout(r, 250)); }
-        }
-      }
-      // Surfaced as evidence rather than silently discarded: a persistent cleanup failure
-      // (AV scanning, disk contention, a lingering OS-level handle) means the deleted-every-call
-      // profile-directory guarantee did not hold for this one call, even though it still succeeded.
-      return profileCleanupFailed ? { ...snapshot, profileCleanupFailed: true } : snapshot;
+      return launchBrowserSession(settings, bound, context, (wsUrl, deadline) =>
+        runCdpSession(wsUrl, parsedUrl.toString(), deadline, context?.signal, Math.min(MAX_SNAPSHOT_CHARS, bound.maxOutputBytes)));
     },
   };
-  Object.freeze(tool.config);
-  Object.freeze(tool.inputSchema);
-  Object.freeze(tool);
-  return [tool];
+  const automateTool = {
+    name: 'browser.automate', version: '1', effect: 'process', inputSchema: automateInputSchema, config: settings,
+    async execute(input, context) {
+      let parsedUrl;
+      try { parsedUrl = new URL(input.url); } catch { fail('BROWSER_INPUT', 'url must be an absolute URL'); }
+      if (!['http:', 'https:'].includes(parsedUrl.protocol)) fail('BROWSER_INPUT', 'url must use http or https');
+      for (const action of input.actions) {
+        if (['click', 'fill', 'wait'].includes(action.type) && typeof action.selector !== 'string') fail('BROWSER_INPUT', `"${action.type}" actions require a selector`);
+        if (action.type === 'fill' && typeof action.value !== 'string') fail('BROWSER_INPUT', '"fill" actions require a value');
+      }
+      const bound = limits(settings, context, 'browser.automate');
+      return launchBrowserSession(settings, bound, context, (wsUrl, deadline) =>
+        runCdpAutomation(wsUrl, parsedUrl.toString(), input.actions, deadline, context?.signal, Math.min(MAX_EXTRACT_CHARS, bound.maxOutputBytes)));
+    },
+  };
+  for (const tool of [snapshotTool, automateTool]) {
+    Object.freeze(tool.config);
+    Object.freeze(tool.inputSchema);
+    Object.freeze(tool);
+  }
+  return [snapshotTool, automateTool];
 }

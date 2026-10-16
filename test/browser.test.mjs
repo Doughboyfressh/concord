@@ -6,7 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { createServer } from 'node:http';
 import { makeBrowserTools, discoverPageTarget } from '../src/browser.mjs';
-import { HarnessError } from '../src/value.mjs';
+import { HarnessError, validateSchema } from '../src/value.mjs';
 
 const executable = process.execPath;
 const context = { workspaceRoot: process.cwd(), policy: { maxOutputBytes: 1048576 } };
@@ -169,5 +169,104 @@ test('two sequential real calls use independent, non-colliding profile directori
     const second = await tool.execute({ url }, context);
     assert.equal(first.title, second.title);
     assert.deepEqual(fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('concord-browser-')), []);
+  });
+});
+
+function automateTool(timeoutMs = 20000) {
+  return makeBrowserTools({ executable: realBrowser, timeoutMs }).find((t) => t.name === 'browser.automate');
+}
+
+async function formFixture(fn) {
+  const server = createServer((request, response) => {
+    response.end([
+      '<!doctype html><html><body>',
+      '<input id="name" type="text">',
+      '<button id="submit">Submit</button>',
+      '<div id="result"></div>',
+      '<div id="pwned-check">safe</div>',
+      '<script>',
+      'document.getElementById("submit").addEventListener("click", () => {',
+      '  document.getElementById("result").innerText = "Hello, " + document.getElementById("name").value;',
+      '});',
+      'setInterval(() => { document.getElementById("pwned-check").innerText = window.__pwned ? "PWNED" : "safe"; }, 20);',
+      '</script></body></html>',
+    ].join(''));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try { return await fn(`http://127.0.0.1:${server.address().port}/`); }
+  finally { await new Promise((resolve) => server.close(resolve)); }
+}
+
+async function popupFixture(fn) {
+  const server = createServer((request, response) => {
+    response.end('<!doctype html><html><body><button id="open" onclick="window.open(\'about:blank\')">Open</button><div id="status">original</div></body></html>');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try { return await fn(`http://127.0.0.1:${server.address().port}/`); }
+  finally { await new Promise((resolve) => server.close(resolve)); }
+}
+
+test('click/fill/wait actions without a selector, or fill without a value, are rejected before any process is launched', async () => {
+  const tool = automateTool();
+  await assert.rejects(tool.execute({ url: 'https://example.com/', actions: [{ type: 'click' }] }, context), (e) => e instanceof HarnessError && e.code === 'BROWSER_INPUT');
+  await assert.rejects(tool.execute({ url: 'https://example.com/', actions: [{ type: 'fill', selector: '#x' }] }, context), (e) => e instanceof HarnessError && e.code === 'BROWSER_INPUT');
+});
+
+test('an action list beyond the bounded length is rejected by the declared schema before any process would launch', () => {
+  const tool = automateTool();
+  const actions = Array.from({ length: 21 }, () => ({ type: 'extract' }));
+  assert.throws(() => validateSchema({ url: 'https://example.com/', actions }, tool.inputSchema), (e) => e instanceof HarnessError && e.code === 'SCHEMA_MISMATCH');
+});
+
+test('browser.automate fills a field, clicks a button, and extracts the resulting text', { skip: realBrowser ? false : 'no configured or auto-detected browser binary on this host' }, async () => {
+  await formFixture(async (url) => {
+    const result = await automateTool().execute({ url, actions: [
+      { type: 'fill', selector: '#name', value: 'World' },
+      { type: 'click', selector: '#submit' },
+      { type: 'extract', selector: '#result' },
+    ] }, context);
+    assert.deepEqual(result.actions[0], { type: 'fill', selector: '#name', ok: true });
+    assert.deepEqual(result.actions[1], { type: 'click', selector: '#submit', ok: true });
+    assert.equal(result.actions[2].text, 'Hello, World');
+  });
+});
+
+test('a crafted selector cannot break out of the fixed Runtime.callFunctionOn body into page script', { skip: realBrowser ? false : 'no configured or auto-detected browser binary on this host' }, async () => {
+  await formFixture(async (url) => {
+    const malicious = "x'); window.__pwned=1; //";
+    const outcome = await automateTool().execute({ url, actions: [
+      { type: 'extract', selector: malicious },
+      { type: 'extract', selector: '#pwned-check' },
+    ] }, context).catch((e) => e);
+    if (outcome instanceof HarnessError) {
+      // An invalid-selector DOMException is reported as a clean action failure, never a
+      // page-script error — proving the string was never evaluated as source text.
+      assert.equal(outcome.code, 'BROWSER_ACTION');
+    } else {
+      assert.equal(outcome.actions[1].text, 'safe');
+    }
+  });
+});
+
+test('a window.open() popup triggered mid-sequence does not pull the session onto a different target', { skip: realBrowser ? false : 'no configured or auto-detected browser binary on this host' }, async () => {
+  await popupFixture(async (url) => {
+    const result = await automateTool().execute({ url, actions: [
+      { type: 'click', selector: '#open' },
+      { type: 'extract', selector: '#status' },
+    ] }, context);
+    assert.equal(result.actions[1].text, 'original');
+    assert.equal(result.url, url);
+  });
+});
+
+test('browser.automate on a page that hangs the renderer forever still times out, kills the browser, and removes the profile directory', { skip: realBrowser ? false : 'no configured or auto-detected browser binary on this host' }, async () => {
+  await hangingPageFixture(async (url) => {
+    const tool = automateTool(3000);
+    const before = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('concord-browser-'));
+    const start = Date.now();
+    await assert.rejects(tool.execute({ url, actions: [{ type: 'extract' }] }, context), (e) => e instanceof HarnessError && ['BROWSER_TIMEOUT', 'BROWSER_CDP'].includes(e.code));
+    assert.ok(Date.now() - start < 10000, 'execute() must settle near the configured timeout, not hang indefinitely');
+    const after = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('concord-browser-'));
+    assert.deepEqual(after, before, 'no leftover profile directory after a mid-session hang');
   });
 });
