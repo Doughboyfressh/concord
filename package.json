@@ -7,7 +7,7 @@
   "engines": { "node": ">=22" },
   "bin": { "concord": "./src/cli.mjs" },
   "scripts": {
-    "test": "node --test",
+    "test": "node scripts/test.mjs",
     "check": "node scripts/check.mjs",
     "demo": "node src/cli.mjs run examples/offline.plan.json --policy examples/offline.policy.json --out runs/demo.json",
     "replay": "node src/cli.mjs replay runs/demo.json --plan examples/offline.plan.json --policy examples/offline.policy.json",

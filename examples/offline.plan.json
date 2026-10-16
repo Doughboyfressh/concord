@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "Evidence-bound engineering workflow",
+  "tasks": [
+    {"id":"10-catalog","tool":"sources.catalog","input":{}},
+    {"id":"20-rank","tool":"skills.rank","input":{"query":"deterministic replay evidence security review","skills":[{"id":"ecc-review","text":"engineering security review verification"},{"id":"replay-contract","text":"deterministic replay evidence verification"},{"id":"ui-component","text":"user interface components"}],"limit":2}},
+    {"id":"30-verify","tool":"json.assert","dependsOn":["20-rank"],"input":{"value":{"$task":"20-rank","path":"/ranked/0/id"},"schema":{"const":"replay-contract"}}},
+    {"id":"40-learn","tool":"memory.candidate","dependsOn":["10-catalog","30-verify"],"input":{"lesson":"Record external observations; verify an immutable plan and policy before promoting experience into memory.","evidence":[{"$task":"10-catalog"},{"$task":"30-verify"}]}},
+    {"id":"50-commitment","tool":"json.hash","dependsOn":["40-learn"],"input":{"$task":"40-learn"}}
+  ]
+}

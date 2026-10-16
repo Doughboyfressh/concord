@@ -3,3 +3,5 @@ runs/
 .env
 .env.*
 .agents/evidence/
+upstream/
+coverage/

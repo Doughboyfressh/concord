@@ -11,3 +11,8 @@ Adapters belong in `src/integrations.mjs`. Export `makeIntegrationTools(config)`
 Source tools belong in `src/sources.mjs`. Export `loadSourceLock(path)` and `makeSourceTools(sourceLock)` returning descriptors. A source registry records upstream provenance; it does not mean the source's full runtime is installed. Skill imports are snapshots of text/data, never executable hooks.
 
 Tests use node:test. Cross-platform CLI examples must work in PowerShell. Do not push, publish, or install global packages.
+
+## Lessons
+
+- 2026-10-15 — Build the unified chat harness from all supplied projects' features, tools, instructions and ideas; do not substitute a source catalog or DAG runner for the requested chat experience, and distinguish implemented capabilities from retained source references.
+- 2026-10-15 — Select only Concord's own test files explicitly so source acquisition never executes vendored test suites; require fully qualified workspace identities before hashing approval requests.

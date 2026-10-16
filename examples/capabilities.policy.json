@@ -1,0 +1,1 @@
+{"version":1,"allowedTools":["capabilities.search","json.hash"],"allowedEffects":["pure"],"maxOutputBytes":1048576,"maxJournalBytes":16777216}

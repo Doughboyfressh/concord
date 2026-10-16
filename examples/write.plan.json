@@ -1,0 +1,1 @@
+{"version":1,"name":"Reviewable memory promotion","tasks":[{"id":"promote","tool":"files.write","input":{"path":"approved-memory.json","content":{"version":1,"lesson":"Only promote reviewed evidence.","reviewed":true}}}]}

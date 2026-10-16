@@ -1,0 +1,1 @@
+{"version":1,"name":"Cross-source feature selection","tasks":[{"id":"research","tool":"capabilities.search","input":{"query":"browser automation security memory replay multi agent","limit":10}},{"id":"evidence","tool":"json.hash","dependsOn":["research"],"input":{"$task":"research"}}]}

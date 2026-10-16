@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "allowedTools": ["sources.catalog","skills.rank","json.assert","memory.candidate","json.hash"],
+  "allowedEffects": ["pure"],
+  "maxTasks": 20,
+  "maxOutputBytes": 1048576,
+  "maxJournalBytes": 16777216,
+  "timeoutMs": 10000
+}

@@ -1,0 +1,1 @@
+{"version":1,"allowedTools":["model.propose"],"allowedEffects":["network"],"allowedOrigins":["http://127.0.0.1:11434"],"maxTasks":1,"timeoutMs":60000,"maxOutputBytes":1048576,"maxJournalBytes":16777216}

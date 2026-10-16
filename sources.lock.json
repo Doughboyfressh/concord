@@ -28,12 +28,12 @@
       "defaultBranch": "main",
       "revision": "4cf79356509bccdead17863250b442f60a881c25",
       "mutability": "immutable-reference",
-      "roles": ["agent-runtime-reference", "orchestration-reference"],
+      "roles": ["browser-automation", "browser-context", "tool-protocol-reference"],
       "primaryLinks": ["https://github.com/citrolabs/ego-lite/tree/4cf79356509bccdead17863250b442f60a881c25", "https://github.com/citrolabs/ego-lite/blob/4cf79356509bccdead17863250b442f60a881c25/README.md"],
       "license": {"spdx": "MIT", "scope": "repository", "caveat": "Repository license does not grant access to separately operated model services or third-party integrations."},
       "integration": {"status": "catalogued", "mode": "explicit-runtime-adapter", "runtimeInstalled": false},
-      "capabilities": ["Agent runtime architecture reference"],
-      "caveats": ["An upstream agent loop is not a deterministic scheduler; model responses must be recorded as effects."]
+      "capabilities": ["Logged-in browser context sharing", "Task spaces, page snapshots, screenshots, inputs, CDP and HTTP helpers", "Document-bound element references and site learnings"],
+      "caveats": ["The public helper requires its separately installed browser host.", "Mutable site learnings and page/document identity must be captured as observations.", "Windows availability is not verified; pinned upstream documents disagree on availability."]
     },
     {
       "id": "rea",
@@ -110,7 +110,7 @@
       "primaryLinks": ["https://github.com/stablyai/orca/tree/7909e72d2da494697fd519a70543e09fee5b50a6", "https://github.com/stablyai/orca/blob/7909e72d2da494697fd519a70543e09fee5b50a6/README.md"],
       "license": {"spdx": "MIT", "scope": "repository", "caveat": "Browser dependencies, remote services, and target applications retain their own licenses and access requirements."},
       "integration": {"status": "catalogued", "mode": "explicit-browser-adapter", "runtimeInstalled": false},
-      "capabilities": ["Browser automation and testing tooling"],
+      "capabilities": ["Agent development environment with isolated worktrees", "Terminal, browser, desktop, mobile and SSH surfaces", "Code review and experimental task/worker orchestration"],
       "caveats": ["Browser state and remote pages are external effects; installation and live browser control are not implied by this catalog."]
     },
     {
@@ -124,7 +124,7 @@
       "primaryLinks": ["https://docs.typesafe.ai/introduction"],
       "license": {"spdx": null, "scope": "hosted-documentation", "caveat": "Documentation, hosted service access, and SDK code may have different terms; no redistribution or installation rights are inferred from this URL."},
       "integration": {"status": "catalogued", "mode": "documentation-reference", "runtimeInstalled": false},
-      "capabilities": ["Primary documentation reference for Typesafe"],
+      "capabilities": ["Typed choice, score and yes/no judgments", "Probability distributions and confidence for applicable question types", "Versioned structured evaluation API"],
       "caveats": ["The trailing comma in the supplied documentation URL was normalized as punctuation.", "This entry records an unpinned URL, not a vendored SDK or captured document body."]
     },
     {
@@ -140,7 +140,7 @@
       "primaryLinks": ["https://github.com/NousResearch/hermes-agent/tree/4e59ac2b883b4133ea8a2d299abac45189781c09", "https://github.com/NousResearch/hermes-agent/blob/4e59ac2b883b4133ea8a2d299abac45189781c09/README.md"],
       "license": {"spdx": "MIT", "scope": "repository", "caveat": "Model providers, external tools, and contributed skills may impose separate terms and licenses."},
       "integration": {"status": "catalogued", "mode": "explicit-runtime-adapter", "runtimeInstalled": false},
-      "capabilities": ["Agent runtime, memory, and reusable skills reference"],
+      "capabilities": ["Persistent agents, learning, memory and reusable skills", "Delegation, scheduling, channels and multiple terminal backends", "ACP and batch evaluation interfaces"],
       "caveats": ["Adaptive memory and newly generated skills require explicit versioned snapshots before later execution."]
     },
     {
@@ -156,7 +156,7 @@
       "primaryLinks": ["https://github.com/deepseek-ai/deepseek-harness/tree/86a402200d95fecef4529d969836f1fe13c6cb0d", "https://github.com/deepseek-ai/deepseek-harness/blob/86a402200d95fecef4529d969836f1fe13c6cb0d/README.md"],
       "license": {"spdx": "MIT", "scope": "repository", "caveat": "Repository licensing does not include separately provisioned model APIs or external services."},
       "integration": {"status": "catalogued", "mode": "explicit-runtime-adapter", "runtimeInstalled": false},
-      "capabilities": ["Model harness and agent runtime reference"],
+      "capabilities": ["Replaceable plugins, model and tool services", "Append-only sessions, SDK and ACP profiles", "Recorded model stream replay fixtures"],
       "caveats": ["Live model inference is an external effect; temperature or seed settings alone do not guarantee repeatable model output."]
     },
     {
