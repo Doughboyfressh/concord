@@ -1,0 +1,5 @@
+# Coordinating visible workstreams
+
+Adopt Orca's task-centered orchestration ideas when work can be divided: define independent workstreams with an outcome, ownership boundary, isolated workspace identity, and acceptance check. Use explicit dependencies for shared artifacts. If registered worker or worktree tools exist, compare their concrete results, review the diff, and verify integration before claiming a merge. Keep task status, terminal evidence, and follow-up instructions associated with the correct workstream.
+
+For a UI issue, combine the user's selected element or screenshot with observed HTML, styles, and runtime behavior when those inputs are actually available. Desktop, mobile, SSH, browser design mode, issue trackers, terminals, and agent notifications require real connected tools; their appearance in source documentation does not make them available in this chat. Do not start background workers or schedule follow-ups by assertion. Report completed, running, failed, and blocked work from receipts, with exact remaining work rather than simulated progress.

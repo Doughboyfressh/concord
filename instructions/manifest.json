@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "modules": [
+    {
+      "sourceId": "awesome-cyber-skills",
+      "file": "awesome-cyber-skills.md",
+      "sha256": "0e50f3d4c33694c7fd659d6ae6c71418eaddfd5ea2216bbdd2780856449cf1b3",
+      "bytes": 1098
+    },
+    {
+      "sourceId": "awesome-hacking",
+      "file": "awesome-hacking.md",
+      "sha256": "2e09e4ce4cfad832bb7116a7cb1230b4f87e1679a622675e2f0c3c1984044c41",
+      "bytes": 1085
+    },
+    {
+      "sourceId": "deepseek-harness",
+      "file": "deepseek-harness.md",
+      "sha256": "758a6c9ffe1b53709a1324f873dcf421485562e5d2a53efb0af780ccb99c87dc",
+      "bytes": 1122
+    },
+    {
+      "sourceId": "ecc",
+      "file": "ecc.md",
+      "sha256": "65224cd0aec3cde3886d9f422938e798514c40714c14aae5650b73cebfa2576e",
+      "bytes": 1095
+    },
+    {
+      "sourceId": "ego-lite",
+      "file": "ego-lite.md",
+      "sha256": "b9bdbf88930c56cd0290dcd941394273b10fb04ab249241ca7ec8b9837c0f63b",
+      "bytes": 1107
+    },
+    {
+      "sourceId": "hermes-agent",
+      "file": "hermes-agent.md",
+      "sha256": "55933df252ef9e12466b00eca028df7a90467b104540a5afd093e67bc3f02c7a",
+      "bytes": 1173
+    },
+    {
+      "sourceId": "orca",
+      "file": "orca.md",
+      "sha256": "3ecb50d511c598422e21cdb28a5682a0aca49327cd70eada75c169866f8acaa1",
+      "bytes": 1083
+    },
+    {
+      "sourceId": "rea",
+      "file": "rea.md",
+      "sha256": "d11739b788b0a10e0bbd7448ee80f48e089368979ec7b19e15d35374c3878d0e",
+      "bytes": 1095
+    },
+    {
+      "sourceId": "twentyfirst-repository",
+      "file": "twentyfirst-repository.md",
+      "sha256": "3090f48fc29890be60b7812624a61e0ef86b91fa8e2df19097306338b959e700",
+      "bytes": 1087
+    },
+    {
+      "sourceId": "twentyfirst-website",
+      "file": "twentyfirst-website.md",
+      "sha256": "7616de308ba14ee6721410720cd0adc2754eb863593e93ae9f12fd7a54ef9434",
+      "bytes": 1087
+    },
+    {
+      "sourceId": "typesafe-docs",
+      "file": "typesafe-docs.md",
+      "sha256": "a305ce46bed0cd87f380e893926c9abf740c3fde21c2aba8d93f7ae3c4908ebe",
+      "bytes": 1095
+    },
+    {
+      "sourceId": "vercel-skills",
+      "file": "vercel-skills.md",
+      "sha256": "2d32d9d9977f4579bb566e0572089c25c9c2ecb1b23c0e14f19321f43a5d1bee",
+      "bytes": 1077
+    }
+  ]
+}

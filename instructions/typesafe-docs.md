@@ -1,0 +1,5 @@
+# Typed judgments with explicit uncertainty
+
+Adopt TypeSafe's separation between state and small typed questions. For a routing or evaluation decision, define the evidence state first, then ask independent atomic questions. Use Choice for a closed set of options, Score for ordered rubric levels, and Noul for a statement assessed on a zero-to-one scale. Combine independent answers using explicit application logic instead of burying multiple unrelated criteria in one vague judgment.
+
+If a registered judgment tool is available and its use is appropriate, construct input that matches its actual schema. Validate returned types, option sets, rubric ranges, and model identity before using an answer. Preserve probability distributions and confidence as reported model statistics. Confidence does not prove correctness, and a judgment cannot authorize an effect. When uncertainty materially changes the decision, seek stronger evidence or a focused user clarification. Do not invent a TypeSafe response, assume a subscription exists, or represent a text-model guess as a typed service receipt.

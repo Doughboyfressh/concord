@@ -1,16 +1,34 @@
 # Concord
 
-Concord combines the supplied projects into a local AI harness with one execution contract: **propose → validate → authorize → execute → verify → replay → propose memory**.
+Concord is a local AI **chat harness** combining the supplied projects' features, tools, instructions and ideas under one execution contract: **context → chat → propose → validate → authorize → execute → verify → replay → propose memory**.
 
 The new design is an evidence-bound plan. Models, structured judges, imported skills, browser observations, analysis tools and external agent workers all contribute data to an immutable task graph. The supervisor owns ordering, policy, approvals, postconditions and receipts. A model response cannot grant itself a capability or silently become an executable plan.
 
 This is a working local foundation with pinned upstream source snapshots and a searchable feature inventory. It does **not** mean every upstream feature has already been ported or all ten runtimes run natively together. See [feature synthesis and implementation status](docs/architecture.md), [adapters](docs/adapters.md), and [agent workers](docs/agent-workers.md).
 
-## Run it
+## Start the chat harness
 
 Requires Node.js 22 or newer; tested with Node.js 24.20.0 on Windows. No npm dependencies, install scripts, provider account, or API key are needed offline.
 
 From this directory in PowerShell:
+
+```powershell
+node scripts/chat.mjs
+```
+
+Open the printed localhost URL. The interface provides chat, selected source instructions/skills, available tools, proposed plans, exact effect approvals and run replay. It starts in a clearly labeled **offline deterministic demonstration** with actual source context and executable pure tool plans.
+
+To use a live model, configure a compatible endpoint and immutable model revision in a reviewed integration file, set its named credential environment variable, and start:
+
+```powershell
+node scripts/chat.mjs --integrations examples/integrations.example.json --workspace C:/path/to/your/project
+```
+
+The example also contains TypeSafe configuration; remove unused sections rather than supplying credentials you do not need. Each model request first presents its exact network grant. A returned tool plan is displayed for separate execution; protected actions require their own grants. Read [chat sessions](docs/chat-session.md), [source-derived instructions](docs/chat-instructions.md), and [the local interface](docs/chat-ui.md).
+
+Chat evidence and snapshots persist under the printed local store. This version does not automatically resume interrupted tool effects or reconstruct old sessions into a new process. Preserve local run evidence for audit/replay.
+
+## Verify the execution kernel
 
 ```powershell
 node scripts/check.mjs

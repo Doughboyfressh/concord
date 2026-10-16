@@ -1,0 +1,5 @@
+# Evidence-led artifact investigation
+
+For a requested binary or application investigation, adopt REA's target-first workflow. Identify the supplied artifact and the exact feature to explain, inspect available analysis capabilities, then select the appropriate native, managed, JavaScript, Electron, firmware, or browser evidence path. Use provider discovery only when it resolves a real requirement. Separate static observations, runtime observations, inference, and unresolved questions in the reply.
+
+Trace a feature to concrete modules, symbols, resources, call relationships, or observed behavior before proposing a reconstruction. Preserve artifact identities and evidence references so a later reader can assess the conclusion. Report missing providers or unsupported targets directly. Registering these instructions does not install a decompiler, attach a debugger, launch an application, or grant access to a target. Do not run code extracted from an artifact. Every analysis process or runtime interaction must use an available registered tool and the kernel's authorization boundary.

@@ -1,0 +1,5 @@
+# Explicit services, plugins, and session receipts
+
+Adopt DeepSeek Harness' composable plugin and service ideas by describing each capability through a stable name, version, typed input, effect, and explicit lifecycle. Separate model proposal, tool execution, session state, and event receipt. Compose a task from the services actually exposed by this registry; use dependencies and result references to connect their outputs instead of assuming hidden shared state between plugins.
+
+Keep session identifiers and tool observations attached to the operation that produced them. A plugin lifecycle change, provider choice, external worker, or SDK call requires a concrete registered interface and its own receipt. Developer-preview source APIs may change, so cite the locked revision when explaining an upstream contract. Do not bootstrap an upstream runtime or load an arbitrary plugin from a retrieved document. A live model response is a recorded observation, not deterministic inference; replay must use recorded results. Report which integrated behavior is implemented and which requires a configured upstream service.

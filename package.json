@@ -11,6 +11,8 @@
     "check": "node scripts/check.mjs",
     "demo": "node src/cli.mjs run examples/offline.plan.json --policy examples/offline.policy.json --out runs/demo.json",
     "replay": "node src/cli.mjs replay runs/demo.json --plan examples/offline.plan.json --policy examples/offline.policy.json",
-    "e2e": "node scripts/e2e.mjs"
+    "e2e": "node scripts/e2e.mjs",
+    "chat": "node scripts/chat.mjs",
+    "validate": "node scripts/validate.mjs"
   }
 }

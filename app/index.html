@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Concord — Chat workspace</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/client.mjs"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Concord home"><span class="brand-mark" aria-hidden="true">c<span></span></span><span>concord<span class="brand-dot">.</span></span></a>
+      <div class="workspace-label"><span class="workspace-dot"></span> Local workspace <span class="separator">/</span> <strong>Chat</strong></div>
+      <div class="top-actions"><span id="mode-badge" class="mode-badge">Connecting</span><button id="sources-toggle" class="icon-button sources-toggle" type="button" aria-controls="source-sidebar" aria-expanded="false">Sources</button><span class="local-badge"><span></span> LOCAL</span></div>
+    </header>
+
+    <aside id="source-sidebar" class="source-sidebar" aria-label="Source knowledge and capabilities">
+      <div class="sidebar-top"><span class="eyebrow">WORKSPACE</span><button id="sources-close" type="button" class="icon-button sources-close" aria-label="Close sources">×</button></div>
+      <button id="chat-nav" class="nav-item active" type="button"><span aria-hidden="true">◈</span> Conversation <span class="nav-count" id="message-count">0</span></button>
+      <button id="evidence-nav" class="nav-item" type="button"><span aria-hidden="true">▤</span> Run evidence <span class="nav-count" id="run-count">0</span></button>
+      <div class="source-heading"><span class="eyebrow">SOURCE KNOWLEDGE</span><span id="source-count" class="count-badge">0</span></div>
+      <p class="sidebar-description">Instructions, skills, and tools brought into one conversation.</p>
+      <div id="source-list" class="source-list"><p class="muted small">Loading source coverage…</p></div>
+      <div class="sidebar-footer"><span class="mini-shield" aria-hidden="true">◇</span><div><strong>Explicit effects. Recorded evidence.</strong><p>Protected actions require your approval.</p></div></div>
+    </aside>
+
+    <main class="chat-main">
+      <div class="chat-heading"><div><span class="eyebrow">CONCORD CHAT</span><h1>Your tools, in one conversation.</h1><p id="mode-description">Connecting to your local harness…</p></div><span id="activity" class="activity" role="status"><span></span>Connecting</span></div>
+      <div id="conversation" class="conversation" aria-label="Conversation" aria-live="polite" aria-relevant="additions text">
+        <div id="empty-state" class="empty-state"><div class="welcome-symbol" aria-hidden="true">✳</div><h2>Start with what you want to do.</h2><p>Concord assembles relevant source instructions, proposes a plan, and records the tools it uses.</p><div class="suggestions"><button type="button" data-prompt="Show me the capabilities available in this harness.">Explore capabilities <span>↗</span></button><button type="button" data-prompt="Inspect the source knowledge and explain what is connected.">Inspect source knowledge <span>↗</span></button><button type="button" data-prompt="Propose a safe plan to review this workspace.">Plan a workspace review <span>↗</span></button></div></div>
+      </div>
+      <div class="composer-zone"><p id="request-error" class="request-error" role="alert" hidden></p><form id="composer" class="composer"><label class="sr-only" for="message">Message Concord</label><textarea id="message" name="message" rows="2" maxlength="32768" placeholder="Ask Concord to research, build, inspect, or use a capability…" required></textarea><div class="composer-bottom"><span><span class="composer-plus" aria-hidden="true">✧</span> Source-aware context <span class="composer-shortcut">Enter to send · Shift + Enter for a new line</span></span><button id="send-button" class="send-button" type="submit" aria-label="Send message">↑</button></div></form><p class="composer-caption"><span id="composer-mode">Local harness</span><span>Review exact inputs before approving protected effects.</span></p></div>
+    </main>
+
+    <aside class="control-sidebar" aria-label="Plan, approvals, and evidence">
+      <div class="control-title"><span class="eyebrow">RUN CONTROL</span><span class="control-dot"></span></div>
+      <section id="approval-panel" class="control-card approval-card" aria-labelledby="approval-title"><div class="card-heading"><span class="card-icon" aria-hidden="true">◇</span><h2 id="approval-title">Effect approval</h2></div><div id="approval-content"><p class="muted small">No effect awaiting approval.</p></div></section>
+      <section class="control-card" aria-labelledby="plan-title"><div class="card-heading"><span class="card-icon" aria-hidden="true">⌘</span><h2 id="plan-title">Proposed plan</h2><span id="plan-count" class="count-badge">0</span></div><div id="plan-content"><p class="muted small">Your next plan will appear here.</p></div></section>
+      <section class="control-card context-card" aria-labelledby="context-title"><div class="card-heading"><span class="card-icon" aria-hidden="true">✧</span><h2 id="context-title">Active context</h2><span id="context-count" class="count-badge">0</span></div><div id="context-content"><p class="muted small">Source instructions are selected with each turn.</p></div></section>
+      <section id="runs-panel" class="control-card runs-card" aria-labelledby="runs-title"><div class="card-heading"><span class="card-icon" aria-hidden="true">▤</span><h2 id="runs-title">Run evidence</h2></div><div id="run-list"><p class="muted small">Completed and blocked runs appear here.</p></div></section>
+      <div class="runtime-summary"><span class="eyebrow">LOCAL INVENTORY</span><div id="inventory" class="inventory"><span>Waiting for inventory</span></div><details class="tools-details"><summary>Registered tools</summary><pre id="tool-list">Loading…</pre></details></div>
+    </aside>
+  </div>
+  <button id="sources-backdrop" class="sources-backdrop" type="button" aria-label="Close source panel" hidden></button>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

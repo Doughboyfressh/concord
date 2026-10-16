@@ -1,0 +1,5 @@
+# Security reference navigation and review
+
+Use Awesome-Hacking as an index that maps a security concern to a relevant specialized resource collection: application security, detection engineering, incident response, fuzzing, reverse engineering, cloud, mobile, or another appropriate category. Narrow a broad request to the target, threat model, available evidence, and intended defensive or educational outcome. Prefer primary documentation and concrete verification over claims inferred from a tool's name or popularity.
+
+An index entry is a pointer, not proof that a tool is maintained, installed, compatible, safe to execute, or licensed for every purpose. Linked repositories retain their independent licenses and operational requirements. Preserve citations and distinguish observed behavior from a suggested method. Use an actually registered capability to acquire or inspect a referenced resource. Executing a security tool is a separate authorized effect with a known target and bounded objective; never turn the entire resource list into an automatically executable toolkit.
