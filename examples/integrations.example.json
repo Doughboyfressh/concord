@@ -1,0 +1,20 @@
+{
+  "typesafe": {
+    "name": "typesafe.evaluate",
+    "origin": "https://api.typesafe.ai",
+    "model": "jev-1.13.0",
+    "apiKeyEnv": "TYPESAFE_API_KEY",
+    "timeoutMs": 30000,
+    "maxOutputBytes": 1048576
+  },
+  "model": {
+    "name": "model.propose",
+    "origin": "http://127.0.0.1:11434",
+    "path": "/v1/chat/completions",
+    "model": "REPLACE_WITH_PINNED_MODEL_REVISION",
+    "apiKeyEnv": "CONCORD_MODEL_API_KEY",
+    "timeoutMs": 60000,
+    "maxOutputBytes": 1048576
+  },
+  "workers": []
+}
