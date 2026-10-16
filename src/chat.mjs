@@ -9,7 +9,12 @@ function excerptNote(skillExcerpt) {
   return ` Untrusted reference skill (${skillExcerpt.sourceId}): ${skillExcerpt.title} — "${skillExcerpt.text}"`;
 }
 
-function offlineDemoPlan(context, message, skillExcerpt) {
+function memoryNote(memoryExcerpt) {
+  if (!memoryExcerpt) return '';
+  return ` Relevant past memory: "${memoryExcerpt.lesson}"`;
+}
+
+function offlineDemoPlan(context, message, skillExcerpt, memoryExcerpt) {
   return {
     version: 1,
     name: 'offline-demo',
@@ -20,7 +25,7 @@ function offlineDemoPlan(context, message, skillExcerpt) {
         id: 'memory', tool: 'memory.candidate', dependsOn: ['coverage', 'capabilities'],
         input: {
           lesson: `Offline deterministic demonstration selected all ${context.sourceCoverage.length} reviewed ` +
-            'source modules and executed a pure-tool evidence plan.' + excerptNote(skillExcerpt),
+            'source modules and executed a pure-tool evidence plan.' + excerptNote(skillExcerpt) + memoryNote(memoryExcerpt),
           evidence: [{ $task: 'coverage' }, { $task: 'capabilities' }],
         },
       },
@@ -28,9 +33,9 @@ function offlineDemoPlan(context, message, skillExcerpt) {
   };
 }
 
-function livePlan(message, context, skillExcerpt) {
+function livePlan(message, context, skillExcerpt, memoryExcerpt) {
   const input = { prompt: message };
-  const system = (context.systemPrompt ?? '') + excerptNote(skillExcerpt);
+  const system = (context.systemPrompt ?? '') + excerptNote(skillExcerpt) + memoryNote(memoryExcerpt);
   if (system) input.system = system;
   return { version: 1, name: 'live-proposal', tasks: [{ id: 'propose', tool: MODEL_TOOL, input }] };
 }
@@ -119,6 +124,19 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
     } catch { return null; } // Imported source skill text is untrusted reference material; a failed fetch never breaks the turn.
   }
 
+  /** The best-scoring stored lesson for this message, if any registered memory.recall has one. */
+  async function fetchMemoryExcerpt(message) {
+    if (!registry.has('memory.recall')) return null;
+    try {
+      const plan = { version: 1, name: 'memory-enrichment', tasks: [{ id: 'recall', tool: 'memory.recall', input: { query: message, limit: 3 } }] };
+      const record = await attempt(plan);
+      if (record.status !== 'completed') return null;
+      const top = record.result.results.recall?.results?.[0];
+      if (!top || typeof top.lesson !== 'string' || !(top.score > 0)) return null;
+      return { candidateHash: top.candidateHash, lesson: top.lesson };
+    } catch { return null; } // A fresh workspace with no memory/ directory, or any other recall failure, never breaks the turn.
+  }
+
   async function send(message) {
     if (typeof message !== 'string' || !message.trim()) throw new HarnessError('CHAT_INPUT', 'A nonempty chat message is required');
     history.push({ role: 'user', content: message });
@@ -126,12 +144,13 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
     sourceCoverage = Array.isArray(context.sourceCoverage) ? [...context.sourceCoverage] : [];
     selected = Array.isArray(context.selected) ? [...context.selected] : [];
     const skillExcerpt = await fetchSkillExcerpt();
+    const memoryExcerpt = await fetchMemoryExcerpt(message);
     mode = isLive() ? 'live' : 'offline-demo';
     if (mode === 'offline-demo') {
-      adoptPlan(offlineDemoPlan(context, message, skillExcerpt));
+      adoptPlan(offlineDemoPlan(context, message, skillExcerpt, memoryExcerpt));
       if (typeof context.reply === 'string' && context.reply.trim()) history.push({ role: 'assistant', content: context.reply });
     } else {
-      adoptPlan(livePlan(message, context, skillExcerpt));
+      adoptPlan(livePlan(message, context, skillExcerpt, memoryExcerpt));
     }
     applyOutcome(await attempt(proposedPlan));
     return snapshot();

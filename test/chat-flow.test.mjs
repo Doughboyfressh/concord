@@ -9,7 +9,7 @@ import { createChatHarness } from '../src/chat.mjs';
 import { makeBuiltinTools } from '../src/builtins.mjs';
 import { makeCapabilityTools } from '../src/capabilities.mjs';
 import { loadSourceLock, makeSourceTools } from '../src/sources.mjs';
-import { parseJson } from '../src/value.mjs';
+import { parseJson, digest } from '../src/value.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const catalog = await loadSourceLock(path.join(root, 'sources.lock.json'));
@@ -76,9 +76,8 @@ test('selected retains the capability path needed to fetch a skill body', async 
 test('a resolvable skill match enriches the offline memory-candidate lesson with its untrusted excerpt, recorded as its own run', async () => {
   const harness = setup(root); // the real repo root, where upstream/ is actually acquired
   const turn = await harness.send(SKILL_QUERY);
-  assert.equal(turn.runs.length, 2, 'expected a skill-enrichment attempt plus the primary offline-demo attempt');
-  assert.equal(turn.runs[0].status, 'completed');
-  assert.equal(turn.runs.at(-1).status, 'completed');
+  assert.equal(turn.runs.length, 3, 'expected a skill-enrichment attempt, a memory-enrichment attempt, and the primary offline-demo attempt');
+  assert.ok(turn.runs.every((r) => r.status === 'completed'));
   const memoryTask = turn.proposedPlan.tasks.find((t) => t.id === 'memory');
   assert.match(memoryTask.input.lesson, /Untrusted reference skill \(ecc\)/);
   assert.match(memoryTask.input.lesson, /Security Review Skill/);
@@ -87,17 +86,35 @@ test('a resolvable skill match enriches the offline memory-candidate lesson with
 test('an unresolvable skill path (the default fresh-clone state) soft-fails without breaking the primary turn', async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-chat-flow-'));
   try {
-    const harness = setup(temp); // no upstream/ under this fresh workspace
+    const harness = setup(temp); // no upstream/ under this fresh workspace, and no memory/ directory yet either
     const turn = await harness.send(SKILL_QUERY);
     assert.equal(turn.mode, 'offline-demo');
     assert.ok(turn.history.some((m) => m.role === 'assistant' && m.content.length), 'the primary turn still produced a reply');
     const memoryTask = turn.proposedPlan.tasks.find((t) => t.id === 'memory');
     assert.doesNotMatch(memoryTask.input.lesson, /Untrusted reference skill/);
+    assert.doesNotMatch(memoryTask.input.lesson, /Relevant past memory/);
     assert.ok(turn.runs.some((r) => r.status === 'completed'), 'the primary plan still completed');
   } finally { fs.rmSync(temp, {recursive:true,force:true}); }
 });
 
-test('the skill-enrichment read effect never produces a pending approval', async () => {
+test('a prior promoted memory surfaces as a relevant-past-memory excerpt in a later turn', async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-chat-flow-'));
+  try {
+    const lesson = 'When reviewing changes for security vulnerabilities, check authentication boundaries first.';
+    const candidate = { version: 1, lesson, evidenceHashes: [digest('reviewed-evidence')], status: 'proposed', executable: false };
+    const candidateHash = digest(candidate);
+    fs.mkdirSync(path.join(temp, 'memory'), { recursive: true });
+    fs.writeFileSync(path.join(temp, 'memory', `${candidateHash}.json`), JSON.stringify({ ...candidate, candidateHash }) + '\n');
+
+    const harness = setup(temp);
+    const turn = await harness.send(SKILL_QUERY); // shares "security"/"vulnerabilities" tokens with the stored lesson
+    const memoryTask = turn.proposedPlan.tasks.find((t) => t.id === 'memory');
+    assert.match(memoryTask.input.lesson, /Relevant past memory/);
+    assert.match(memoryTask.input.lesson, /authentication boundaries/);
+  } finally { fs.rmSync(temp, {recursive:true,force:true}); }
+});
+
+test('the skill-enrichment and memory-recall read effects never produce a pending approval', async () => {
   const harness = setup(root);
   const turn = await harness.send(SKILL_QUERY);
   assert.equal(turn.pending, null);
@@ -122,10 +139,10 @@ test('live mode splices the untrusted skill excerpt into the system prompt only 
   } finally { fs.rmSync(temp, {recursive:true,force:true}); }
 });
 
-test('replay reproduces both the skill-enrichment run and the primary run byte-identically', async () => {
+test('replay reproduces the skill-enrichment, memory-enrichment, and primary runs byte-identically', async () => {
   const harness = setup(root);
   const turn = await harness.send(SKILL_QUERY);
-  assert.equal(turn.runs.length, 2);
+  assert.equal(turn.runs.length, 3);
   for (const run of turn.runs) {
     const replay = await harness.replay(run.id);
     assert.equal(replay.replayed, true);
