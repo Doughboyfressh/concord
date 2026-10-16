@@ -78,10 +78,21 @@ export function buildChatContext({ message, history, sourceLock, inventory, regi
     `instruction modules (${sourceIds.join(', ')}) for this turn and proposed a pure-tool evidence plan ` +
     '(sources.catalog, capabilities.search, memory.candidate). No live model was called.';
 
+  const toolNames = registry && typeof registry.keys === 'function' ? [...registry.keys()].sort() : [];
+  const outputContract = 'Respond with exactly one JSON object and nothing else: ' +
+    '{"reply": "<your message to the user, as plain text>", "plan": <optional>}. ' +
+    'Omit "plan" entirely unless a registered tool should actually run. When present, "plan" must be ' +
+    '{"version": 1, "tasks": [{"id": "<short id>", "tool": "<one of the names below>", "input": {...}, ' +
+    '"dependsOn": ["<other task id>"]}]} — "dependsOn" and task-to-task references are optional, used only ' +
+    'when one task\'s input needs another task\'s result (as {"$task": "<id>"}). Only tool names from this ' +
+    `exact list are valid: ${toolNames.join(', ') || '(none registered)'}. You cannot invent a tool, grant ` +
+    'yourself an effect, or make a plan execute by proposing it — the supervisor validates and, for write, ' +
+    'network, or process effects, requires a separate explicit approval before anything in "plan" runs.';
+
   const systemPrompt = 'You are Concord, a deterministic chat harness supervisor. Ground every reply in the ' +
     `following ${instructions.length} reviewed source instruction modules. You may propose at most one tool ` +
     'plan as data; you cannot grant yourself a capability, effect, or approval the supervisor has not recorded.' +
-    '\n\n' + instructions.map(m => `## ${m.sourceId}\n${m.text}`).join('\n\n');
+    '\n\n' + outputContract + '\n\n' + instructions.map(m => `## ${m.sourceId}\n${m.text}`).join('\n\n');
 
   void inventory;
   return { sourceCoverage: sourceIds, instructions, selected, reply, systemPrompt };
