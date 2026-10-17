@@ -19,11 +19,11 @@ export function makeBuiltinTools() {
   return [
     { name: 'json.value', version: '1.0.0', effect: 'pure', inputSchema: true,
       execute(input) { return input; } },
-    { name: 'json.hash', version: '1.0.0', effect: 'pure', inputSchema: true,
+    { name: 'json.hash', version: '1.0.0', outputKeys: ['algorithm', 'digest'], effect: 'pure', inputSchema: true,
       execute(input) { return { algorithm: 'sha256/concord-json-v1', digest: digest(input) }; } },
-    { name: 'json.assert', version: '1.0.0', effect: 'pure', inputSchema: object({ value: true, schema: true }),
+    { name: 'json.assert', version: '1.0.0', outputKeys: ['evidenceHash', 'passed', 'value'], effect: 'pure', inputSchema: object({ value: true, schema: true }),
       execute({ value, schema }) { validateSchema(value, schema); return { passed: true, value, evidenceHash: digest(value) }; } },
-    { name: 'text.concat', version: '1.0.0', effect: 'pure', inputSchema: object({ values: { type: 'array', items: string, minItems: 1, maxItems: 1000 }, separator: string }),
+    { name: 'text.concat', version: '1.0.0', outputKeys: ['value'], effect: 'pure', inputSchema: object({ values: { type: 'array', items: string, minItems: 1, maxItems: 1000 }, separator: string }),
       // A fixed, explicit join over caller-ordered values — no format sniffing, no implicit separator.
       // Self-validates rather than trusting the declared schema alone: a pure tool's execute()
       // can be, and elsewhere in this codebase already is, called directly on unsanitized input
@@ -32,7 +32,7 @@ export function makeBuiltinTools() {
         if (!values.every((v) => typeof v === 'string')) throw new HarnessError('INPUT_INVALID', 'Every value must be a string');
         return { value: values.join(separator) };
       } },
-    { name: 'json.mergeShallow', version: '1.0.0', effect: 'pure', inputSchema: object({ values: { type: 'array', items: { type: 'object' }, minItems: 1, maxItems: 1000 } }),
+    { name: 'json.mergeShallow', version: '1.0.0', outputKeys: ['value'], effect: 'pure', inputSchema: object({ values: { type: 'array', items: { type: 'object' }, minItems: 1, maxItems: 1000 } }),
       // Fail-closed on any key collision rather than silently last-write-wins: combining
       // concurrent results (e.g. process.runMany's own output) must not hide a real conflict.
       // Rejects __proto__/prototype/constructor itself rather than relying solely on the
@@ -54,7 +54,7 @@ export function makeBuiltinTools() {
         }
         return { value: merged };
       } },
-    { name: 'skills.rank', version: '1.0.0', effect: 'pure', inputSchema: object({ query: string, skills: { type: 'array', maxItems: 10000, items: object({ id: string, text: string }) }, limit: { type: 'integer', minimum: 1, maximum: 100 } }, ['query', 'skills']),
+    { name: 'skills.rank', version: '1.0.0', outputKeys: ['ranked', 'strategy'], effect: 'pure', inputSchema: object({ query: string, skills: { type: 'array', maxItems: 10000, items: object({ id: string, text: string }) }, limit: { type: 'integer', minimum: 1, maximum: 100 } }, ['query', 'skills']),
       execute({ query, skills, limit = 5 }) {
         const tokenize = text => [...new Set(text.toLowerCase().match(/[a-z0-9]+/g) ?? [])];
         const terms = tokenize(query);
@@ -73,19 +73,19 @@ export function makeBuiltinTools() {
         if (score < threshold) throw new HarnessError('JUDGMENT_REJECTED', 'Evidence does not meet the declared threshold');
         return { accepted: true, score, threshold, evidenceHash: digest(evidence), grantsCapabilities: false };
       } },
-    { name: 'memory.candidate', version: '1.0.0', effect: 'pure', inputSchema: object({ lesson: string, evidence: { type: 'array', minItems: 1, maxItems: 1000, items: true } }),
+    { name: 'memory.candidate', version: '1.0.0', outputKeys: ['candidateHash', 'evidenceHashes', 'executable', 'lesson', 'status', 'version'], effect: 'pure', inputSchema: object({ lesson: string, evidence: { type: 'array', minItems: 1, maxItems: 1000, items: true } }),
       execute({ lesson, evidence }) {
         const candidate = { version: 1, lesson, evidenceHashes: evidence.map(digest).sort(), status: 'proposed', executable: false };
         return { ...candidate, candidateHash: digest(candidate) };
       } },
-    { name: 'files.read', version: '1.0.0', effect: 'read', inputSchema: object({ path: string }),
+    { name: 'files.read', version: '1.0.0', outputKeys: ['bytes', 'path', 'sha256', 'text', 'untrusted'], effect: 'read', inputSchema: object({ path: string }),
       execute({ path: relative }, context) {
         const limit = Math.floor(context.policy.maxOutputBytes / 8);
         const bytes = readWorkspaceFile(context.workspaceRoot, relative, limit);
         const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
         return { path: relative, text, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), untrusted: true };
       } },
-    { name: 'files.write', version: '1.0.0', effect: 'write', inputSchema: object({ path: string, content: true }),
+    { name: 'files.write', version: '1.0.0', outputKeys: ['contentHash', 'created', 'path'], effect: 'write', inputSchema: object({ path: string, content: true }),
       execute({ path: relative, content }, context) {
         const filename = workspaceFile(context.workspaceRoot, relative);
         const text = canonical(content) + '\n';
@@ -94,7 +94,7 @@ export function makeBuiltinTools() {
         writeFileSync(filename, text, { flag: 'wx', encoding: 'utf8' });
         return { path: relative, contentHash: digest(content), created: true };
       } },
-    { name: 'memory.promote', version: '1.0.0', effect: 'write', inputSchema: candidateSchema,
+    { name: 'memory.promote', version: '1.0.0', outputKeys: ['candidateHash', 'path', 'promoted'], effect: 'write', inputSchema: candidateSchema,
       // Promotion is a separate write under an exact grant, keeping learned text from becoming authority.
       execute(candidate, context) {
         const { candidateHash, ...rest } = candidate;
@@ -112,7 +112,7 @@ export function makeBuiltinTools() {
         }
         return { path: relative, candidateHash, promoted: true };
       } },
-    { name: 'memory.recall', version: '1.0.0', effect: 'read', inputSchema: object({ query: string, limit: { type: 'integer', minimum: 1, maximum: 100 } }, ['query']),
+    { name: 'memory.recall', version: '1.0.0', outputKeys: ['corruptedEntries', 'results', 'strategy', 'totalEntries'], effect: 'read', inputSchema: object({ query: string, limit: { type: 'integer', minimum: 1, maximum: 100 } }, ['query']),
       execute({ query, limit = 10 }, context) {
         const base = realpathSync(context.workspaceRoot);
         let names;

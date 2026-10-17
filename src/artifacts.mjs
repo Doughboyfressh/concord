@@ -408,7 +408,7 @@ function parseWasm(buffer) {
 /** Pure identification/inspection of acquired local bytes. Never executes, never trusts, content. */
 export function makeArtifactTools() {
   return [
-    { name: 'artifact.inspect', version: '1.0.0', effect: 'read', inputSchema: object({ path: string }),
+    { name: 'artifact.inspect', version: '1.0.0', outputKeys: ['bytes', 'format', 'path', 'sha256', 'untrusted'], effect: 'read', inputSchema: object({ path: string }),
       execute({ path: relative }, context) {
         const limit = Math.floor(context.policy.maxOutputBytes / 8);
         const bytes = readWorkspaceFile(context.workspaceRoot, relative, limit);

@@ -46,7 +46,28 @@ export function registryManifest(registry) {
   }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 }
 
+// A reference that was serialised into a string instead of placed as an object is otherwise
+// undetectable: it is a valid string, so it passes every schema, executes, and yields a result
+// built from the reference's own source text rather than the referenced value — a wrong answer
+// with a faithful receipt. Measured repeatedly in round 005, where the model described the correct
+// unstringified form in prose and emitted this. The signature is exact (a string whose entire
+// content is a JSON object whose only keys are $task and optionally path), so this rejects rather
+// than repairs: the harness must never silently reinterpret what a caller actually wrote.
+function assertNotStringifiedRef(value) {
+  if (typeof value !== 'string') return;
+  const text = value.trim();
+  if (!text.startsWith('{') || !text.includes('$task')) return;
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { return; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+  const keys = Object.keys(parsed);
+  if (!keys.includes('$task') || keys.some(k => k !== '$task' && k !== 'path')) return;
+  throw new HarnessError('INVALID_REFERENCE',
+    'A task reference was written as a string. Place {"$task": ...} as the value itself, unquoted; the declared type applies to the resolved value');
+}
+
 function inspectRefs(input, visit) {
+  assertNotStringifiedRef(input);
   if (!input || typeof input !== 'object') return;
   if (!Array.isArray(input) && Object.hasOwn(input, '$task')) {
     validateSchema(input, objectSchema({ $task: idSchema, path: { type: 'string', maxLength: 4096 } }, ['$task']));
@@ -54,6 +75,8 @@ function inspectRefs(input, visit) {
     visit(input);
     return;
   }
+  // Keys as well as values: a stringified reference has also been observed used as an object key.
+  if (!Array.isArray(input)) Object.keys(input).forEach(assertNotStringifiedRef);
   Object.values(input).forEach(v => inspectRefs(v, visit));
 }
 

@@ -96,6 +96,12 @@ export function buildChatContext({ message, history, observations = [], proposed
   const toolContracts = [...visibleRegistry].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([name, tool]) => ({
     name, version: tool.version, effect: tool.effect, inputSchema: clone(tool.inputSchema),
     requiresApproval: ['write', 'network', 'process'].includes(tool.effect),
+    // Round 004 found reference paths were unconstructable by construction: a $task path must
+    // point into another tool's result, and no contract described any result's shape. Declared
+    // keys are those ALWAYS present, verified against real execution by test, so a tool with
+    // conditional extras never over-promises. Absent when a shape is not declared, which is
+    // honest rather than guessed.
+    ...(Array.isArray(tool.outputKeys) ? { outputKeys: [...tool.outputKeys] } : {}),
   }));
   const contractText = canonical(toolContracts);
   if (Buffer.byteLength(contractText) > 65536) throw new HarnessError('CHAT_CONTEXT', 'Tool contracts exceed the context budget');
@@ -113,6 +119,27 @@ export function buildChatContext({ message, history, observations = [], proposed
     // minItems 1, the model proposed the impossible plan and the gate rejected it. Its own
     // diagnosis was that nothing was missing from the payload -- it had the schemas and simply
     // did not check them first. This states the check as part of the contract.
+    // Round 004: both generalization failures were reference errors, not schema errors. One
+    // invented a path into files.read's result that did not exist there; the other JSON-encoded
+    // a reference object into a string. Both are stated here as rules tied to outputKeys.
+    'A task reference must be the value itself, the object {"$task": "<id>"} placed exactly where ' +
+    'that value belongs — never a string containing JSON, and never stringified. To read one field ' +
+    'of a result, add "path" as an RFC 6901 pointer built ONLY from that tool\'s declared ' +
+    'outputKeys, for example {"$task":"read","path":"/text"} for files.read. Do not invent a path ' +
+    'from the data you expect to be inside a value: a file\'s JSON text is one string under /text, ' +
+    'and its inner fields are not addressable because no tool here parses JSON. If a tool declares ' +
+    'no outputKeys, reference its whole result with no path rather than guessing one. ' +
+    // Round 005: with shapes declared the model derived the right path but still stringified the
+    // reference, while its prose described the correct unstringified form. text.concat declares
+    // values as items of type string, so a raw reference object there looks like a type violation
+    // -- and the feasibility rule below tells it to check inputs against schemas. Those two read
+    // as contradictory unless the exemption is stated, so state it.
+    'A reference is exempt from the declared type at its position: the schema describes the ' +
+    'RESOLVED value, so {"$task":"read","path":"/text"} is correct where a string is declared, ' +
+    'and must not be quoted or stringified to satisfy that type. The supervisor resolves it before ' +
+    'checking the schema. ' +
+    'If your own analysis says a request cannot be satisfied, do not also propose the plan you just ' +
+    'explained will fail — omit "plan" and give the explanation alone. ' +
     'Before proposing, check each task input against that tool\'s declared schema below, including ' +
     'bounds like minItems, minLength and required fields. If the request cannot be satisfied within ' +
     'those constraints, or needs a tool that is not listed, say so and name the specific constraint ' +

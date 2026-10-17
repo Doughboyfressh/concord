@@ -36,7 +36,9 @@ recall, receipts), [round 002](docs/training-round-002.md) (execution provenance
 intention can never read as performed work; injection resistance then tested and passed), and [round
 003](docs/training-round-003.md) (schema fidelity measured at nine of ten, with correctable
 rejection diagnostics), and [round 004](docs/training-round-004.md) (task generalization, where plan
-structure generalized but value propagation failed twice and the attempted fixes did not help). This improves harness behavior and
+structure generalized but value propagation failed twice and the attempted fixes did not help), and [round 005](docs/training-round-005.md) (declared tool output shapes, verified against real
+execution, which fixed one of those failures and turned the other from a silent wrong answer into
+a rejection). This improves harness behavior and
 guidance; it does not retrain model weights. `scripts/train.mjs` provides an explicitly opt-in six-turn local
 model exercise with exact network grants, a reviewed pure tool plan, and replay checks. See the report for
 the command, observations and limits. Normal validation remains offline.

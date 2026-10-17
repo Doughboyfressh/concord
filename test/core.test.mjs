@@ -6,6 +6,7 @@ import path from 'node:path';
 import { canonical, digest, parseJson, validateSchema, clone } from '../src/value.mjs';
 import { runPlan, replayPlan, inspectPlan } from '../src/engine.mjs';
 import { makeBuiltinTools } from '../src/builtins.mjs';
+import { makeArtifactTools } from '../src/artifacts.mjs';
 
 const registry = new Map(makeBuiltinTools().map(t => [t.name, t]));
 const policy = { version: 1, allowedTools: [...registry.keys()], allowedEffects: ['pure', 'read', 'write'], maxOutputBytes: 10000, maxJournalBytes: 100000 };
@@ -231,4 +232,75 @@ test('a journaled INPUT_INVALID records which rule it broke, and replay reconstr
   badPointer.tasks[1].input.v.path = 'project/topic';
   await assert.rejects(runPlan(base(badPointer)), e => e.code === 'INVALID_REFERENCE' && /RFC 6901/.test(e.message));
   assert.throws(() => inspectPlan(base(badPointer)), e => e.code === 'INVALID_REFERENCE');
+});
+
+test('every declared outputKeys set is really present in that tool\'s actual result', async () => {
+  // A declared output shape that drifts from reality would be a new false-assurance channel:
+  // the model would build reference paths from it and the kernel would reject them at execution.
+  // So the declaration is verified by running each tool, not by inspection. `outputKeys` means
+  // "always present", so a tool with conditional extras (artifact.inspect's per-format blocks)
+  // is checked as a subset and never over-promises.
+  const temp = mkdtempSync(path.join(tmpdir(), 'concord-outputkeys-'));
+  writeFileSync(path.join(temp, 'f.txt'), 'hello');
+  const context = { workspaceRoot: temp, policy: { maxOutputBytes: 100000 }, requestHash: 'a'.repeat(64) };
+  const tools = new Map([...makeBuiltinTools(), ...makeArtifactTools()].map(t => [t.name, t]));
+  const candidate = await tools.get('memory.candidate').execute({ lesson: 'a lesson worth keeping', evidence: [{ a: 1 }] }, context);
+  const inputs = {
+    'json.hash': { a: 1 },
+    'json.assert': { value: 1, schema: true },
+    'text.concat': { values: ['a', 'b'], separator: '-' },
+    'json.mergeShallow': { values: [{ a: 1 }, { b: 2 }] },
+    'files.read': { path: 'f.txt' },
+    'files.write': { path: 'out.txt', content: { k: 1 } },
+    'artifact.inspect': { path: 'f.txt' },
+    'memory.candidate': { lesson: 'a lesson worth keeping', evidence: [{ a: 1 }] },
+    'memory.promote': candidate,
+    'memory.recall': { query: 'lesson', limit: 3 },
+    'skills.rank': { query: 'binary', skills: [{ id: 'a', text: 'binary analysis' }] },
+  };
+  const declared = [...tools.values()].filter(t => Array.isArray(t.outputKeys));
+  assert.ok(declared.length >= 11, 'declarations exist to verify');
+  for (const tool of declared) {
+    assert.ok(inputs[tool.name], `${tool.name} declares outputKeys and must be exercised here`);
+    const output = await tool.execute(inputs[tool.name], context);
+    assert.ok(output && typeof output === 'object' && !Array.isArray(output), `${tool.name} returns an object`);
+    const actual = Object.keys(output);
+    for (const key of tool.outputKeys) assert.ok(actual.includes(key), `${tool.name} result is missing declared key ${key}`);
+  }
+  // The one that actually mattered: files.read's text is a single string, so a path into the
+  // JSON it happens to contain is not addressable. This is what round 004's failure assumed.
+  const read = tools.get('files.read');
+  assert.ok(read.outputKeys.includes('text'));
+  assert.ok(!read.outputKeys.includes('project'));
+  rmSync(temp, { recursive: true, force: true });
+});
+
+test('a task reference serialised into a string is rejected, not silently executed as data', async () => {
+  // Round 005 measured this three times: the model described the correct unstringified reference
+  // in prose and emitted a quoted one. A quoted reference is a valid string, so it passed every
+  // schema, executed, and produced a result built from the reference's own source text — a wrong
+  // answer carrying a faithful receipt. Rejected at compile time so the mistake is correctable,
+  // never repaired, because the harness must not reinterpret what a caller actually wrote.
+  const quoted = JSON.stringify({ $task: 'a', path: '/value' });
+  for (const input of [
+    quoted,                                   // the whole input
+    { values: ['literal', quoted] },          // nested in an array, as text.concat emitted it
+    { [quoted]: null },                       // used as an object key, as the later attempt emitted
+    { nested: { deep: quoted } },             // arbitrarily deep
+  ]) {
+    const plan = { version: 1, tasks: [task('a'), { id: 'b', tool: 'json.value', input, dependsOn: ['a'] }] };
+    await assert.rejects(runPlan(base(plan)), e => e.code === 'INVALID_REFERENCE' && /written as a string/.test(e.message));
+    assert.throws(() => inspectPlan(base(plan)), e => e.code === 'INVALID_REFERENCE');
+  }
+  // The genuine unstringified form still works, and still resolves to the referenced value.
+  const good = { version: 1, tasks: [task('a', { value: 'real' }), { id: 'b', tool: 'json.value', input: { $task: 'a', path: '/value' }, dependsOn: ['a'] }] };
+  const journal = await runPlan(base(good));
+  assert.equal(journal.results.b, 'real');
+  replayPlan({ ...base(good), journal });
+  // Ordinary strings that merely look JSON-ish are untouched: the signature is exact.
+  for (const benign of ['{"a":1}', '{ not json', '{"$task":1,"extra":2}', 'plain text', '["$task"]']) {
+    const plan = { version: 1, tasks: [{ id: 'a', tool: 'json.value', input: { v: benign } }] };
+    const j = await runPlan(base(plan));
+    assert.equal(j.outcome.status, 'completed', `benign string rejected: ${benign}`);
+  }
 });
