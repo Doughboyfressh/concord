@@ -138,6 +138,16 @@ export function buildChatContext({ message, history, observations = [], proposed
     // value, and several per array. The single failing condition is an array MIXING a literal with
     // a reference, where the reference gets coerced to a string to match its neighbour's type.
     // Earlier contract additions aimed at the wrong cause and so did nothing for it.
+    // Round 008: with mixed arrays fixed, three topologies still failed at execution with
+    // "/values/0 expected type string but found object" — the reference omitted `path`, so it
+    // resolved to the tool's whole result object where a string was required. The examples showed
+    // a path but no rule stated what omitting one means.
+    'A reference WITHOUT "path" resolves to that task\'s entire result object, not to a value ' +
+    'inside it. Wherever a string, number or other scalar is required, include a path naming the ' +
+    'key: text.concat returns {"value": ...}, so use {"$task":"join","path":"/value"}, and ' +
+    'files.read returns the file body under "text", so use {"$task":"read","path":"/text"}. Omit ' +
+    '"path" only when the whole result object is genuinely what belongs in that position. Each ' +
+    'tool\'s outputKeys below names the keys its result always has. ' +
     'An array may contain literal values and references together, and such an array is NOT required ' +
     'to be type-homogeneous. Do not convert a reference into a string to match a neighbouring ' +
     'literal: ["label:", {"$task":"join","path":"/value"}] is correct and intended, with the first ' +
