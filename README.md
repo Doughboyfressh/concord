@@ -53,7 +53,10 @@ failure after a tool returns is reported as OUTPUT_REJECTED, because the effect 
 and only its output was unusable, while a genuine throw mid-effect stays indeterminate. [Round 011](docs/training-round-011.md)
 widened the knowledge channel itself: recall delivered one lesson per turn while already scoring
 several, so it now delivers up to six within a byte bound, which raised the right-lesson-arrives
-rate from 7/10 to 10/10, and sixteen distilled lessons were promoted into memory. This improves harness behavior and
+rate from 7/10 to 10/10, and sixteen distilled lessons were promoted into memory. [Round 012](docs/training-round-012.md)
+measured the interpretation gap that round 002 called irreducible: six of six receipt-reporting
+conditions were faithful across two trials, and the one imprecision found traced to memory.recall
+returning a ranked list whose length is not a match count, now stated as matchedCount. This improves harness behavior and
 guidance; it does not retrain model weights. `scripts/train.mjs` provides an explicitly opt-in six-turn local
 model exercise with exact network grants, a reviewed pure tool plan, and replay checks. See the report for
 the command, observations and limits. Normal validation remains offline.

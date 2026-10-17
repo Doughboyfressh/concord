@@ -64,7 +64,10 @@ test('promoting a colliding-id candidate with different content fails closed', (
 test('memory.recall against an absent memory directory returns an empty result, not an error', () => {
   const temp = tempWorkspace();
   const result = tools.get('memory.recall').execute({ query: 'anything' }, { workspaceRoot: temp, policy });
-  assert.deepEqual(result, { strategy: 'lexical-overlap-v1', totalEntries: 0, corruptedEntries: 0, results: [] });
+  // matchedCount is reported alongside results because `results` is a ranked list that includes
+  // zero-scoring entries, so its length is not a match count. Round 012 measured a reader calling
+  // a zero-scoring entry "matched" with nothing in the output able to contradict it.
+  assert.deepEqual(result, { strategy: 'lexical-overlap-v1', totalEntries: 0, corruptedEntries: 0, matchedCount: 0, results: [] });
 });
 
 test('memory.recall ranks by lexical overlap with a deterministic tie-break, and is byte-identical across repeated calls', () => {
@@ -133,4 +136,26 @@ test('memory.promote requires an exact grant through the kernel; approval unbloc
   const approved = await runPlan({ plan, policy: policyFull, registry, sourceLock, approvals: [blocked.outcome.requestHash], workspaceRoot: temp });
   assert.equal(approved.outcome.status, 'completed');
   assert.equal(fs.existsSync(path.join(temp, 'memory', candidate.candidateHash + '.json')), true);
+});
+
+test('recall reports matchedCount separately from the ranked results length', () => {
+  // `results` is a ranked list, not a filter: it includes entries that scored zero, and
+  // fetchMemoryExcerpt applies the score>0 filter itself. Round 012 measured a reader describing a
+  // zero-scoring entry as having "matched" the query, and nothing in the output could contradict
+  // that reading. matchedCount makes the distinction checkable rather than inferable.
+  const temp = tempWorkspace();
+  const promote = tools.get('memory.promote');
+  const candidate = tools.get('memory.candidate').execute({ lesson: 'colour and geometry of unrelated shapes', evidence: [{ a: 1 }] }, { workspaceRoot: temp, policy });
+  promote.execute(candidate, { workspaceRoot: temp, policy });
+
+  const noOverlap = tools.get('memory.recall').execute({ query: 'zzqqxx nonexistent vocabulary' }, { workspaceRoot: temp, policy });
+  assert.equal(noOverlap.totalEntries, 1, 'the entry is stored and readable');
+  assert.equal(noOverlap.corruptedEntries, 0);
+  assert.equal(noOverlap.results.length, 1, 'ranked list still returns it');
+  assert.equal(noOverlap.results[0].score, 0, 'but it scored zero');
+  assert.equal(noOverlap.matchedCount, 0, 'so nothing actually matched');
+
+  const overlapping = tools.get('memory.recall').execute({ query: 'geometry of shapes' }, { workspaceRoot: temp, policy });
+  assert.ok(overlapping.results[0].score > 0);
+  assert.equal(overlapping.matchedCount, 1, 'a real term overlap counts as a match');
 });

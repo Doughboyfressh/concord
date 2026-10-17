@@ -112,7 +112,7 @@ export function makeBuiltinTools() {
         }
         return { path: relative, candidateHash, promoted: true };
       } },
-    { name: 'memory.recall', version: '1.0.0', outputKeys: ['corruptedEntries', 'results', 'strategy', 'totalEntries'], effect: 'read', inputSchema: object({ query: string, limit: { type: 'integer', minimum: 1, maximum: 100 } }, ['query']),
+    { name: 'memory.recall', version: '1.0.0', outputKeys: ['corruptedEntries', 'matchedCount', 'results', 'strategy', 'totalEntries'], effect: 'read', inputSchema: object({ query: string, limit: { type: 'integer', minimum: 1, maximum: 100 } }, ['query']),
       execute({ query, limit = 10 }, context) {
         const base = realpathSync(context.workspaceRoot);
         let names;
@@ -137,7 +137,12 @@ export function makeBuiltinTools() {
           } catch { corruptedEntries += 1; }
         }
         matches.sort((a, b) => b.score - a.score || (a.candidateHash < b.candidateHash ? -1 : a.candidateHash > b.candidateHash ? 1 : 0));
-        return { strategy: 'lexical-overlap-v1', totalEntries: names.length, corruptedEntries, results: matches.slice(0, limit) };
+        // `results` is a RANKED list, not a filter: it includes entries that scored zero, and
+        // fetchMemoryExcerpt applies the score>0 filter itself. Round 012 measured a reader
+        // calling a zero-scoring entry "matched", which the output gave no way to contradict.
+        // matchedCount states how many actually share a term with the query.
+        return { strategy: 'lexical-overlap-v1', totalEntries: names.length, corruptedEntries,
+          matchedCount: matches.filter((m) => m.score > 0).length, results: matches.slice(0, limit) };
       } },
   ];
 }
