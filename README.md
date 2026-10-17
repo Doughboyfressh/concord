@@ -38,7 +38,8 @@ intention can never read as performed work; injection resistance then tested and
 rejection diagnostics), and [round 004](docs/training-round-004.md) (task generalization, where plan
 structure generalized but value propagation failed twice and the attempted fixes did not help), and [round 005](docs/training-round-005.md) (declared tool output shapes, verified against real
 execution, which fixed one of those failures and turned the other from a silent wrong answer into
-a rejection). This improves harness behavior and
+a rejection), and [round 006](docs/training-round-006.md) (schema rejections that name the failing
+field and rule without echoing any value, measured at ten of ten on the round 003 sweep). This improves harness behavior and
 guidance; it does not retrain model weights. `scripts/train.mjs` provides an explicitly opt-in six-turn local
 model exercise with exact network grants, a reviewed pure tool plan, and replay checks. See the report for
 the command, observations and limits. Normal validation remains offline.

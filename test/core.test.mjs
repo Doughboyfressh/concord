@@ -304,3 +304,35 @@ test('a task reference serialised into a string is rejected, not silently execut
     assert.equal(j.outcome.status, 'completed', `benign string rejected: ${benign}`);
   }
 });
+
+test('a schema rejection names where and which rule, without ever echoing a value', () => {
+  // Round 005 measured the cost of a locationless message: a rejection reading only "Value does
+  // not satisfy the declared schema" names the rule but not the field, and could not be acted on.
+  const concat = { type: 'object', properties: { values: { type: 'array', items: { type: 'string' }, minItems: 1 }, separator: { type: 'string' } }, required: ['values', 'separator'], additionalProperties: false };
+  const message = (value, schema = concat) => { try { validateSchema(value, schema); return null; } catch (e) { return e.message; } };
+
+  assert.match(message({ values: ['a', 42], separator: '-' }), /\/values\/1 expected type string but found number/);
+  assert.match(message({ values: [], separator: ',' }), /\/values needs at least 1 item but has 0/);
+  assert.match(message({ separator: ',' }), /missing required property values/);
+  // An undeclared key is caller data and is never named; the schema's permitted names are.
+  assert.match(message({ values: ['a'], separator: ',', extra: 1 }), /has an undeclared property; permitted properties are separator, values/);
+  assert.match(message({ outer: { inner: [{ k: 'str' }] } }, { type: 'object', properties: { outer: { type: 'object', properties: { inner: { type: 'array', items: { type: 'object', properties: { k: { type: 'number' } } } } } } } }), /\/outer\/inner\/0\/k expected type number but found string/);
+  // Property names are RFC 6901 escaped, matching how task references address the same structures.
+  assert.match(message({ 'a/b': 1 }, { type: 'object', properties: { 'a/b': { type: 'string' } } }), /\/a~1b /);
+
+  // The invariant that matters: the offending value never appears. This text reaches model context
+  // and journaled failure reasons, so it must not become a channel for the data being validated.
+  const secret = 'SENSITIVE-VALUE-DO-NOT-ECHO';
+  for (const value of [{ values: [secret, 1], separator: ',' }, { values: ['a'], separator: 7, [secret]: 1 }]) {
+    const text = message(value);
+    assert.ok(text, 'rejected');
+    assert.doesNotMatch(text, new RegExp(secret), 'a validated value must never appear in the diagnostic');
+  }
+  // A failure inside an anyOf alternative is speculative, so the report stays at the alternative.
+  assert.match(message(7, { anyOf: [{ type: 'string' }, { type: 'object', properties: { a: { type: 'string' } } }] }), /matches none of the permitted alternatives/);
+
+  // Deterministic: identical content in a different key order yields an identical message,
+  // which is required because this text is recorded in journals and must replay byte for byte.
+  const pair = { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } } };
+  assert.equal(message({ a: 1, b: 2 }, pair), message({ b: 2, a: 1 }, pair));
+});

@@ -143,26 +143,70 @@ export function validateSchema(value, schema) {
     }
   }
   checkSchema(schema);
-  function accepts(v, s) {
-    if (typeof s === 'boolean') return s;
-    if (s.const !== undefined && canonical(v) !== canonical(s.const)) return false;
-    if (s.enum && !s.enum.some(x => canonical(v) === canonical(x))) return false;
-    if (s.anyOf && !s.anyOf.some(x => accepts(v, x))) return false;
-    if (s.oneOf && s.oneOf.filter(x => accepts(v, x)).length !== 1) return false;
+  // Where a value failed and which rule it broke, so a rejection is correctable. Round 005
+  // measured the cost of not having this: "Value does not satisfy the declared schema" names the
+  // rule but not the field, and a model could not act on it. Deliberately records LOCATION and
+  // RULE only, never any value: this text reaches model context and journaled failure reasons, so
+  // it must not become a channel for the data being validated. Property names are structural, and
+  // are length-capped so an oversized key cannot ride along as content.
+  let failure = null;
+  let speculative = 0;
+  const segment = (key) => '/' + String(key).replace(/~/g, '~0').replace(/\//g, '~1').slice(0, 64);
+  // A failure inside an anyOf/oneOf alternative is expected rather than diagnostic, so only
+  // non-speculative failures are recorded. The first one encountered wins, and object traversal is
+  // sorted by key, making the reported path a pure function of content rather than of key
+  // insertion order — required, because this string is recorded in journals and must replay.
+  const note = (path, rule) => { if (!speculative && !failure) failure = { path, rule }; };
+  const branch = (fn) => { speculative++; try { return fn(); } finally { speculative--; } };
+
+  function accepts(v, s, path = '') {
+    if (typeof s === 'boolean') { if (!s) note(path, 'schema forbids any value here'); return s; }
+    if (s.const !== undefined && canonical(v) !== canonical(s.const)) { note(path, 'does not equal the required constant'); return false; }
+    if (s.enum && !s.enum.some(x => canonical(v) === canonical(x))) { note(path, 'is not one of the permitted values'); return false; }
+    if (s.anyOf && !branch(() => s.anyOf.some(x => accepts(v, x, path)))) { note(path, 'matches none of the permitted alternatives'); return false; }
+    if (s.oneOf && branch(() => s.oneOf.filter(x => accepts(v, x, path)).length) !== 1) { note(path, 'must match exactly one alternative'); return false; }
     const kind = v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v;
-    if (s.type && !(s.type === kind || (s.type === 'integer' && kind === 'number' && Number.isSafeInteger(v)))) return false;
+    if (s.type && !(s.type === kind || (s.type === 'integer' && kind === 'number' && Number.isSafeInteger(v)))) {
+      note(path, `expected type ${s.type} but found ${kind}`); return false;
+    }
     if (kind === 'object') {
-      if (s.required?.some(k => !Object.hasOwn(v, k))) return false;
-      for (const [k, child] of Object.entries(v)) {
-        if (s.properties && Object.hasOwn(s.properties, k)) { if (!accepts(child, s.properties[k])) return false; }
-        else if (s.additionalProperties !== undefined && !accepts(child, s.additionalProperties)) return false;
+      const missing = s.required?.filter(k => !Object.hasOwn(v, k)) ?? [];
+      if (missing.length) { note(path, `missing required ${missing.length > 1 ? 'properties' : 'property'} ${missing.slice(0, 8).map(k => String(k).slice(0, 64)).join(', ')}`); return false; }
+      for (const k of Object.keys(v).sort()) {
+        const child = v[k];
+        // A DECLARED property name comes from the schema, so naming it in a path reveals nothing
+        // about the data. An UNDECLARED key is itself caller data — a key can be an email address
+        // or a secret — so it is never echoed; the permitted names are listed instead, which is
+        // both leak-free and more useful for correcting the input.
+        if (s.properties && Object.hasOwn(s.properties, k)) { if (!accepts(child, s.properties[k], path + segment(k))) return false; }
+        else if (s.additionalProperties !== undefined) {
+          if (s.additionalProperties === false) {
+            const permitted = Object.keys(s.properties ?? {}).sort().slice(0, 12).join(', ');
+            note(path, `has an undeclared property; permitted ${permitted ? 'properties are ' + permitted : 'properties: none'}`);
+            return false;
+          }
+          if (!accepts(child, s.additionalProperties, path + '/(additional property)')) return false;
+        }
       }
     }
-    if (kind === 'array' && ((s.minItems !== undefined && v.length < s.minItems) || (s.maxItems !== undefined && v.length > s.maxItems) || (s.items !== undefined && v.some(x => !accepts(x, s.items))))) return false;
-    if (kind === 'string' && ((s.minLength !== undefined && [...v].length < s.minLength) || (s.maxLength !== undefined && [...v].length > s.maxLength))) return false;
-    if (kind === 'number' && ((s.minimum !== undefined && v < s.minimum) || (s.maximum !== undefined && v > s.maximum))) return false;
+    if (kind === 'array') {
+      if (s.minItems !== undefined && v.length < s.minItems) { note(path, `needs at least ${s.minItems} item${s.minItems === 1 ? '' : 's'} but has ${v.length}`); return false; }
+      if (s.maxItems !== undefined && v.length > s.maxItems) { note(path, `allows at most ${s.maxItems} items but has ${v.length}`); return false; }
+      if (s.items !== undefined) for (let i = 0; i < v.length; i++) if (!accepts(v[i], s.items, path + segment(i))) return false;
+    }
+    if (kind === 'string') {
+      if (s.minLength !== undefined && [...v].length < s.minLength) { note(path, `is shorter than the minimum length ${s.minLength}`); return false; }
+      if (s.maxLength !== undefined && [...v].length > s.maxLength) { note(path, `is longer than the maximum length ${s.maxLength}`); return false; }
+    }
+    if (kind === 'number') {
+      if (s.minimum !== undefined && v < s.minimum) { note(path, `is below the minimum ${s.minimum}`); return false; }
+      if (s.maximum !== undefined && v > s.maximum) { note(path, `is above the maximum ${s.maximum}`); return false; }
+    }
     return true;
   }
-  if (!accepts(value, schema)) throw new HarnessError('SCHEMA_MISMATCH', 'Value does not satisfy the declared schema');
+  if (!accepts(value, schema)) {
+    const where = failure ? `${failure.path === '' ? 'the value' : failure.path} ${failure.rule}` : null;
+    throw new HarnessError('SCHEMA_MISMATCH', where ? `Value does not satisfy the declared schema: ${where}` : 'Value does not satisfy the declared schema');
+  }
   return true;
 }
