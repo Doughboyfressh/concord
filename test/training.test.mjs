@@ -324,3 +324,41 @@ test('a malformed JSON pointer and a missing dependency are distinguishable in t
     assert.match(state.lastError.reason, /RFC 6901 JSON pointer/);
   } finally { f.close(); }
 });
+
+test('a plan needing two approvals is refused before anything executes', async () => {
+  // Round 009 measured the failure this prevents: a two-write plan granted both effects, landed
+  // the first file, then failed EFFECT_INDETERMINATE on the write that had certainly succeeded,
+  // because each approval re-attempts the plan from its first task and files.write is
+  // exclusive-create. Such a plan can never complete through this harness, so it is refused
+  // before it can half-execute and leave a real effect behind.
+  const twoWrites = { version: 1, tasks: [
+    { id: 'a', tool: 'files.write', input: { path: 'a.txt', content: 'A' } },
+    { id: 'b', tool: 'files.write', input: { path: 'b.txt', content: 'B' } },
+  ] };
+  const f = fixture(() => ({ reply: 'Writing both files.', plan: twoWrites }));
+  try {
+    const state = await send(f.harness, 'Write both files.');
+    assert.equal(state.lastError.code, 'MODEL_PROPOSAL_INVALID');
+    assert.equal(state.lastError.reasonCode, 'PLAN_UNEXECUTABLE');
+    assert.match(state.lastError.reason, /at most one task requiring approval/);
+    assert.equal(state.proposedPlan, null);
+    // The reply is rejected atomically too, so no narrative about writing survives.
+    assert.equal(state.history.at(-1).role, 'user');
+  } finally { f.close(); }
+});
+
+test('one approval-requiring task per plan is still accepted, alongside pure work', async () => {
+  const oneWrite = { version: 1, tasks: [
+    { id: 'join', tool: 'text.concat', input: { values: ['x', 'y'], separator: '-' } },
+    { id: 'w', tool: 'files.write', input: { path: 'only.txt', content: { $task: 'join', path: '/value' } }, dependsOn: ['join'] },
+  ] };
+  const f = fixture(() => ({ reply: 'Writing one file.', plan: oneWrite }));
+  try {
+    const state = await send(f.harness, 'Write one file.');
+    assert.equal(state.lastError, null);
+    assert.equal(state.proposedPlan.tasks.length, 2);
+    // The write still gates: it blocks for its own exact grant rather than running unapproved.
+    const attempted = await f.harness.executePlan();
+    assert.equal(attempted.pending.tool, 'files.write');
+  } finally { f.close(); }
+});

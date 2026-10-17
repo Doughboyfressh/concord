@@ -53,3 +53,18 @@ It does not retry a blocked or failed attempt automatically, does not resume an 
 process restarts, and does not clear or rotate the approval set — approvals accumulate for the life of the
 harness instance, which is safe only because a request hash is specific to one exact plan/task/input/identity
 combination.
+
+It therefore cannot execute a plan containing **more than one ungranted approval-requiring effect**. This is
+a consequence of two deliberate decisions rather than a separate rule: a run blocks at the first ungranted
+effect, and approving it re-attempts the plan from its first task, because there is no resume. The
+already-completed effect runs a second time, and anything not idempotent fails — `files.write` creates
+exclusively (`flag: 'wx'`) specifically so an approval cannot overwrite existing data, so its retry fails
+`EEXIST`. Measured in `docs/training-round-009.md`: a two-write plan grants both effects, lands the first
+file, and then reports `files.write:failed`, leaving the plan permanently unable to finish. Note that the
+re-attempt is reported as `EFFECT_INDETERMINATE`, which reads as "may have occurred" when in fact the effect
+certainly did occur on the previous attempt.
+
+Sequence such effects as separate plans, one approval each. The chat contract instructs the model to propose
+at most one per plan for this reason. Lifting the limit needs the idempotency keys and reconciliation that
+`docs/architecture.md` already names as the prerequisite for durable retries; it is not a prompt or adapter
+fix.

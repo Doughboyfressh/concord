@@ -142,6 +142,16 @@ export function buildChatContext({ message, history, observations = [], proposed
     // "/values/0 expected type string but found object" — the reference omitted `path`, so it
     // resolved to the tool's whole result object where a string was required. The examples showed
     // a path but no rule stated what omitting one means.
+    // Round 009 measured this: a plan with two ungranted writes can never complete. Each grant
+    // re-attempts the plan from the start (no resume, by design), so an already-completed write is
+    // re-executed, and files.write is exclusive-create so the retry fails EEXIST. Both underlying
+    // decisions are deliberate; this consequence was undocumented. Proposing one write per plan
+    // avoids an unexecutable plan, in the same spirit as not proposing what cannot validate.
+    'Include at most ONE task needing approval (a write, network or process effect) per plan. ' +
+    'Each approval re-attempts the plan from its first task, so a second ungranted effect would ' +
+    'force an already-completed one to run again, which fails for anything not idempotent. If a ' +
+    'request needs several such effects, propose the first and say that the rest require their own ' +
+    'plans once this one has run. ' +
     'A reference WITHOUT "path" resolves to that task\'s entire result object, not to a value ' +
     'inside it. Wherever a string, number or other scalar is required, include a path naming the ' +
     'key: text.concat returns {"value": ...}, so use {"$task":"join","path":"/value"}, and ' +

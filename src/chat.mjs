@@ -84,8 +84,30 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
 
   const isLive = () => registry.has(MODEL_TOOL);
 
+  // A plan with two ungranted approval-requiring effects cannot complete through this harness:
+  // a run blocks at the first, and approving it re-attempts the plan from its first task because
+  // there is no resume, so the already-completed effect runs again and anything not idempotent
+  // fails. Round 009 measured exactly that — a two-write plan granted both effects, landed the
+  // first file, then failed with EFFECT_INDETERMINATE on the write that had certainly succeeded.
+  // Refusing it here keeps a provably unexecutable plan from half-executing and leaving a real
+  // effect behind. The kernel itself stays permissive: runPlan still accepts such a plan for a
+  // caller that can supply every grant up front, which this session-driven surface cannot.
+  const GRANTED_EFFECTS = ['write', 'network', 'process'];
+  function approvalRequiringTasks(plan) {
+    return (plan.tasks ?? []).filter(t => GRANTED_EFFECTS.includes((registry.get(t.tool) ?? {}).effect));
+  }
+
+  function assertSingleApproval(plan) {
+    const gated = approvalRequiringTasks(plan);
+    if (gated.length > 1) {
+      throw new HarnessError('PLAN_UNEXECUTABLE',
+        `A plan may contain at most one task requiring approval, because each approval re-attempts the plan from its first task; propose ${gated.map(t => t.tool).join(' and ')} as separate plans`);
+    }
+  }
+
   function adoptPlan(plan) {
     inspectPlan({ plan, policy, registry, sourceLock, workspaceRoot });
+    assertSingleApproval(plan);
     proposedPlan = plan;
   }
 
@@ -149,7 +171,12 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
       }, required: ['reply'], additionalProperties: false });
       if (!proposal.reply.trim()) throw new HarnessError('SCHEMA_MISMATCH', 'Reply must be nonempty');
       // Validate the whole response before committing its narrative or proposed actions.
-      if (proposal.plan) inspectPlan({ plan: proposal.plan, policy, registry, sourceLock, workspaceRoot });
+      // The proposal path validates and assigns directly rather than through adoptPlan, so the
+      // single-approval rule has to be applied here too or a model-proposed plan bypasses it.
+      if (proposal.plan) {
+        inspectPlan({ plan: proposal.plan, policy, registry, sourceLock, workspaceRoot });
+        assertSingleApproval(proposal.plan);
+      }
     } catch (error) {
       // `reason` carries the supervisor's own diagnostic text, which is what makes a rejection
       // correctable: a bare reasonCode like INVALID_REFERENCE does not say which rule was broken,

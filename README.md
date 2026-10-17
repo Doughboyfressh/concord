@@ -45,7 +45,10 @@ failure was not a model limitation but one untargeted condition, an array mixing
 reference, fixed by a single contract sentence and verified end to end. [Round 008](docs/training-round-008.md)
 is the first properly varied generalization measurement: eight conditions across reference
 topology, data type and failure propagation, each executed and value-checked, eight of eight
-correct across two runs after one further contract rule about reference paths. This improves harness behavior and
+correct across two runs after one further contract rule about reference paths. [Round 009](docs/training-round-009.md)
+closed the write-effect gap and found that a plan needing two approvals could never complete yet
+would half-execute first; such a plan is now refused before any effect, leaving the workspace
+untouched. This improves harness behavior and
 guidance; it does not retrain model weights. `scripts/train.mjs` provides an explicitly opt-in six-turn local
 model exercise with exact network grants, a reviewed pure tool plan, and replay checks. See the report for
 the command, observations and limits. Normal validation remains offline.
