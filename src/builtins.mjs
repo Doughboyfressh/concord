@@ -23,6 +23,37 @@ export function makeBuiltinTools() {
       execute(input) { return { algorithm: 'sha256/concord-json-v1', digest: digest(input) }; } },
     { name: 'json.assert', version: '1.0.0', effect: 'pure', inputSchema: object({ value: true, schema: true }),
       execute({ value, schema }) { validateSchema(value, schema); return { passed: true, value, evidenceHash: digest(value) }; } },
+    { name: 'text.concat', version: '1.0.0', effect: 'pure', inputSchema: object({ values: { type: 'array', items: string, minItems: 1, maxItems: 1000 }, separator: string }),
+      // A fixed, explicit join over caller-ordered values — no format sniffing, no implicit separator.
+      // Self-validates rather than trusting the declared schema alone: a pure tool's execute()
+      // can be, and elsewhere in this codebase already is, called directly on unsanitized input
+      // (chat-context.mjs calls capabilities.search.execute() directly for exactly this reason).
+      execute({ values, separator }) {
+        if (!values.every((v) => typeof v === 'string')) throw new HarnessError('INPUT_INVALID', 'Every value must be a string');
+        return { value: values.join(separator) };
+      } },
+    { name: 'json.mergeShallow', version: '1.0.0', effect: 'pure', inputSchema: object({ values: { type: 'array', items: { type: 'object' }, minItems: 1, maxItems: 1000 } }),
+      // Fail-closed on any key collision rather than silently last-write-wins: combining
+      // concurrent results (e.g. process.runMany's own output) must not hide a real conflict.
+      // Rejects __proto__/prototype/constructor itself rather than relying solely on the
+      // kernel's own canonical()/validateSchema() gate for that discipline (same reasoning as
+      // text.concat above) — assigning an untrusted "__proto__" key into a plain {} object
+      // triggers Object.prototype's accessor instead of creating a normal own property.
+      execute({ values }) {
+        const unsafe = new Set(['__proto__', 'prototype', 'constructor']);
+        const seen = new Set();
+        const merged = {};
+        for (const entry of values) {
+          if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) throw new HarnessError('INPUT_INVALID', 'Every value must be a plain object');
+          for (const key of Object.keys(entry)) {
+            if (unsafe.has(key)) throw new HarnessError('INPUT_INVALID', 'Unsafe object key', { key });
+            if (seen.has(key)) throw new HarnessError('MERGE_COLLISION', 'Duplicate key across merge inputs', { key });
+            seen.add(key);
+            merged[key] = entry[key];
+          }
+        }
+        return { value: merged };
+      } },
     { name: 'skills.rank', version: '1.0.0', effect: 'pure', inputSchema: object({ query: string, skills: { type: 'array', maxItems: 10000, items: object({ id: string, text: string }) }, limit: { type: 'integer', minimum: 1, maximum: 100 } }, ['query', 'skills']),
       execute({ query, skills, limit = 5 }) {
         const tokenize = text => [...new Set(text.toLowerCase().match(/[a-z0-9]+/g) ?? [])];

@@ -107,6 +107,20 @@ Example configuration (replace paths and digests with reviewed local artifacts):
 A task calling `process.runMany` with `{"names": ["lint.eslint", "lint.typecheck"]}` runs both
 concurrently and returns both outcomes, succeeding or failing independently.
 
+### Combining results: `text.concat` and `json.mergeShallow`
+
+`process.runMany` deliberately returns raw per-child results with no attempt at "merge" — that
+word means genuinely different things depending on what the children produced (string
+concatenation, structured aggregation, conflict reconciliation are not the same algorithm, and a
+tool that guessed which one you meant would overclaim). Instead, two small `pure`-effect builtins
+in `src/builtins.mjs` compose explicitly with a later plan task via the normal `$task`/JSON-pointer
+reference mechanism: `text.concat` (`{values: string[], separator: string}` → `{value: string}`,
+a fixed join in caller-given order) and `json.mergeShallow` (`{values: object[]}` → `{value:
+object}`, a shallow combine that **fails closed on any key collision** rather than silently
+picking a winner). Neither does format sniffing, locale-sensitive sorting, or diff/conflict
+reconciliation — combining `process.runMany`'s `stdout` fields or parsed JSON outputs is an
+explicit two-task composition, not a single "smart merge" call.
+
 ## UI component registry
 
 The optional `registry` configuration runs a UI component search client (21st-style) under the same `origin`/`apiKeyEnv`/`timeoutMs`/`maxOutputBytes` transport discipline as TypeSafe and the model adapter, minus a model ID (there is no model here). Input is `{query, limit?}`; the adapter POSTs `{query, limit}` to the configured path (default `/v1/components/search`) and validates the response as `{components: [{name, registryPath, dependencies?}]}` — not a bare passthrough. A response with more components than the requested limit, or any component missing `name`/`registryPath`, or a malformed `dependencies` array, is rejected (`INTEGRATION_OUTPUT`).
