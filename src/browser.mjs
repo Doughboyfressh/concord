@@ -184,6 +184,7 @@ async function runCdpSession(wsUrl, url, deadline, signal, maxChars) {
 
 const MAX_ACTIONS = 20;
 const MAX_EXTRACT_CHARS = 20_000;
+const MAX_FORM_FIELDS = 500;
 // Fixed function bodies: caller-supplied selector/value always travel as CDP `arguments`
 // (JSON values), never interpolated into source text, so a crafted selector or value can
 // never break out of the function body (unlike the `maxChars` interpolation above, which
@@ -192,6 +193,20 @@ const CLICK_FUNCTION = "function(sel){var el=document.querySelector(sel); if(!el
 const FILL_FUNCTION = "function(sel,val){var el=document.querySelector(sel); if(!el) throw new Error('selector not found'); el.focus(); el.value=val; el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true}));}";
 const EXISTS_FUNCTION = "function(sel){return !!document.querySelector(sel);}";
 const EXTRACT_FUNCTION = "function(sel,max){var el=sel?document.querySelector(sel):document.body; if(sel&&!el) throw new Error('selector not found'); return (el?el.innerText:'').slice(0,max);}";
+// Bounds (maxFields, maxValueChars) are applied here, inside the browser-side function,
+// before CDP ever serializes the return value — not only at the outer maxOutputBytes check
+// — so one pathological hidden field can't balloon the CDP response before that check runs.
+// A field literally named "__proto__"/"prototype"/"constructor" is skipped outright, matching
+// the same reserved-name denylist engine.mjs's resolve() and json.mergeShallow already apply
+// elsewhere in this codebase — not just because the naive `fields[node.name] = ...` assignment
+// would otherwise hit Object.prototype's accessor and silently vanish with no own key at all,
+// but because returning a "__proto__"-keyed value through CDP's own returnByValue appears to
+// hang the DevTools protocol response entirely (verified empirically: an otherwise-identical
+// page with a differently-named field returns normally; this one makes the call time out).
+// The field NAME is bounded by the same maxValueChars cap as the value, not just the value — a
+// page can set an arbitrarily long `name` attribute from script, and only the value side was
+// bounded before.
+const EXTRACT_FORM_FUNCTION = "function(sel,maxFields,maxValueChars){var el=document.querySelector(sel); if(!el) throw new Error('selector not found'); var nodes=el.querySelectorAll('input[name],select[name],textarea[name]'); var unsafe=['__proto__','prototype','constructor']; var fields={}, n=0; for (var i=0;i<nodes.length && n<maxFields;i++){ var node=nodes[i]; var key=String(node.name).slice(0,maxValueChars); if(unsafe.indexOf(key)!==-1) continue; var value=node.value==null?'':String(node.value); fields[key]=value.slice(0,maxValueChars); n++; } return fields;}";
 
 /**
  * Connect, navigate, then run a bounded sequence of click/fill/wait/extract actions over
@@ -244,6 +259,9 @@ async function runCdpAutomation(wsUrl, url, actions, deadline, signal, maxExtrac
           await new Promise((r) => setTimeout(r, 100));
         }
         results.push({ type: 'wait', selector: action.selector, ok: true });
+      } else if (action.type === 'extractForm') {
+        const fields = await callOn(EXTRACT_FORM_FUNCTION, [action.selector, MAX_FORM_FIELDS, maxExtractChars]);
+        results.push({ type: 'extractForm', selector: action.selector, fields: (fields && typeof fields === 'object' && !Array.isArray(fields)) ? fields : {} });
       } else {
         const text = await callOn(EXTRACT_FUNCTION, [action.selector ?? null, maxExtractChars]);
         results.push({ type: 'extract', selector: action.selector ?? null, text: typeof text === 'string' ? text : '' });
@@ -313,7 +331,7 @@ async function launchBrowserSession(settings, bound, context, run) {
 const actionSchema = {
   type: 'object', additionalProperties: false, required: ['type'],
   properties: {
-    type: { enum: ['click', 'fill', 'wait', 'extract'] },
+    type: { enum: ['click', 'fill', 'wait', 'extract', 'extractForm'] },
     selector: { type: 'string', minLength: 1, maxLength: 1024 },
     value: { type: 'string', maxLength: 8192 },
   },
@@ -358,7 +376,7 @@ export function makeBrowserTools(config) {
       try { parsedUrl = new URL(input.url); } catch { fail('BROWSER_INPUT', 'url must be an absolute URL'); }
       if (!['http:', 'https:'].includes(parsedUrl.protocol)) fail('BROWSER_INPUT', 'url must use http or https');
       for (const action of input.actions) {
-        if (['click', 'fill', 'wait'].includes(action.type) && typeof action.selector !== 'string') fail('BROWSER_INPUT', `"${action.type}" actions require a selector`);
+        if (['click', 'fill', 'wait', 'extractForm'].includes(action.type) && typeof action.selector !== 'string') fail('BROWSER_INPUT', `"${action.type}" actions require a selector`);
         if (action.type === 'fill' && typeof action.value !== 'string') fail('BROWSER_INPUT', '"fill" actions require a value');
       }
       const bound = limits(settings, context, 'browser.automate');

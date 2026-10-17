@@ -69,9 +69,29 @@ omitted), bounded per call and contributing to the same `maxOutputBytes` ceiling
 else in the result. `wait` polls for a selector to exist in the DOM, bounded by the same overall
 deadline as the rest of the call — there is no open-ended arbitrary sleep action.
 
+`extractForm` reads every named `<input>`/`<select>`/`<textarea>` inside the matched selector's
+container (not only a real `<form>` element) and returns `{fieldName: value}`. It uses the same
+`Runtime.callFunctionOn`, arguments-only call path as click/fill — no new injection surface. Both
+the field count (`MAX_FORM_FIELDS`, 500) and each field's name *and* value length are bounded
+**inside the browser-side function itself**, before CDP ever serializes the return value — not
+only at the outer `maxOutputBytes` check — so one pathological hidden field can't balloon the CDP
+response before that check runs. A field literally named `__proto__`, `prototype`, or
+`constructor` is skipped outright, matching the reserved-name denylist used elsewhere in this
+codebase (`engine.mjs`'s reference resolver, `json.mergeShallow`) — not only because a naive
+assignment would hit `Object.prototype`'s accessor and silently vanish with no own key at all, but
+because returning such a key through CDP's own `returnByValue` was found, empirically, to hang the
+DevTools protocol response entirely rather than erroring; skipping it avoids that failure mode
+outright rather than working around a browser-internal quirk. Deliberately scoped out of
+`extractForm`: `<table>`-to-row-object extraction (real header-detection and colspan/rowspan
+judgment calls that fail *silently* — misaligned data — rather than throwing, which doesn't belong
+in the same unambiguous-key shape `extractForm` has) and multi-step wizards (would need cross-call
+state, breaking the "no session held open across two separate calls" guarantee below).
+
 **`fill` values are journaled as ordinary task input, in plaintext, like every other tool's
-input.** Never type credentials through this tool; there is no redaction path for action values
-the way there is for named credential environment variables elsewhere in this codebase.
+input, and `extractForm` reads password- and hidden-type fields back with no type filtering —
+the same plaintext journaling applies symmetrically to whatever it reads.** Never type or read
+back credentials through this tool; there is no redaction path for action values the way there is
+for named credential environment variables elsewhere in this codebase.
 
 ## What is and isn't covered
 
@@ -79,12 +99,16 @@ the way there is for named credential environment variables elsewhere in this co
   navigation, text extraction, timeout/abort mid-session, teardown, independent profiles across
   sequential calls (`browser.snapshot`); a click→fill→extract round trip, a crafted
   injection-shaped selector proving `Runtime.callFunctionOn` argument-passing prevents script
-  breakout, a `window.open()` popup leaving the session attached to the original target, and the
-  same hang/timeout/cleanup guarantee mid-sequence (`browser.automate`).
+  breakout, a `window.open()` popup leaving the session attached to the original target, the same
+  hang/timeout/cleanup guarantee mid-sequence, and `extractForm` reading every named field —
+  including one filled earlier in the same sequence — its no-matching-container failure mode, a
+  reserved field name (`__proto__`) being skipped rather than hanging the call, and an oversized
+  field name being truncated to the same bound already applied to values (`browser.automate`).
 - **Not covered:** screenshots, shared logins or persisted cookies/storage across calls (a fresh
   profile is used and deleted every time), accessibility-tree extraction (this returns rendered
-  text, not an AX tree), drag/drop or keyboard-only interaction, and any session held open across
-  two separate tool calls (a deliberate boundary, not an oversight — see above).
+  text, not an AX tree), drag/drop or keyboard-only interaction, `<table>` extraction and
+  multi-step wizards (see above), and any session held open across two separate tool calls (a
+  deliberate boundary, not an oversight — see above).
 - **Residual, disclosed risk:** the local DevTools port is unauthenticated for the lifetime of one
   call — any other local process that reaches it during that window could attach. This is the same
   exposure class every other `process`-effect tool in this codebase already discloses, bounded by

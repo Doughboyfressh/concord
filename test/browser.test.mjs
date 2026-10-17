@@ -259,6 +259,98 @@ test('a window.open() popup triggered mid-sequence does not pull the session ont
   });
 });
 
+async function multiFieldFormFixture(fn) {
+  const server = createServer((request, response) => {
+    response.end([
+      '<!doctype html><html><body><form id="signup">',
+      '<input name="username" value="initial">',
+      '<input name="email" type="email">',
+      '<select name="plan"><option value="free" selected>Free</option><option value="pro">Pro</option></select>',
+      '<textarea name="notes">hello</textarea>',
+      '</form></body></html>',
+    ].join(''));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try { return await fn(`http://127.0.0.1:${server.address().port}/`); }
+  finally { await new Promise((resolve) => server.close(resolve)); }
+}
+
+test('extractForm without a selector is rejected before any process is launched', async () => {
+  const tool = automateTool();
+  await assert.rejects(tool.execute({ url: 'https://example.com/', actions: [{ type: 'extractForm' }] }, context), (e) => e instanceof HarnessError && e.code === 'BROWSER_INPUT');
+});
+
+test('browser.automate extractForm reads every named field, including ones filled earlier in the same sequence', { skip: realBrowser ? false : 'no configured or auto-detected browser binary on this host' }, async () => {
+  await multiFieldFormFixture(async (url) => {
+    const result = await automateTool().execute({ url, actions: [
+      { type: 'fill', selector: '[name="email"]', value: 'user@example.com' },
+      { type: 'extractForm', selector: '#signup' },
+    ] }, context);
+    assert.deepEqual(result.actions[1], {
+      type: 'extractForm',
+      selector: '#signup',
+      fields: { username: 'initial', email: 'user@example.com', plan: 'free', notes: 'hello' },
+    });
+  });
+});
+
+async function trickyFieldsFormFixture(fn) {
+  const server = createServer((request, response) => {
+    response.end([
+      '<!doctype html><html><body><form id="tricky">',
+      '<input name="__proto__" value="not-a-prototype-attack">',
+      '<input name="choice" value="first">',
+      '</form></body></html>',
+    ].join(''));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try { return await fn(`http://127.0.0.1:${server.address().port}/`); }
+  finally { await new Promise((resolve) => server.close(resolve)); }
+}
+
+test('extractForm skips a field literally named __proto__/prototype/constructor rather than hanging or silently mutating a prototype', { skip: realBrowser ? false : 'no configured or auto-detected browser binary on this host' }, async () => {
+  await trickyFieldsFormFixture(async (url) => {
+    const result = await automateTool().execute({ url, actions: [{ type: 'extractForm', selector: '#tricky' }] }, context);
+    const fields = result.actions[0].fields;
+    assert.equal(Object.getPrototypeOf(fields), Object.prototype);
+    assert.equal(Object.hasOwn(fields, '__proto__'), false);
+    assert.deepEqual(fields, { choice: 'first' });
+  });
+});
+
+async function longFieldNameFormFixture(fn) {
+  const longName = 'x'.repeat(25000); // longer than MAX_EXTRACT_CHARS (20000)
+  const server = createServer((request, response) => {
+    response.end(`<!doctype html><html><body><form id="f"><input name="${longName}" value="v"></form></body></html>`);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try { return await fn(`http://127.0.0.1:${server.address().port}/`, longName); }
+  finally { await new Promise((resolve) => server.close(resolve)); }
+}
+
+test('extractForm truncates an oversized field name to the same bound it already applies to values', { skip: realBrowser ? false : 'no configured or auto-detected browser binary on this host' }, async () => {
+  // Default (generous) policy: maxExtractChars is MAX_EXTRACT_CHARS (20000), well under the
+  // overall maxOutputBytes budget, so this isolates the per-field bound from the outer check —
+  // unlike setting a tiny maxOutputBytes, which would also shrink maxExtractChars and make the
+  // surrounding JSON structure itself exceed the same tiny budget regardless of truncation.
+  await longFieldNameFormFixture(async (url, longName) => {
+    const result = await automateTool().execute({ url, actions: [{ type: 'extractForm', selector: '#f' }] }, context);
+    const keys = Object.keys(result.actions[0].fields);
+    assert.equal(keys.length, 1);
+    assert.equal(keys[0].length, 20000, `field name was not truncated to MAX_EXTRACT_CHARS: length ${keys[0].length}`);
+    assert.ok(longName.startsWith(keys[0]), 'truncated key must be a prefix of the real field name');
+  });
+});
+
+test('extractForm on a selector with no matching container fails as a clean action error', { skip: realBrowser ? false : 'no configured or auto-detected browser binary on this host' }, async () => {
+  await multiFieldFormFixture(async (url) => {
+    await assert.rejects(
+      automateTool().execute({ url, actions: [{ type: 'extractForm', selector: '#does-not-exist' }] }, context),
+      (e) => e instanceof HarnessError && e.code === 'BROWSER_ACTION',
+    );
+  });
+});
+
 test('browser.automate on a page that hangs the renderer forever still times out, kills the browser, and removes the profile directory', { skip: realBrowser ? false : 'no configured or auto-detected browser binary on this host' }, async () => {
   await hangingPageFixture(async (url) => {
     const tool = automateTool(3000);
