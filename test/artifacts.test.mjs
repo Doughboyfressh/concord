@@ -74,19 +74,19 @@ test('identifies ELF, PE (via MZ+PE signature), ZIP, and PNG by magic bytes', ()
 test('extracts correct ELF32 header fields', () => {
   const temp = tempWorkspace();
   const result = inspect.execute({ path: writeFixture(temp, 'a32.elf', minimalElf(false)) }, { workspaceRoot: temp, policy });
-  assert.deepEqual(result.elf, { class: '32-bit', dataEncoding: 'little-endian', type: 2, machine: 3, entryPoint: 0x8048000, sectionCount: 11 });
+  assert.deepEqual(result.elf, { class: '32-bit', dataEncoding: 'little-endian', type: 2, machine: 3, entryPoint: 0x8048000, sectionCount: 11, neededLibraries: [] });
 });
 
 test('extracts correct ELF64 header fields, including a 64-bit entry point', () => {
   const temp = tempWorkspace();
   const result = inspect.execute({ path: writeFixture(temp, 'a64.elf', minimalElf(true)) }, { workspaceRoot: temp, policy });
-  assert.deepEqual(result.elf, { class: '64-bit', dataEncoding: 'little-endian', type: 2, machine: 0x3e, entryPoint: 0x400000, sectionCount: 11 });
+  assert.deepEqual(result.elf, { class: '64-bit', dataEncoding: 'little-endian', type: 2, machine: 0x3e, entryPoint: 0x400000, sectionCount: 11, neededLibraries: [] });
 });
 
 test('extracts correct PE header fields', () => {
   const temp = tempWorkspace();
   const result = inspect.execute({ path: writeFixture(temp, 'a.exe', minimalPe()) }, { workspaceRoot: temp, policy });
-  assert.deepEqual(result.pe, { machine: 0x8664, sectionCount: 7, timestamp: 1700000000, entryPoint: 0x1000 });
+  assert.deepEqual(result.pe, { machine: 0x8664, sectionCount: 7, timestamp: 1700000000, entryPoint: 0x1000, imports: [] });
 });
 
 test('a huge section count is only ever reported, never used to drive a parsing loop', () => {
@@ -144,6 +144,78 @@ test('arbitrary non-UTF-8 binary content succeeds, proving this tool never attem
   const result = inspect.execute({ path: writeFixture(temp, 'binary.bin', invalidUtf8) }, { workspaceRoot: temp, policy });
   assert.equal(result.bytes, invalidUtf8.length);
   assert.equal(result.sha256, createHash('sha256').update(invalidUtf8).digest('hex'));
+});
+
+test('a real small PE executable yields its actual imported DLL names', (t) => {
+  const source = 'C:/Windows/System32/attrib.exe';
+  if (!fs.existsSync(source)) return t.skip('attrib.exe not present on this host');
+  const temp = tempWorkspace();
+  const bytes = fs.readFileSync(source);
+  const name = writeFixture(temp, 'attrib.exe', bytes);
+  const result = inspect.execute({ path: name }, { workspaceRoot: temp, policy: { maxOutputBytes: bytes.length * 8 + 1024 } });
+  assert.equal(result.format, 'pe');
+  assert.ok(result.pe.imports.includes('ntdll.dll'));
+  assert.ok(result.pe.imports.includes('msvcrt.dll'));
+  assert.ok(result.pe.imports.length >= 5);
+});
+
+test('a real ELF shared library yields its actual DT_NEEDED library names', (t) => {
+  const source = 'C:/Windows/System32/DriverStore/FileRepository/nv_dispi.inf_amd64_436833bbb0f00476/libcuda_loader.so';
+  if (!fs.existsSync(source)) return t.skip('no real local ELF shared library found on this host');
+  const temp = tempWorkspace();
+  const bytes = fs.readFileSync(source);
+  const name = writeFixture(temp, 'lib.so', bytes);
+  const result = inspect.execute({ path: name }, { workspaceRoot: temp, policy: { maxOutputBytes: bytes.length * 8 + 1024 } });
+  assert.equal(result.format, 'elf');
+  assert.deepEqual(result.elf.neededLibraries, ['libc.so.6', 'libdl.so.2', 'libpthread.so.0']);
+});
+
+function elfWithUnterminatedNeeded() {
+  const buffer = Buffer.alloc(225); // byte 224 (the real last byte) is a lone non-NUL character
+  buffer.write('\x7fELF', 0, 'latin1');
+  buffer[4] = 2; buffer[5] = 1; buffer[6] = 1; // 64-bit, little-endian, version 1
+  buffer.writeUInt16LE(2, 16); // e_type
+  buffer.writeUInt16LE(0x3e, 18); // e_machine
+  buffer.writeUInt32LE(1, 20); // e_version
+  buffer.writeBigUInt64LE(64n, 32); // e_phoff
+  buffer.writeUInt16LE(56, 54); // e_phentsize
+  buffer.writeUInt16LE(2, 56); // e_phnum
+  // PH[0]: PT_LOAD, identity-maps the whole file at vaddr 0x1000
+  buffer.writeUInt32LE(1, 64); // p_type
+  buffer.writeBigUInt64LE(0n, 64 + 8); // p_offset
+  buffer.writeBigUInt64LE(0x1000n, 64 + 16); // p_vaddr
+  buffer.writeBigUInt64LE(225n, 64 + 32); // p_filesz
+  // PH[1]: PT_DYNAMIC
+  buffer.writeUInt32LE(2, 120); // p_type
+  buffer.writeBigUInt64LE(176n, 120 + 8); // p_offset
+  // Dynamic entries at file offset 176: DT_NEEDED(val=0), DT_STRTAB(val=0x10E0), DT_NULL
+  buffer.writeBigUInt64LE(1n, 176); buffer.writeBigUInt64LE(0n, 176 + 8);
+  buffer.writeBigUInt64LE(5n, 192); buffer.writeBigUInt64LE(0x10e0n, 192 + 8);
+  buffer.writeBigUInt64LE(0n, 208); buffer.writeBigUInt64LE(0n, 208 + 8);
+  buffer[224] = 0x41; // 'A' — no NUL terminator anywhere in the file
+  return buffer;
+}
+
+test('a DT_NEEDED string with no terminator before the real end of the file is rejected, not fabricated', () => {
+  const temp = tempWorkspace();
+  const result = inspect.execute({ path: writeFixture(temp, 'unterminated.elf', elfWithUnterminatedNeeded()) }, { workspaceRoot: temp, policy });
+  assert.deepEqual(result.elf.neededLibraries, []);
+});
+
+test('a huge ELF program-header count is bounded, never an unbounded parsing loop', () => {
+  const temp = tempWorkspace();
+  const elf = minimalElf(true);
+  elf.writeUInt16LE(0xffff, 56); // e_phnum, absurdly large, with no real program headers present
+  const result = inspect.execute({ path: writeFixture(temp, 'many-phdrs.elf', elf) }, { workspaceRoot: temp, policy });
+  assert.deepEqual(result.elf.neededLibraries, []);
+});
+
+test('a huge PE section count is bounded, never an unbounded parsing loop', () => {
+  const temp = tempWorkspace();
+  const pe = minimalPe();
+  pe.writeUInt16LE(0xffff, 70); // NumberOfSections, absurdly large, with no real section table present
+  const result = inspect.execute({ path: writeFixture(temp, 'many-pe-sections.exe', pe) }, { workspaceRoot: temp, policy });
+  assert.deepEqual(result.pe.imports, []);
 });
 
 test('a symlinked artifact is rejected, matching files.read\'s discipline', (t) => {
