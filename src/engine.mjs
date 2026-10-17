@@ -214,23 +214,39 @@ export async function runPlan(options) {
       emit('intent', { taskId: id, tool: tool.name, inputHash: digest(input), requestHash });
       const controller = new AbortController();
       let timer;
+      // Two stages, deliberately separated. A throw out of tool.execute is genuinely
+      // indeterminate for a non-pure tool: the effect may have landed before the throw and the
+      // kernel cannot know. A failure AFTER execute returned is not indeterminate at all — the
+      // output is in hand, so the effect certainly occurred and only its output was unusable.
+      // Collapsing both into EFFECT_INDETERMINATE told an operator "may have occurred" about an
+      // effect that definitely had, which invites retrying something non-idempotent.
+      let failure;
       try {
         const timeout = new Promise((_, reject) => {
           timer = setTimeout(() => { controller.abort(); reject(new HarnessError('TIMEOUT', 'Tool deadline exceeded')); }, c.policy.timeoutMs);
         });
         const output = await Promise.race([Promise.resolve().then(() => tool.execute(input, { workspaceRoot: c.identity.workspaceRoot, policy: c.policy, signal: controller.signal, requestHash })), timeout]);
-        const frozenOutput = deepFreeze(clone(output));
-        assert(Buffer.byteLength(canonical(frozenOutput)) <= c.policy.maxOutputBytes, 'OUTPUT_LIMIT', 'Tool output exceeds byte budget');
-        if (task.outputSchema !== undefined) validateSchema(frozenOutput, task.outputSchema);
-        // Reserve the success receipt and terminal envelope before another effect.
-        const reserve = Buffer.byteLength(canonical(frozenOutput)) + 2048;
-        assert(journalBytes + reserve <= c.policy.maxJournalBytes, 'JOURNAL_LIMIT', 'Insufficient space for output receipt');
-        emit('completed', { taskId: id, output: frozenOutput, outputHash: digest(frozenOutput) });
-        results[id] = frozenOutput;
+        // Past this point the tool has returned; a failure below concerns the output, not the effect.
+        try {
+          const frozenOutput = deepFreeze(clone(output));
+          assert(Buffer.byteLength(canonical(frozenOutput)) <= c.policy.maxOutputBytes, 'OUTPUT_LIMIT', 'Tool output exceeds byte budget');
+          if (task.outputSchema !== undefined) validateSchema(frozenOutput, task.outputSchema);
+          // Reserve the success receipt and terminal envelope before another effect.
+          const reserve = Buffer.byteLength(canonical(frozenOutput)) + 2048;
+          assert(journalBytes + reserve <= c.policy.maxJournalBytes, 'JOURNAL_LIMIT', 'Insufficient space for output receipt');
+          emit('completed', { taskId: id, output: frozenOutput, outputHash: digest(frozenOutput) });
+          results[id] = frozenOutput;
+        } catch (error) {
+          failure = { code: 'OUTPUT_REJECTED',
+            reason: error instanceof HarnessError ? error.message : 'Tool output could not be recorded' };
+        }
       } catch {
-        const code = tool.effect === 'pure' ? 'TOOL_FAILED' : 'EFFECT_INDETERMINATE';
-        emit('failed', { taskId: id, code }); outcome = { status: 'failed', taskId: id, code }; break;
+        failure = { code: tool.effect === 'pure' ? 'TOOL_FAILED' : 'EFFECT_INDETERMINATE' };
       } finally { clearTimeout(timer); }
+      if (failure) {
+        emit('failed', { taskId: id, code: failure.code, ...(failure.reason ? { reason: failure.reason } : {}) });
+        outcome = { status: 'failed', taskId: id, code: failure.code }; break;
+      }
     }
     if (!outcome) outcome = { status: 'completed' };
     emit('settled', outcome);
@@ -286,8 +302,17 @@ export function replayPlan(options) {
     }
     take('intent', { taskId: id, tool: tool.name, inputHash: digest(input), requestHash });
     if (j.events[index]?.type === 'failed') {
-      const code = tool.effect === 'pure' ? 'TOOL_FAILED' : 'EFFECT_INDETERMINATE';
-      take('failed', { taskId: id, code }); outcome = { status: 'failed', taskId: id, code }; break;
+      // Which failure occurred cannot be re-derived without re-executing, so the recorded event is
+      // taken and then checked for legality — the same shape as the completed receipt below, which
+      // also takes a value it cannot reproduce and then asserts properties of it. The check that
+      // matters survives: a journal cannot claim a pure tool's TOOL_FAILED for an effectful tool,
+      // nor OUTPUT_REJECTED without the output having been produced in the first place.
+      const legal = tool.effect === 'pure' ? ['TOOL_FAILED', 'OUTPUT_REJECTED'] : ['EFFECT_INDETERMINATE', 'OUTPUT_REJECTED'];
+      const recorded = take('failed');
+      assert(recorded && recorded.taskId === id && legal.includes(recorded.code), 'REPLAY_TRANSITION', 'Illegal recorded failure for this tool effect');
+      assert(canonical(Object.keys(recorded).sort()) === canonical(recorded.reason === undefined ? ['code', 'taskId'] : ['code', 'reason', 'taskId']), 'REPLAY_TRANSITION', 'Unexpected failure receipt fields');
+      assert(recorded.reason === undefined || typeof recorded.reason === 'string', 'REPLAY_TRANSITION', 'Failure reason must be text');
+      outcome = { status: 'failed', taskId: id, code: recorded.code }; break;
     }
     const beforeOutput = consumedBytes;
     const receipt = take('completed');

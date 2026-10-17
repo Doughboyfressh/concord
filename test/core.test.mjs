@@ -95,11 +95,15 @@ test('postconditions stop dependents and replay records failure without executio
   const j = await runPlan(base(plan)); assert.equal(j.outcome.status, 'failed'); assert.equal(j.results.b, undefined);
   replayPlan({ ...base(plan), journal: j });
 });
-test('deadlines and non-JSON outputs fail closed', async () => {
-  for (const execute of [() => undefined, () => new Promise(() => {})]) {
+test('deadlines and non-JSON outputs fail closed, with distinct codes', async () => {
+  // Both still fail closed; round 010 separated the stage at which they fail. A non-JSON return
+  // value means the tool RETURNED and its output was unusable (OUTPUT_REJECTED); a deadline means
+  // execution never produced a value at all (TOOL_FAILED here, since the tool is pure). The
+  // distinction exists for effectful tools, where only the second case is genuinely indeterminate.
+  for (const [execute, expected] of [[() => undefined, 'OUTPUT_REJECTED'], [() => new Promise(() => {}), 'TOOL_FAILED']]) {
     const tool = { name: 'x', version: '1', effect: 'pure', inputSchema: true, execute };
     const options = base({ version: 1, tasks: [{ id: 'a', tool: 'x', input: null }] }, { registry: new Map([['x', tool]]), policy: { ...policy, allowedTools: ['x'], timeoutMs: 10 } });
-    const j = await runPlan(options); assert.equal(j.outcome.code, 'TOOL_FAILED'); replayPlan({ ...options, journal: j });
+    const j = await runPlan(options); assert.equal(j.outcome.code, expected); replayPlan({ ...options, journal: j });
   }
 });
 test('reserve journal budget before invoking effects', async () => {
@@ -363,4 +367,52 @@ test('an array may mix literal values with references, and resolves each in plac
   const second = await runPlan(base(interleaved));
   assert.equal(second.results.both.value, 'pq|middle|rs');
   replayPlan({ ...base(interleaved), journal: second });
+});
+
+test('a failure after the tool returned is not reported as a possibly-occurred effect', async () => {
+  // Round 009 saw EFFECT_INDETERMINATE for a write that had certainly happened. Round 010 measured
+  // the unambiguous version of that: when a tool RETURNS and the failure is about its output, the
+  // engine is holding the output, so the effect definitely occurred. Calling that "may have
+  // occurred" invites retrying something non-idempotent, which is the hazard the code exists for.
+  const temp = mkdtempSync(path.join(tmpdir(), 'concord-stage-'));
+  const tool = { name: 'w', version: '1', effect: 'write', inputSchema: true,
+    execute({ name }, ctx) { writeFileSync(path.join(ctx.workspaceRoot, name), 'x'); return { big: 'y'.repeat(50) }; } };
+  const opts = (plan, pol = {}) => ({ plan, registry: new Map([['w', tool]]), sourceLock: { version: 1 }, workspaceRoot: temp,
+    policy: { version: 1, allowedTools: ['w'], allowedEffects: ['write'], maxOutputBytes: 10000, maxJournalBytes: 100000, ...pol } });
+  const grantAndRun = async (o) => { const b = await runPlan(o); return runPlan({ ...o, approvals: [b.events.find(e => e.type === 'blocked').data.requestHash] }); };
+
+  // The declared outputSchema rejects a result the tool really produced.
+  const schemaCase = opts({ version: 1, tasks: [{ id: 'a', tool: 'w', input: { name: 'A.txt' }, outputSchema: { const: 'never' } }] });
+  const a = await grantAndRun(schemaCase);
+  assert.equal(a.outcome.code, 'OUTPUT_REJECTED');
+  assert.ok(existsSync(path.join(temp, 'A.txt')), 'the effect really happened');
+  assert.match(a.events.find(e => e.type === 'failed').data.reason, /required constant/);
+  replayPlan({ ...schemaCase, journal: a });
+
+  // The output exceeds the byte budget, which is also a post-return condition.
+  const budgetCase = opts({ version: 1, tasks: [{ id: 'b', tool: 'w', input: { name: 'B.txt' } }] }, { maxOutputBytes: 20 });
+  const b = await grantAndRun(budgetCase);
+  assert.equal(b.outcome.code, 'OUTPUT_REJECTED');
+  assert.ok(existsSync(path.join(temp, 'B.txt')));
+  replayPlan({ ...budgetCase, journal: b });
+
+  // A throw out of execute stays indeterminate: the kernel genuinely cannot know how far it got.
+  const thrower = { name: 't', version: '1', effect: 'write', inputSchema: true, execute() { throw new Error('midway'); } };
+  const throwCase = { plan: { version: 1, tasks: [{ id: 'c', tool: 't', input: {} }] }, registry: new Map([['t', thrower]]),
+    sourceLock: { version: 1 }, workspaceRoot: temp,
+    policy: { version: 1, allowedTools: ['t'], allowedEffects: ['write'], maxOutputBytes: 10000, maxJournalBytes: 100000 } };
+  const c = await grantAndRun(throwCase);
+  assert.equal(c.outcome.code, 'EFFECT_INDETERMINATE');
+  replayPlan({ ...throwCase, journal: c });
+
+  // Replay still refuses a journal claiming a code illegal for this tool's effect, so taking the
+  // recorded failure rather than re-deriving it did not give up the check that matters.
+  const forged = clone(c);
+  forged.events.find(e => e.type === 'failed').data.code = 'TOOL_FAILED';
+  forged.outcome.code = 'TOOL_FAILED';
+  let previous = digest(forged.header);
+  for (const e of forged.events) { e.previous = previous; e.hash = digest({ previous, seq: e.seq, type: e.type, data: e.data }); previous = e.hash; }
+  forged.root = previous;
+  assert.throws(() => replayPlan({ ...throwCase, journal: forged }), e => e.code === 'REPLAY_TRANSITION');
+  rmSync(temp, { recursive: true, force: true });
 });

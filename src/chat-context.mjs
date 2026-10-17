@@ -200,7 +200,13 @@ export function buildChatContext({ message, history, observations = [], proposed
     'no execution object is unattested, which is not evidence of success. Never quote your own earlier ' +
     'reply as proof that work happened; cite a receipt or an execution record. ' +
     'EFFECT_INDETERMINATE means the ' +
-    'effect may have occurred; do not claim it failed safely or automatically retry it. Deterministic ' +
+    'effect may have occurred; do not claim it failed safely or automatically retry it. ' +
+    // Round 010 split these: EFFECT_INDETERMINATE had been reported for failures that happened
+    // after the tool returned, where the effect had certainly occurred, which understates it.
+    'OUTPUT_REJECTED is different and stronger: the tool completed, so for a write, network or ' +
+    'process tool its effect DID occur, and only its output was unusable. Never describe an ' +
+    'OUTPUT_REJECTED effect as not having happened, and never retry it; report that it happened ' +
+    'and that its result was not recorded, quoting the failure reason. Deterministic ' +
     'replay validates recorded events and state transitions; it NEVER invokes tools or makes model calls. ' +
     'Live model inference is not guaranteed deterministic. Coaching and promoted memories do not change model weights.';
 
