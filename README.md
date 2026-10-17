@@ -48,7 +48,12 @@ topology, data type and failure propagation, each executed and value-checked, ei
 correct across two runs after one further contract rule about reference paths. [Round 009](docs/training-round-009.md)
 closed the write-effect gap and found that a plan needing two approvals could never complete yet
 would half-execute first; such a plan is now refused before any effect, leaving the workspace
-untouched. This improves harness behavior and
+untouched. [Round 010](docs/training-round-010.md) narrowed EFFECT_INDETERMINATE in the kernel: a
+failure after a tool returns is reported as OUTPUT_REJECTED, because the effect certainly occurred
+and only its output was unusable, while a genuine throw mid-effect stays indeterminate. [Round 011](docs/training-round-011.md)
+widened the knowledge channel itself: recall delivered one lesson per turn while already scoring
+several, so it now delivers up to six within a byte bound, which raised the right-lesson-arrives
+rate from 7/10 to 10/10, and sixteen distilled lessons were promoted into memory. This improves harness behavior and
 guidance; it does not retrain model weights. `scripts/train.mjs` provides an explicitly opt-in six-turn local
 model exercise with exact network grants, a reviewed pure tool plan, and replay checks. See the report for
 the command, observations and limits. Normal validation remains offline.

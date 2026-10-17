@@ -5,6 +5,10 @@ import { boundedRecords, boundedValue } from './chat-data.mjs';
 const MODEL_TOOL = 'model.propose';
 const MAX_SKILL_EXCERPT_CHARS = 1500;
 const MAX_SETTLED_ATTEMPTS = 8;
+// How much learned knowledge one turn may carry. Bounded by bytes rather than by count so the
+// cost stays fixed as the memory store grows, in the same spirit as every other context bound.
+const MAX_RECALLED_LESSONS = 6;
+const MAX_MEMORY_EXCERPT_BYTES = 6000;
 
 function excerptNote(skillExcerpt) {
   if (!skillExcerpt) return '';
@@ -270,13 +274,30 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
   async function fetchMemoryExcerpt(message) {
     if (!registry.has('memory.recall')) return null;
     try {
-      const plan = { version: 1, name: 'memory-enrichment', tasks: [{ id: 'recall', tool: 'memory.recall', input: { query: message, limit: 3 } }] };
+      const plan = { version: 1, name: 'memory-enrichment', tasks: [{ id: 'recall', tool: 'memory.recall', input: { query: message, limit: MAX_RECALLED_LESSONS * 2 } }] };
       const record = await attempt(plan);
       if (record.status !== 'completed') return null;
-      const top = record.result.results.recall?.results?.[0];
-      if (!top || typeof top.lesson !== 'string' || !(top.score > 0)) return null;
-      return { candidateHash: top.candidateHash, lesson: top.lesson.slice(0, MAX_SKILL_EXCERPT_CHARS),
-        truncated: top.lesson.length > MAX_SKILL_EXCERPT_CHARS };
+      // Previously only results[0] was kept, discarding matches the recall had already scored and
+      // returned. One lesson per turn was a hard ceiling on how much learned knowledge could reach
+      // the model, for no benefit: the work was done and thrown away. The primary match keeps its
+      // place and shape, and further scoring matches ride alongside under `related`, bounded by a
+      // total byte budget so the context cost stays fixed rather than growing with the store.
+      const scored = (record.result.results.recall?.results ?? [])
+        .filter((r) => r && typeof r.lesson === 'string' && r.score > 0);
+      if (!scored.length) return null;
+      const kept = [];
+      let bytes = 0;
+      for (const match of scored.slice(0, MAX_RECALLED_LESSONS)) {
+        const lesson = match.lesson.slice(0, MAX_SKILL_EXCERPT_CHARS);
+        const size = Buffer.byteLength(lesson);
+        // The primary match is always kept, so this never returns less than it used to.
+        if (kept.length && bytes + size > MAX_MEMORY_EXCERPT_BYTES) break;
+        kept.push({ candidateHash: match.candidateHash, lesson, score: match.score,
+          truncated: match.lesson.length > MAX_SKILL_EXCERPT_CHARS });
+        bytes += size;
+      }
+      const [primary, ...related] = kept;
+      return { ...primary, ...(related.length ? { related } : {}) };
     } catch { return null; } // A fresh workspace with no memory/ directory, or any other recall failure, never breaks the turn.
   }
 
