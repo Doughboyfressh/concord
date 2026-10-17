@@ -336,3 +336,31 @@ test('a schema rejection names where and which rule, without ever echoing a valu
   const pair = { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } } };
   assert.equal(message({ a: 1, b: 2 }, pair), message({ b: 2, a: 1 }, pair));
 });
+
+test('an array may mix literal values with references, and resolves each in place', async () => {
+  // Rounds 004-006 read a repeated failure here as a model serialisation weakness. That was wrong:
+  // references emit correctly alone in an array, as an object property, and several per array. The
+  // single failing condition was an array MIXING a literal with a reference, where the reference
+  // was coerced to a string for type-homogeneity with its neighbour. The kernel always accepted
+  // the mixed form; this pins that, so no future reference check (such as the stringified-reference
+  // rejection) can start refusing a legitimate mixed array.
+  const plan = { version: 1, tasks: [
+    { id: 'join', tool: 'text.concat', input: { values: ['x', 'y'], separator: '-' } },
+    { id: 'mixed', tool: 'text.concat', input: { values: ['label:', { $task: 'join', path: '/value' }], separator: ' ' }, dependsOn: ['join'] },
+  ] };
+  const journal = await runPlan(base(plan));
+  assert.equal(journal.outcome.status, 'completed');
+  // The reference resolved to the referenced value, not to its own source text.
+  assert.equal(journal.results.mixed.value, 'label: x-y');
+  replayPlan({ ...base(plan), journal });
+
+  // Several references and literals interleaved, each resolving independently and in order.
+  const interleaved = { version: 1, tasks: [
+    { id: 'a', tool: 'text.concat', input: { values: ['p', 'q'], separator: '' } },
+    { id: 'b', tool: 'text.concat', input: { values: ['r', 's'], separator: '' } },
+    { id: 'both', tool: 'text.concat', input: { values: [{ $task: 'a', path: '/value' }, 'middle', { $task: 'b', path: '/value' }], separator: '|' }, dependsOn: ['a', 'b'] },
+  ] };
+  const second = await runPlan(base(interleaved));
+  assert.equal(second.results.both.value, 'pq|middle|rs');
+  replayPlan({ ...base(interleaved), journal: second });
+});

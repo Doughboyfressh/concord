@@ -58,9 +58,15 @@ reference, then a stringified reference used as an **object key**. The declared 
 
 Four prompt interventions have now been tried, including an explicit statement that a reference is
 exempt from the declared type at its position because the schema describes the resolved value.
-Each one improved the prose and left the JSON wrong. **Prompt text is falsified as the lever for
-this failure.** It is not a knowledge or instruction gap; the model states the right answer and
-cannot emit it.
+Each one improved the prose and left the JSON wrong.
+
+> **Corrected by round 007.** This round concluded that prompt text was falsified as the lever
+> and that the model could not emit the form. Both claims were wrong. Round 007 isolated the
+> real condition by experiment: references emit correctly alone in an array, as an object
+> property value, and several per array. The only failing case was an array MIXING a literal
+> with a reference. Every intervention tried here aimed at a different cause, so none of them
+> tested the hypothesis they were credited with falsifying. One correctly aimed sentence fixed
+> it. See docs/training-round-007.md.
 
 The harness-level defect was that a stringified reference is a *valid string*. It satisfied every
 schema, passed the gate, executed, and produced a result built from the reference's own source

@@ -134,6 +134,14 @@ export function buildChatContext({ message, history, observations = [], proposed
     // values as items of type string, so a raw reference object there looks like a type violation
     // -- and the feasibility rule below tells it to check inputs against schemas. Those two read
     // as contradictory unless the exemption is stated, so state it.
+    // Isolated by experiment: references emit correctly alone in an array, as an object property
+    // value, and several per array. The single failing condition is an array MIXING a literal with
+    // a reference, where the reference gets coerced to a string to match its neighbour's type.
+    // Earlier contract additions aimed at the wrong cause and so did nothing for it.
+    'An array may contain literal values and references together, and such an array is NOT required ' +
+    'to be type-homogeneous. Do not convert a reference into a string to match a neighbouring ' +
+    'literal: ["label:", {"$task":"join","path":"/value"}] is correct and intended, with the first ' +
+    'element a string and the second an object. ' +
     'A reference is exempt from the declared type at its position: the schema describes the ' +
     'RESOLVED value, so {"$task":"read","path":"/text"} is correct where a string is declared, ' +
     'and must not be quoted or stringified to satisfy that type. The supervisor resolves it before ' +

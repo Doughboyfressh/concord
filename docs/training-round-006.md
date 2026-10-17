@@ -83,9 +83,15 @@ would add ambiguity to a kernel whose value is that it has none.
 Concord's proposed alternative was to show the reference structure as a literal template rather
 than describing it in prose. **That was already implemented when it proposed it**: the contract
 contains five literal exemplars, including the exact form `{"$task":"read","path":"/text"}` twice.
-No sixth prose intervention was added. The exemplar has been present through all five failures,
-which strengthens rather than weakens the round 005 conclusion that prompt text is not the lever
-for this one.
+No sixth prose intervention was added.
+
+> **Corrected by round 007.** The reasoning here — that an exemplar present through all five
+> failures strengthens the conclusion that prompt text is not the lever — was wrong, because
+> every exemplar and rule addressed a cause that was not the actual one. The failure occurred
+> only when an array mixed a literal with a reference, and a single sentence stating that such
+> an array need not be type-homogeneous fixed it, verified end to end. Concord's instinct that
+> the problem was presentation rather than kernel design was closer to right than this round's
+> conclusion. See docs/training-round-007.md.
 
 ## A critique recorded, and partly disputed
 
