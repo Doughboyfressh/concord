@@ -17,7 +17,7 @@ const inventory = parseJson(fs.readFileSync(path.join(root, 'capabilities.lock.j
 function setup(workspaceRoot, additional = []) {
   const descriptors = [...makeBuiltinTools(), ...makeCapabilityTools(inventory), ...makeSourceTools(catalog), ...additional];
   const registry = new Map(descriptors.map(t => [t.name, t]));
-  const context = ({message,history}) => buildChatContext({message,history,sourceLock:catalog,inventory,registry,corpusRoot:root,instructionRoot:path.join(root,'instructions')});
+  const context = ({message,history,observations,proposedPlan,policy}) => buildChatContext({message,history,observations,proposedPlan,policy,sourceLock:catalog,inventory,registry,instructionRoot:path.join(root,'instructions')});
   return createChatHarness({registry,policy:{version:1,allowedTools:[...registry.keys()],allowedEffects:['pure','read','write','network'],maxTasks:32,maxOutputBytes:1048576,maxJournalBytes:16777216,timeoutMs:10000},sourceLock:catalog,workspaceRoot,buildContext:context});
 }
 
@@ -120,15 +120,18 @@ test('the skill-enrichment and memory-recall read effects never produce a pendin
   assert.equal(turn.pending, null);
 });
 
-test('live mode splices the untrusted skill excerpt into the system prompt only when the fetch actually succeeds', async () => {
-  let receivedSystem;
+test('live mode supplies acquired skills as untrusted reference data outside the system prompt', async () => {
+  let receivedSystem, receivedPrompt;
   const model = { name: 'model.propose', version: 'fixture-1', effect: 'network', inputSchema: { type: 'object' }, config: { fixture: true },
-    execute(input) { receivedSystem = input.system; return { model: 'fixture-1', proposal: { reply: 'ok' } }; } };
+    execute(input) { receivedSystem = input.system; receivedPrompt = JSON.parse(input.prompt); return { model: 'fixture-1', proposal: { reply: 'ok' } }; } };
 
   const resolvable = setup(root, [model]);
   let state = await resolvable.send(SKILL_QUERY);
   await resolvable.approve(state.pending.requestHash); // unblocks the network effect so execute() actually runs
-  assert.match(receivedSystem, /Untrusted reference skill \(ecc\): Security Review Skill/);
+  assert.equal(receivedPrompt.references.trust, 'untrusted-data');
+  assert.equal(receivedPrompt.references.skill.sourceId, 'ecc');
+  assert.equal(receivedPrompt.references.skill.title, 'Security Review Skill');
+  assert.doesNotMatch(receivedSystem, /Untrusted reference skill \(ecc\)/);
 
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-chat-flow-'));
   try {
@@ -136,6 +139,7 @@ test('live mode splices the untrusted skill excerpt into the system prompt only 
     state = await unresolvable.send(SKILL_QUERY);
     await unresolvable.approve(state.pending.requestHash);
     assert.doesNotMatch(receivedSystem, /Untrusted reference skill/);
+    assert.equal(receivedPrompt.references.skill, null);
   } finally { fs.rmSync(temp, {recursive:true,force:true}); }
 });
 

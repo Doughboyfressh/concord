@@ -101,7 +101,7 @@ function blockedDetail(result) {
 function publicChatState(snapshot) {
   // Mirror server.mjs's publicState allowlist; never expose provider config or credentials.
   const result = {};
-  for (const key of ['mode', 'history', 'selected', 'sourceCoverage', 'pending', 'proposedPlan', 'runs']) {
+  for (const key of ['mode', 'history', 'selected', 'sourceCoverage', 'pending', 'proposedPlan', 'runs', 'lastError', 'observations']) {
     if (snapshot && Object.hasOwn(snapshot, key)) result[key] = snapshot[key];
   }
   return result;
@@ -328,7 +328,7 @@ export async function main(argv = process.argv.slice(2)) {
   };
   const visibleRegistry = new Map([...registry].filter(([name, tool]) => policy.allowedTools.includes(name) && policy.allowedEffects.includes(tool.effect)));
   const instructionRoot = path.join(root, 'instructions');
-  const buildContext = ({ message, history }) => buildChatContext({ message, history, sourceLock: catalog, inventory, registry: visibleRegistry, instructionRoot });
+  const buildContext = ({ message, history, observations, proposedPlan }) => buildChatContext({ message, history, observations, proposedPlan, sourceLock: catalog, inventory, registry: visibleRegistry, policy, instructionRoot });
   const resourceContext = buildContext({ message: 'Concord MCP server startup', history: [] });
   const harness = createChatHarness({ registry, policy, sourceLock, workspaceRoot, buildContext });
 

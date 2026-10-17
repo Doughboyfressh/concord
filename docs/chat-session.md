@@ -7,7 +7,7 @@ far. It returns five methods: `send`, `approve`, `executePlan`, `replay`, `snaps
 
 ## The turn cycle
 
-1. **`send(message)`** appends the message to history, calls `buildContext({message, history})` (see
+1. **`send(message)`** appends the message to history, calls `buildContext({message, history, observations, proposedPlan, policy})` (see
    [source-derived instructions](chat-instructions.md)), and proposes exactly one plan: a deterministic
    pure-tool demonstration plan when no `model.propose` tool is registered, or a single-task plan that calls
    `model.propose` when one is. The proposed plan is validated structurally (`inspectPlan`) before it is
@@ -20,10 +20,12 @@ far. It returns five methods: `send`, `approve`, `executePlan`, `replay`, `snaps
    surface as `pending` on the returned state, and nothing beyond that point in the plan has executed.
 3. **`approve(requestHash)`** accepts only the hash currently in `pending`; anything else throws. On match, the
    hash joins the harness's accumulated approval set and the current proposed plan is attempted again. If that
-   attempt completes and its last task's output carries a `{reply?, plan?}` shape (the contract `model.propose`
-   returns), the reply is appended to history and the plan — after its own structural validation — replaces the
-   proposed plan. A model's returned plan is data until that validation passes; it cannot execute anything by
-   being returned.
+   attempt completes with a final `model.propose` task, its `{reply, plan?}` output is validated as a complete
+   unit before the reply is appended or the plan adopted. Invalid replies/plans set `lastError` to
+   `MODEL_PROPOSAL_INVALID` with a `reasonCode`, clear the proposed plan, and add a rejection observation.
+   Their narrative is never appended as an accepted reply. Other tools' outputs cannot impersonate model
+   replies by returning an object with a `proposal` property. A valid returned plan is still data until
+   separately executed; a reply with no plan clears the proposal.
 4. **`executePlan(plan?)`** attempts the given plan, or the current proposed plan if none is given, and is a
    no-op if that exact plan object was already the last one attempted and nothing is pending (so a caller that
    calls `executePlan()` right after a `send()` that already completed does not re-run the same pure tools for
@@ -31,6 +33,11 @@ far. It returns five methods: `send`, `approve`, `executePlan`, `replay`, `snaps
 5. **`replay(runId)`** looks up the run's recorded `{plan, result}` by its content-derived id and calls the
    kernel's `replayPlan` against the harness's own policy/registry/sourceLock/workspaceRoot. Replay never calls
    `tool.execute`; it only verifies the recorded hash chain reproduces the same transitions.
+
+Snapshots also expose a bounded `observations` window and `lastError` (or `null`). Each execution attempt
+records task receipts for subsequent inference: actual outputs for non-model tools, output hashes, blocked
+request hashes and failure codes. Model plan rejection is separate from the model network run completing:
+transport success does not mean its proposal was accepted. The UI displays supervisor errors visibly.
 
 ## Run identity and evidence
 

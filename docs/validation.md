@@ -27,7 +27,13 @@ for the person who ran it, not a committed artifact. A nonzero exit from any ste
 | `integrations.test.mjs` | The TypeSafe and model HTTP adapters against local fixture endpoints. |
 | `workers.test.mjs` | The DeepSeek Harness SDK process adapter against a local protocol fixture, including every listed protocol-violation and resource-bound case. |
 | `chat-flow.test.mjs` | The chat session broker (`src/chat.mjs`) in-process: the offline demonstration end to end, and a live-model fixture's propose/approve/execute/approve/replay cycle. |
+| `training.test.mjs` | Bounded history, actual tool contracts, pure-only preview, tool receipt continuity, proposal provenance/rejection, deep output bounds and iterative plan edits. |
 | `server.test.mjs` | The local HTTP server (`src/server.mjs`) over real sockets: host/origin/token enforcement, security headers, the offline and live-model flows through the actual `/api/*` routes, and a child-process run of the real `scripts/chat.mjs` entrypoint sending the same message twice. |
+| `artifacts.test.mjs` | Native static format inspection, malformed/truncated records, ZIP/Mach-O/WASM bounds, and inspection through strict-JSON capture/replay. |
+| `browser.test.mjs` | CDP browser contracts, multi-step automation, snapshots and structured form extraction. |
+| `memory.test.mjs` | Reviewed memory promotion, recall and workspace containment. |
+| `merge.test.mjs` | Explicit text/result composition tools. |
+| `mcp.test.mjs` | MCP transport, tool/resource exposure and chat control. |
 
 That last case in `server.test.mjs` is a direct regression test: a repeated identical chat turn recomputes the
 same content-derived run id, and `scripts/chat.mjs`'s evidence writer must treat that as an idempotent no-op
@@ -37,8 +43,22 @@ have caught it, because it never calls `persistRun` at all. `server.test.mjs` cl
 
 ## What stays unverified by any script here
 
-Live provider calls (a real model endpoint, a real TypeSafe account), the DeepSeek Harness native runtime, and
+Normal validation does not make live provider calls. The DeepSeek Harness native runtime, TypeSafe account, and
 the Hermes/REA/ego-lite/Orca/21st runtime bridges are source-available and contract-documented but not
-exercised by any test in this repository — see [adapters](adapters.md), [agent workers](agent-workers.md), and
+exercised by normal tests in this repository — see [adapters](adapters.md), [agent workers](agent-workers.md), and
 [feature synthesis and implementation status](architecture.md) for exactly what each one's integration status
 is. No test here grants network access to a real upstream service.
+
+The opt-in `scripts/train.mjs --live` exercise separately verifies the configured local model through a
+fresh MCP process. The [first supervised round](training-round-001.md) passed six live turns and 89
+structural checks, plus a separate two-response partial-failure exercise with nine checks. Semantic
+responses are preserved for review and not assigned automatic correctness scores.
+
+After the chat improvements, full validation passed **215 tests, three platform skips, zero failures**
+(218 total), syntax and CLI end-to-end checks. Evidence:
+`.agents/evidence/validation-2026-10-17T04-26-17-310Z/`.
+
+The 2026-10-16 upgrade review passed syntax, the full suite (**205 passed, 3 platform-dependent skips,
+0 failures**), and CLI end-to-end checks. See [upgrade review](upgrade-review.md) for the exact fixes and
+evidence path. Validation now records the actual Git head, branch and remote names instead of the stale
+assumption that the repository has no remote; it preserves existing work and does not rebase or push.

@@ -17,6 +17,7 @@
     "e2e": "node scripts/e2e.mjs",
     "chat": "node scripts/chat.mjs",
     "mcp": "node src/mcp.mjs",
+    "train": "node scripts/train.mjs",
     "validate": "node scripts/validate.mjs"
   }
 }

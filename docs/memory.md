@@ -39,6 +39,11 @@ hard-linked file (rejected identically to every other read-effect tool here) —
 whole call; it's counted in `corruptedEntries` and excluded from `results`. The total entry count
 is bounded (`OUTPUT_LIMIT`) so an oversized store fails closed rather than scanning without end.
 
+Live chat uses the top relevant lesson as bounded, explicitly untrusted reference data in the model's
+user payload, with its candidate hash and truncation flag. Promotion makes it durable; it never makes
+it a system instruction or grants tool authority. See the [first supervised training round](training-round-001.md)
+for a real evidence-linked promotion and replay.
+
 ## What is and isn't covered
 
 - **Covered, tested:** digest verification on promote, idempotent resubmission, a planted symlink

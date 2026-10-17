@@ -56,6 +56,7 @@ async function fetchState() {
 function applyState(next) {
   state = { mode: null, history: [], sourceCoverage: [], selected: [], pending: null, proposedPlan: null, runs: [], ...next };
   render();
+  if (state.lastError) showError(`Concord supervisor: ${state.lastError.code}${state.lastError.reasonCode ? ' (' + state.lastError.reasonCode + ')' : ''}. Review the recorded observation before trying again.`);
 }
 
 function clearChildren(node) { while (node.firstChild) node.removeChild(node.firstChild); }

@@ -62,7 +62,7 @@ async function start() {
   const sourceLock = { catalog, inventoryHash: digest(inventory), runtime: { node: process.version, platform: process.platform, arch: process.arch, files: runtimeFiles.map(f => ({ path: f, sha256: createHash('sha256').update(fs.readFileSync(path.join(root, f))).digest('hex') })) } };
   const visibleRegistry = new Map([...registry].filter(([name, tool]) => policy.allowedTools.includes(name) && policy.allowedEffects.includes(tool.effect)));
   const harness = createChatHarness({ registry, policy, sourceLock, workspaceRoot,
-    buildContext: ({message,history}) => buildChatContext({ message, history, sourceLock: catalog, inventory, registry: visibleRegistry, corpusRoot: root, instructionRoot: path.join(root, 'instructions') }),
+    buildContext: ({message,history,observations,proposedPlan}) => buildChatContext({ message, history, observations, proposedPlan, sourceLock: catalog, inventory, registry: visibleRegistry, policy, instructionRoot: path.join(root, 'instructions') }),
     persistRun: async record => {
       const id = record.id ?? digest(record).slice(0, 24);
       if (!/^[A-Za-z0-9._-]{1,128}$/.test(id)) throw new HarnessError('CHAT_STORE', 'Invalid run ID');

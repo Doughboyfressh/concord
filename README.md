@@ -28,6 +28,14 @@ The example also contains TypeSafe configuration; remove unused sections rather 
 
 Chat evidence and snapshots persist under the printed local store. This version does not automatically resume interrupted tool effects or reconstruct old sessions into a new process. Preserve local run evidence for audit/replay.
 
+## Supervised improvement
+
+Codex and Concord's [first training round](docs/training-round-001.md) turned live failures into context and
+supervisor fixes, regression tests, and an evidence-linked memory. This improves harness behavior and
+guidance; it does not retrain model weights. `scripts/train.mjs` provides an explicitly opt-in six-turn local
+model exercise with exact network grants, a reviewed pure tool plan, and replay checks. See the report for
+the command, observations and limits. Normal validation remains offline.
+
 ## Connect an MCP client
 
 ```powershell

@@ -1,8 +1,10 @@
-import { digest, clone, HarnessError } from './value.mjs';
+import { canonical, digest, clone, validateSchema, HarnessError } from './value.mjs';
 import { runPlan, replayPlan, inspectPlan } from './engine.mjs';
+import { boundedRecords, boundedValue } from './chat-data.mjs';
 
 const MODEL_TOOL = 'model.propose';
 const MAX_SKILL_EXCERPT_CHARS = 1500;
+const MAX_SETTLED_ATTEMPTS = 8;
 
 function excerptNote(skillExcerpt) {
   if (!skillExcerpt) return '';
@@ -34,8 +36,14 @@ function offlineDemoPlan(context, message, skillExcerpt, memoryExcerpt) {
 }
 
 function livePlan(message, context, skillExcerpt, memoryExcerpt) {
-  const input = { prompt: message };
-  const system = (context.systemPrompt ?? '') + excerptNote(skillExcerpt) + memoryNote(memoryExcerpt);
+  const input = { prompt: canonical({
+    currentRequest: message,
+    conversation: context.conversation ?? boundedRecords([]),
+    observations: context.observations ?? boundedRecords([]),
+    proposal: context.proposal ?? null,
+    references: { trust: 'untrusted-data', capabilities: context.selected ?? [], skill: skillExcerpt, memory: memoryExcerpt },
+  }) };
+  const system = context.systemPrompt ?? '';
   if (system) input.system = system;
   return { version: 1, name: 'live-proposal', tasks: [{ id: 'propose', tool: MODEL_TOOL, input }] };
 }
@@ -65,6 +73,8 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
   const history = [];
   const approvals = new Set();
   const runs = [];
+  const observations = [];
+  let lastError = null;
   let proposedPlan = null;
   let lastAttemptedPlan = null;
   let pending = null;
@@ -82,8 +92,27 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
   async function attempt(plan) {
     const result = await runPlan({ plan, policy, registry, sourceLock, approvals: [...approvals], workspaceRoot });
     const id = digest(result).slice(0, 24);
-    const record = { id, status: result.outcome.status, plan, result };
+    // planHash makes `runs` a durable, content-addressed execution ledger. Unlike the bounded
+    // observation window fed to the model, `runs` is never truncated, so "did this proposed plan
+    // ever actually run" stays answerable for the whole session.
+    const record = { id, status: result.outcome.status, plan, planHash: digest(plan), result };
     runs.push(record);
+    const tasks = result.events.filter(e => ['completed', 'failed', 'blocked'].includes(e.type)).map(e => {
+      const task = plan.tasks.find(t => t.id === e.data.taskId);
+      const receipt = { taskId: e.data.taskId, tool: task.tool, status: e.type };
+      if (e.type === 'completed') {
+        receipt.outputHash = e.data.outputHash;
+        // Model replies already belong in history. Do not recursively duplicate prompts/proposals.
+        if (task.tool !== MODEL_TOOL) {
+          const bounded = boundedValue(e.data.output);
+          if (!bounded.omitted) receipt.output = bounded.value;
+          else receipt.outputOmitted = bounded;
+        }
+      } else if (e.type === 'failed') receipt.code = e.data.code;
+      else receipt.requestHash = e.data.requestHash;
+      return receipt;
+    });
+    observations.push({ runId: id, root: result.root, status: record.status, tasks });
     lastAttemptedPlan = plan;
     if (persistRun) await persistRun(record);
     return record;
@@ -95,18 +124,89 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
       return;
     }
     pending = null;
-    if (record.status !== 'completed') return;
+    if (record.status !== 'completed') {
+      lastError = { runId: record.id, code: record.result.outcome.code, taskId: record.result.outcome.taskId };
+      return;
+    }
+    lastError = null;
     const lastTaskId = record.plan.tasks.map(t => t.id).at(-1);
+    // Untrusted data from any other tool must never impersonate a model proposal.
+    if (record.plan.tasks.at(-1).tool !== MODEL_TOOL) return;
     const output = record.result.results[lastTaskId];
     const proposal = output && typeof output === 'object' && !Array.isArray(output) ? output.proposal : undefined;
-    if (!proposal || typeof proposal !== 'object' || Array.isArray(proposal)) return;
-    if (typeof proposal.reply === 'string' && proposal.reply.trim()) {
-      history.push({ role: 'assistant', content: proposal.reply });
+    try {
+      validateSchema(proposal, { type: 'object', properties: {
+        reply: { type: 'string', minLength: 1, maxLength: 65536 },
+        // An explicit `"plan": null` is a cooperative way to say "this turn acts on nothing".
+        // Accepting only `{type:'object'}` rejected it as SCHEMA_MISMATCH, punishing the model
+        // for being explicit while silently accepting a bare omission.
+        plan: { anyOf: [{ type: 'object' }, { type: 'null' }] },
+      }, required: ['reply'], additionalProperties: false });
+      if (!proposal.reply.trim()) throw new HarnessError('SCHEMA_MISMATCH', 'Reply must be nonempty');
+      // Validate the whole response before committing its narrative or proposed actions.
+      if (proposal.plan) inspectPlan({ plan: proposal.plan, policy, registry, sourceLock, workspaceRoot });
+    } catch (error) {
+      lastError = { runId: record.id, code: 'MODEL_PROPOSAL_INVALID', reasonCode: error instanceof HarnessError ? error.code : 'INVALID_PROPOSAL' };
+      observations.push({ ...lastError, status: 'rejected', source: 'supervisor' });
+      proposedPlan = null;
+      return;
     }
-    if (proposal.plan && typeof proposal.plan === 'object') {
-      // Untrusted model output: validated structurally before it can replace the proposed plan.
-      adoptPlan(clone(proposal.plan));
-    }
+    proposedPlan = proposal.plan ? clone(proposal.plan) : null;
+    // Supervisor-minted provenance, stored INSIDE the same record as the reply it describes.
+    // That co-location is load-bearing: `conversation` and `observations` are bounded
+    // independently (24 vs 8 items), so a receipt kept only in the observation stream can be
+    // evicted while the reply asserting the work survives -- which is exactly how a turn that
+    // executed nothing stayed quotable as evidence of completed work. boundedRecords drops whole
+    // records, so a receipt carried by its own reply can never be separated from it.
+    // A model cannot forge this: additionalProperties:false above forbids an `execution` key.
+    // runsAtCommit is this turn's position in the run ledger, which is what lets a later
+    // execution be attributed to the turn that actually proposed it rather than to any turn
+    // that happened to propose identical bytes. A count, not a clock: deterministic.
+    history.push({ role: 'assistant', content: proposal.reply,
+      execution: proposal.plan
+        ? { kind: 'plan-proposed', planHash: digest(proposal.plan), runsAtCommit: runs.length }
+        : { kind: 'reply-only', planHash: null, runsAtCommit: runs.length } });
+  }
+
+  /**
+   * A pure projection of (history, runs). Resolves each committed reply's proposed plan against
+   * the durable run ledger by content hash, so the model is handed `ran: true/false` rather than
+   * being asked to infer execution from the absence of a receipt in a window that may already
+   * have dropped it. Reports every attempt with its real status, and lists tools only from runs
+   * that actually completed -- it never asserts the converse (that an unlisted tool did not run),
+   * because a partially-failed run can execute tools without completing.
+   */
+  function settleHistory(entries) {
+    // Attribute every run to exactly one proposing turn: the latest matching commit at or before
+    // that run, which is the turn whose plan `executePlan` would actually have been holding.
+    // Matching on plan hash alone over-credits -- two turns proposing byte-identical plans would
+    // both claim one execution, reporting ran:true for a turn whose plan never ran. That is the
+    // wrong direction for a fix about false assurance, so it is ruled out by construction here.
+    const proposers = entries
+      .map((entry, index) => ({ entry, index }))
+      .filter(({ entry }) => entry.role === 'assistant' && entry.execution
+        && entry.execution.kind === 'plan-proposed' && typeof entry.execution.runsAtCommit === 'number');
+    const claimed = new Map();
+    runs.forEach((run, runIndex) => {
+      // `.at(-1)`: proposers are in history order, so the last eligible one is the latest commit.
+      const owner = proposers.filter(p => p.entry.execution.planHash === run.planHash
+        && p.entry.execution.runsAtCommit <= runIndex).at(-1);
+      if (!owner) return;
+      if (!claimed.has(owner.index)) claimed.set(owner.index, []);
+      claimed.get(owner.index).push(run);
+    });
+    return entries.map((entry, index) => {
+      if (entry.role !== 'assistant' || !entry.execution || entry.execution.kind !== 'plan-proposed') return entry;
+      const attempts = claimed.get(index) ?? [];
+      const completed = attempts.filter(r => r.status === 'completed');
+      return { ...entry, execution: { ...entry.execution,
+        ran: completed.length > 0,
+        // Bounded like every other context record: a pathological re-attempt loop must not grow
+        // an unbounded array inside a history entry. Newest attempts are the informative ones.
+        attempts: attempts.slice(-MAX_SETTLED_ATTEMPTS).map(r => ({ runId: r.id, status: r.status })),
+        attemptCount: attempts.length,
+        toolsCompleted: [...new Set(completed.flatMap(r => r.plan.tasks.map(t => t.tool)))].sort() } };
+    });
   }
 
   async function fetchSkillExcerpt() {
@@ -120,7 +220,9 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
       const entrypoint = snapshotResult?.files?.find((f) => f.path === 'SKILL.md');
       if (!entrypoint || typeof entrypoint.content !== 'string') return null;
       // Prefer the capability index's human-readable title over the SKILL.md frontmatter's machine slug.
-      return { sourceId: match.sourceId, title: match.title ?? snapshotResult.metadata?.name, text: entrypoint.content.slice(0, MAX_SKILL_EXCERPT_CHARS) };
+      return { sourceId: match.sourceId, title: match.title ?? snapshotResult.metadata?.name,
+        path: match.path, snapshotDigest: snapshotResult.snapshotDigest ?? null,
+        text: entrypoint.content.slice(0, MAX_SKILL_EXCERPT_CHARS), truncated: entrypoint.content.length > MAX_SKILL_EXCERPT_CHARS };
     } catch { return null; } // Imported source skill text is untrusted reference material; a failed fetch never breaks the turn.
   }
 
@@ -133,14 +235,16 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
       if (record.status !== 'completed') return null;
       const top = record.result.results.recall?.results?.[0];
       if (!top || typeof top.lesson !== 'string' || !(top.score > 0)) return null;
-      return { candidateHash: top.candidateHash, lesson: top.lesson };
+      return { candidateHash: top.candidateHash, lesson: top.lesson.slice(0, MAX_SKILL_EXCERPT_CHARS),
+        truncated: top.lesson.length > MAX_SKILL_EXCERPT_CHARS };
     } catch { return null; } // A fresh workspace with no memory/ directory, or any other recall failure, never breaks the turn.
   }
 
   async function send(message) {
     if (typeof message !== 'string' || !message.trim()) throw new HarnessError('CHAT_INPUT', 'A nonempty chat message is required');
     history.push({ role: 'user', content: message });
-    const context = await buildContext({ message, history: [...history] });
+    const context = await buildContext({ message, history: settleHistory(clone(history)), observations: clone(observations),
+      proposedPlan: proposedPlan ? clone(proposedPlan) : null, policy });
     sourceCoverage = Array.isArray(context.sourceCoverage) ? [...context.sourceCoverage] : [];
     selected = Array.isArray(context.selected) ? [...context.selected] : [];
     const skillExcerpt = await fetchSkillExcerpt();
@@ -148,7 +252,9 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
     mode = isLive() ? 'live' : 'offline-demo';
     if (mode === 'offline-demo') {
       adoptPlan(offlineDemoPlan(context, message, skillExcerpt, memoryExcerpt));
-      if (typeof context.reply === 'string' && context.reply.trim()) history.push({ role: 'assistant', content: context.reply });
+      if (typeof context.reply === 'string' && context.reply.trim()) {
+        history.push({ role: 'assistant', content: context.reply, execution: { kind: 'plan-proposed', planHash: digest(proposedPlan) } });
+      }
     } else {
       adoptPlan(livePlan(message, context, skillExcerpt, memoryExcerpt));
     }
@@ -181,10 +287,15 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
   function snapshot() {
     return {
       mode,
-      history: history.map(m => ({ ...m })),
+      // clone, not a spread: entries now carry a nested `execution` object, which a shallow
+      // copy would hand to callers by reference. Settled so a caller sees the same resolved
+      // provenance the model does.
+      history: settleHistory(history).map(m => clone(m)),
       sourceCoverage: [...sourceCoverage],
       selected: [...selected],
       pending: pending ? { ...pending } : null,
+      lastError: lastError ? { ...lastError } : null,
+      observations: boundedRecords(observations, { maxItems: 8, maxBytes: 16384 }),
       proposedPlan: proposedPlan ? clone(proposedPlan) : null,
       runs: runs.map(r => ({ id: r.id, status: r.status })),
     };
