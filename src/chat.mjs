@@ -108,7 +108,12 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
           if (!bounded.omitted) receipt.output = bounded.value;
           else receipt.outputOmitted = bounded;
         }
-      } else if (e.type === 'failed') receipt.code = e.data.code;
+      } else if (e.type === 'failed') {
+        receipt.code = e.data.code;
+        // Carry the supervisor's diagnostic through to the model, for the same reason a rejected
+        // proposal now carries one: INPUT_INVALID alone does not say which rule was broken.
+        if (typeof e.data.reason === 'string') receipt.reason = e.data.reason;
+      }
       else receipt.requestHash = e.data.requestHash;
       return receipt;
     });
@@ -146,7 +151,15 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
       // Validate the whole response before committing its narrative or proposed actions.
       if (proposal.plan) inspectPlan({ plan: proposal.plan, policy, registry, sourceLock, workspaceRoot });
     } catch (error) {
-      lastError = { runId: record.id, code: 'MODEL_PROPOSAL_INVALID', reasonCode: error instanceof HarnessError ? error.code : 'INVALID_PROPOSAL' };
+      // `reason` carries the supervisor's own diagnostic text, which is what makes a rejection
+      // correctable: a bare reasonCode like INVALID_REFERENCE does not say which rule was broken,
+      // so neither the caller nor the next turn can tell a missing dependsOn from a malformed
+      // JSON pointer. These messages are harness-authored string literals, not model or file
+      // content, so surfacing them opens no untrusted channel. `details` is deliberately NOT
+      // included: it can carry input-derived values, and that would be a new content path.
+      lastError = { runId: record.id, code: 'MODEL_PROPOSAL_INVALID',
+        reasonCode: error instanceof HarnessError ? error.code : 'INVALID_PROPOSAL',
+        reason: error instanceof HarnessError ? error.message : 'The proposal could not be validated' };
       observations.push({ ...lastError, status: 'rejected', source: 'supervisor' });
       proposedPlan = null;
       return;

@@ -30,8 +30,13 @@ Chat evidence and snapshots persist under the printed local store. This version 
 
 ## Supervised improvement
 
-Codex and Concord's [first training round](docs/training-round-001.md) turned live failures into context and
-supervisor fixes, regression tests, and an evidence-linked memory. This improves harness behavior and
+Three supervised training rounds have turned live failures into context and supervisor fixes,
+regression tests, and an evidence-linked memory: [round 001](docs/training-round-001.md) (tool schemas,
+recall, receipts), [round 002](docs/training-round-002.md) (execution provenance, so an unexecuted
+intention can never read as performed work; injection resistance then tested and passed), and [round
+003](docs/training-round-003.md) (schema fidelity measured at nine of ten, with correctable
+rejection diagnostics), and [round 004](docs/training-round-004.md) (task generalization, where plan
+structure generalized but value propagation failed twice and the attempted fixes did not help). This improves harness behavior and
 guidance; it does not retrain model weights. `scripts/train.mjs` provides an explicitly opt-in six-turn local
 model exercise with exact network grants, a reviewed pure tool plan, and replay checks. See the report for
 the command, observations and limits. Normal validation remains offline.

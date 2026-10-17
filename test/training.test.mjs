@@ -282,3 +282,45 @@ test('two turns proposing an identical plan do not both claim one execution', as
     assert.deepEqual(assistants[1].execution.toolsCompleted, ['text.concat']);
   } finally { f.close(); }
 });
+
+test('a rejected proposal reports which rule it broke, not just a code', async () => {
+  // Measured in round 003: the one schema failure in ten was INVALID_REFERENCE, and the
+  // recorded rejection carried no indication of WHICH rule was broken, so neither the caller
+  // nor the next turn could distinguish a missing dependsOn from a malformed JSON pointer.
+  const refWithoutDependency = { version: 1, tasks: [
+    { id: 'join', tool: 'text.concat', input: { values: ['x', 'y'], separator: '-' } },
+    { id: 'hash', tool: 'json.hash', input: { value: { $task: 'join', path: '/value' } } }, // no dependsOn
+  ] };
+  const f = fixture(() => ({ reply: 'Joining then hashing.', plan: refWithoutDependency }));
+  try {
+    const state = await send(f.harness, 'Join then hash.');
+    assert.equal(state.lastError.code, 'MODEL_PROPOSAL_INVALID');
+    assert.equal(state.lastError.reasonCode, 'INVALID_REFERENCE');
+    // The actionable part: the supervisor's own diagnostic, naming the broken rule.
+    assert.match(state.lastError.reason, /direct declared dependency/);
+    assert.equal(state.proposedPlan, null);
+    // It must also reach the next turn, or the model cannot correct itself.
+    await send(f.harness, 'Fix it.');
+    const delivered = JSON.parse(f.inputs.at(-1).prompt).observations.records;
+    const rejection = delivered.find(r => r.code === 'MODEL_PROPOSAL_INVALID');
+    assert.ok(rejection, 'the rejection reaches the next turn');
+    assert.match(rejection.reason, /direct declared dependency/);
+    assert.equal(rejection.status, 'rejected');
+    assert.equal(rejection.source, 'supervisor');
+  } finally { f.close(); }
+});
+
+test('a malformed JSON pointer and a missing dependency are distinguishable in the record', async () => {
+  const badPointer = { version: 1, tasks: [
+    { id: 'join', tool: 'text.concat', input: { values: ['x'], separator: '' } },
+    { id: 'hash', tool: 'json.hash', input: { value: { $task: 'join', path: 'value' } }, dependsOn: ['join'] },
+  ] };
+  const f = fixture(() => ({ reply: 'Hashing.', plan: badPointer }));
+  try {
+    const state = await send(f.harness, 'Hash it.');
+    assert.equal(state.lastError.reasonCode, 'INVALID_REFERENCE');
+    // Same reasonCode as the missing-dependency case above, different rule: only `reason`
+    // separates them, which is exactly why the code alone was not correctable.
+    assert.match(state.lastError.reason, /RFC 6901 JSON pointer/);
+  } finally { f.close(); }
+});

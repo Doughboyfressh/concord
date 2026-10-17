@@ -167,8 +167,18 @@ export async function runPlan(options) {
     for (const id of c.order) {
       const task = c.tasks.get(id);
       let call;
+      // `reason` is the supervisor's own diagnostic, recorded because INPUT_INVALID is raised by
+      // several distinct rules (a reference path that does not exist, a malformed JSON pointer, an
+      // input failing the tool's schema) and the bare code cannot distinguish them, so a caller or
+      // a model cannot correct the plan. Deterministic: replayPlan re-runs the same inputFor over
+      // the same recorded results and reconstructs the identical message, so both sides must stay
+      // in step. The outcome object is deliberately left unchanged.
       try { call = inputFor(c, task, results); }
-      catch { emit('failed', { taskId: id, code: 'INPUT_INVALID' }); outcome = { status: 'failed', taskId: id, code: 'INPUT_INVALID' }; break; }
+      catch (error) {
+        const reason = error instanceof HarnessError ? error.message : 'Input could not be resolved';
+        emit('failed', { taskId: id, code: 'INPUT_INVALID', reason });
+        outcome = { status: 'failed', taskId: id, code: 'INPUT_INVALID' }; break;
+      }
       const { input, tool, requestHash } = call;
       if (journalBytes + c.policy.maxOutputBytes + 2048 > c.policy.maxJournalBytes) {
         emit('failed', { taskId: id, code: 'BUDGET_EXHAUSTED' }); outcome = { status: 'failed', taskId: id, code: 'BUDGET_EXHAUSTED' }; break;
@@ -235,8 +245,14 @@ export function replayPlan(options) {
   for (const id of c.order) {
     const task = c.tasks.get(id);
     let call;
+    // Mirrors runPlan's recorded diagnostic exactly; the same validation over the same recorded
+    // results reproduces the same message, so the recorded event still verifies byte for byte.
     try { call = inputFor(c, task, results); }
-    catch { take('failed', { taskId: id, code: 'INPUT_INVALID' }); outcome = { status: 'failed', taskId: id, code: 'INPUT_INVALID' }; break; }
+    catch (error) {
+      const reason = error instanceof HarnessError ? error.message : 'Input could not be resolved';
+      take('failed', { taskId: id, code: 'INPUT_INVALID', reason });
+      outcome = { status: 'failed', taskId: id, code: 'INPUT_INVALID' }; break;
+    }
     const { input, tool, requestHash } = call;
     if (consumedBytes + c.policy.maxOutputBytes + 2048 > c.policy.maxJournalBytes) {
       take('failed', { taskId: id, code: 'BUDGET_EXHAUSTED' }); outcome = { status: 'failed', taskId: id, code: 'BUDGET_EXHAUSTED' }; break;

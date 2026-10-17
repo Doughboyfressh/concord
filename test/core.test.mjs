@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync, linkSync,
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { canonical, digest, parseJson, validateSchema, clone } from '../src/value.mjs';
-import { runPlan, replayPlan } from '../src/engine.mjs';
+import { runPlan, replayPlan, inspectPlan } from '../src/engine.mjs';
 import { makeBuiltinTools } from '../src/builtins.mjs';
 
 const registry = new Map(makeBuiltinTools().map(t => [t.name, t]));
@@ -163,4 +163,72 @@ test('ambient working-directory roots cannot enter approval identity', async () 
   const roots = ['.', '..', 'relative/path', 'C:relative'];
   if (path.sep === '\\') roots.push('/drive-relative', '\\drive-relative');
   for (const workspaceRoot of roots) await assert.rejects(runPlan(base(one, { workspaceRoot })), e => e.code === 'INVALID_WORKSPACE');
+});
+
+test('the input-schema gate rejects static inputs before approval and defers references to a clean INPUT_INVALID', async () => {
+  let invoked = 0;
+  const strict = { name: 'strict.write', version: '1', effect: 'write',
+    inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false },
+    execute() { invoked++; return true; } };
+  const reg = new Map([...makeBuiltinTools(), strict].map(t => [t.name, t]));
+  const pol = { ...policy, allowedTools: [...reg.keys()], allowedEffects: ['pure', 'read', 'write'] };
+  const ctx = p => ({ plan: p, policy: pol, registry: reg, sourceLock: { version: 1 }, workspaceRoot: path.resolve('/explicit/workspace') });
+
+  // A static input of the wrong type is refused structurally: no execution, no approval hash.
+  const staticBad = { version: 1, tasks: [{ id: 'w', tool: 'strict.write', input: { text: 42 } }] };
+  await assert.rejects(runPlan(ctx(staticBad)), e => e.code === 'SCHEMA_MISMATCH');
+  assert.throws(() => inspectPlan(ctx(staticBad)), e => e.code === 'SCHEMA_MISMATCH');
+  assert.equal(invoked, 0);
+
+  // A $task reference cannot be validated until its dependency resolves, which inspectPlan
+  // discloses in its own note rather than papering over.
+  const referenced = { version: 1, tasks: [
+    { id: 'n', tool: 'json.value', input: 42 },
+    { id: 'w', tool: 'strict.write', input: { text: { $task: 'n' } }, dependsOn: ['n'] },
+  ] };
+  assert.match(inspectPlan(ctx(referenced)).note, /resolve when dependency evidence is available/);
+
+  const journal = await runPlan(ctx(referenced));
+  assert.equal(journal.outcome.status, 'failed');
+  assert.equal(journal.outcome.taskId, 'w');
+  // The decisive assertion. A write whose resolved input fails validation reports INPUT_INVALID,
+  // never EFFECT_INDETERMINATE: validation provably precedes execute(), so "the effect may have
+  // occurred" would be a false indeterminate, and this project's guidance forbids retrying one.
+  assert.equal(journal.outcome.code, 'INPUT_INVALID');
+  assert.equal(invoked, 0);
+  // Nothing was ever offered for approval, because the input could not validate.
+  // Scoped to the failing task: its pure dependency legitimately ran and recorded its own intent.
+  assert.ok(!journal.events.some(e => e.type === 'blocked' && e.data.taskId === 'w'));
+  assert.ok(!journal.events.some(e => e.type === 'intent' && e.data.taskId === 'w'));
+  assert.ok(journal.events.some(e => e.type === 'intent' && e.data.taskId === 'n'));
+  replayPlan({ ...ctx(referenced), journal });
+});
+
+test('a journaled INPUT_INVALID records which rule it broke, and replay reconstructs it', async () => {
+  // Measured in round 004: asked to extract a field nested inside a JSON file's text, the model
+  // proposed a reference path into files.read's result object, where that field does not exist.
+  // The plan was structurally valid (references defer validation by design) and failed only at
+  // execution, where a bare INPUT_INVALID gave no way to tell a nonexistent path from a malformed
+  // pointer. Both sides of the kernel must record the same diagnostic or replay breaks.
+  const plan = { version: 1, tasks: [
+    { id: 'a', tool: 'json.value', input: { text: 'flat' } },
+    { id: 'b', tool: 'json.value', input: { v: { $task: 'a', path: '/project/topic' } }, dependsOn: ['a'] },
+  ] };
+  const journal = await runPlan(base(plan));
+  assert.equal(journal.outcome.code, 'INPUT_INVALID');
+  const failed = journal.events.find(e => e.type === 'failed');
+  assert.equal(failed.data.taskId, 'b');
+  assert.match(failed.data.reason, /Reference path does not exist/);
+  // The outcome stays exactly as before, so the settled envelope is unchanged.
+  assert.deepEqual(journal.outcome, { status: 'failed', taskId: 'b', code: 'INPUT_INVALID' });
+  // Replay must reconstruct the identical event, including the diagnostic.
+  replayPlan({ ...base(plan), journal });
+
+  // The sibling rule is caught earlier still: a pointer that is not RFC 6901 does not depend on
+  // any resolved value, so inspectRefs rejects it structurally at compile time and the plan never
+  // reaches execution or an approval hash. The two rules share one code but not one stage.
+  const badPointer = clone(plan);
+  badPointer.tasks[1].input.v.path = 'project/topic';
+  await assert.rejects(runPlan(base(badPointer)), e => e.code === 'INVALID_REFERENCE' && /RFC 6901/.test(e.message));
+  assert.throws(() => inspectPlan(base(badPointer)), e => e.code === 'INVALID_REFERENCE');
 });

@@ -109,6 +109,15 @@ export function buildChatContext({ message, history, observations = [], proposed
     `exact list are valid: ${toolNames.join(', ') || '(none registered)'}. You cannot invent a tool, grant ` +
     'yourself an effect, or make a plan execute by proposing it — the supervisor validates and, for write, ' +
     'network, or process effects, requires a separate explicit approval before anything in "plan" runs. ' +
+    // Added after round 003: asked to join an empty list with text.concat, whose schema requires
+    // minItems 1, the model proposed the impossible plan and the gate rejected it. Its own
+    // diagnosis was that nothing was missing from the payload -- it had the schemas and simply
+    // did not check them first. This states the check as part of the contract.
+    'Before proposing, check each task input against that tool\'s declared schema below, including ' +
+    'bounds like minItems, minLength and required fields. If the request cannot be satisfied within ' +
+    'those constraints, or needs a tool that is not listed, say so and name the specific constraint ' +
+    'or missing tool instead of proposing a plan that cannot validate. A refusal that explains the ' +
+    'limit is more useful than a rejected plan. ' +
     'Input schemas are the native Concord plan inputs, not the MCP wrapper arguments. Supply values with ' +
     'their declared JSON types; do not JSON-encode an object as a string. A task reference can use an ' +
     'RFC 6901 path, for example {"$task":"join","path":"/value"}, with a direct dependsOn entry.';
