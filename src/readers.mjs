@@ -1,5 +1,8 @@
 import { makeDexTools } from './dex.mjs';
 import { makeManagedTools } from './managed.mjs';
+import { makeWebTools } from './webjs.mjs';
+import { makePlatformTools } from './platform.mjs';
+import { makeEvidenceTools } from './evidence.mjs';
 
 /**
  * One registration point for the static format readers that realize REA's `internalizable` tools.
@@ -10,5 +13,6 @@ import { makeManagedTools } from './managed.mjs';
  * already inside the workspace: nothing here spawns a process or reaches the network.
  */
 export function makeReaderTools() {
-  return [...makeDexTools(), ...makeManagedTools()];
+  return [...makeDexTools(), ...makeManagedTools(), ...makeWebTools(), ...makePlatformTools(),
+    ...makeEvidenceTools()];
 }

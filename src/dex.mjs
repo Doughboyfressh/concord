@@ -537,7 +537,7 @@ export function makeDexTools() {
         // An APK is a ZIP; its structure is read through the existing archive reader so there is
         // one implementation of central-directory walking rather than two.
         const limitations = [];
-        const archive = parseApkEntries(bytes, limitations);
+        const archive = parseZipCentralDirectory(bytes, limitations);
         const names = archive.map((entry) => entry.name);
         const dexEntries = names.filter((name) => /^classes[0-9]*\.dex$/.test(name));
         const libs = names.filter((name) => name.startsWith('lib/'));
@@ -557,13 +557,14 @@ export function makeDexTools() {
 }
 
 /**
- * ZIP central-directory walk for APK structure.
+ * ZIP central-directory walk, shared by every container that is a ZIP underneath: APK, HAP, and
+ * anything else. Exported so there is one implementation rather than one per family.
  *
  * Deliberately separate from artifact.inspect's archive reader: this one reports only names,
- * sizes and methods, which is what APK structure needs, and it tolerates the APK signing block
- * that sits between the entries and the central directory.
+ * sizes and methods, which is what container structure needs, and it tolerates a signing block
+ * sitting between the entries and the central directory.
  */
-function parseApkEntries(buffer, limitations) {
+export function parseZipCentralDirectory(buffer, limitations) {
   const entries = [];
   // Locate the end-of-central-directory record by scanning back from the end.
   let eocd = -1;

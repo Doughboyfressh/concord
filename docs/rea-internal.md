@@ -14,9 +14,9 @@ pinned clone during cataloguing rather than by a separate acquisition step.
 | | Count |
 | --- | --- |
 | declared REA tools | **117** |
-| realized by an internal reader (`static`) | **51** |
-| realized by a reviewed provider (`provider`) | **66** |
-| static readers written so far | **24** |
+| realized by an internal reader (`static`) | **49** |
+| realized by a reviewed provider (`provider`) | **68** |
+| static readers written | **49 of 49** |
 | entries with no realization route | **0** |
 
 Each entry carries an `effect`, an `effectBasis` naming the rule that assigned it, an
@@ -246,17 +246,85 @@ Tested: option injection, an embedded space, shell metacharacters and a newline 
 command belonging to another provider, an unknown slot and an empty template each refused as
 `REVERSE_CONFIG` at registration.
 
-## Still internalizable, not yet built
+## Correction: two tools were classified static and are not
 
-27 of the 51 static readers remain unwritten, in three families: eleven JavaScript and web tools
-(source-map VLQ decoding, module import and export scanning, HAR captures), eight platform tools
-(firmware regions, Rust metadata, Flutter and Dart AOT, Electron fuses, Apple and Harmony graphs),
-and eight evidence-composition tools that are mostly `pure` over input already supplied. Each fits
-the pattern of the twenty-four delivered here. `rea.catalog` reports them as `unrealized`, so what is left is a
-queryable list rather than an impression, and no tool is registered for them in the meantime.
+An earlier pass counted 51 internalizable tools and 66 provider-backed. Reading REA's own
+documentation rather than trusting the name-based rule changed that to **49 and 68**.
+`decode_signal_recording` drives caller-supplied **sigrok-cli** with libsigrokdecode, and
+`inspect_signal_decoders` queries the **installed** sigrok catalog. Neither is static analysis, so
+both moved to the `sigrok` provider with a basis naming what they need. The rule that misread them
+matched on the `decode_`/`inspect_` prefix, which is exactly the kind of plausible inference this
+project keeps having to correct.
 
-The 66 provider-backed tools need no further code: they become available as the operator reviews a
-template for each. That is provisioning, not implementation.
+`inspect_recorded_crash` went the other way. Its documentation lists pwntools, pyelftools and
+Unicorn, which looks like a provider dependency, but what those libraries parse is an ELF64 core's
+documented note layout. That is byte parsing, so it became `artifact.coreDump`.
+
+## All 49 readers are written
+
+The remaining families, each verified the same way:
+
+| Family | Tools | How it was checked |
+| --- | --- | --- |
+| Android DEX, APK, binary XML | 7 | byte-exact fixtures; MUTF-8 and uleb128 decoded directly |
+| .NET ECMA-335 metadata | 7 | a real Windows assembly, against validated reflection |
+| JavaScript, source maps, HAR | 11 | `node:module`'s `SourceMap`, entry by entry |
+| Firmware, Rust, Dart, Electron, Apple, Harmony | 8 | documented headers and wire formats |
+| Recorded crashes and evidence composition | 6 | ABI register offsets written into the fixture |
+
+Four things found by writing the tests, each a real defect rather than a test adjustment:
+
+- **Three AXML offset bugs at once.** `ResXMLTree_node` is sixteen bytes, so `attributeStart` is
+  measured from the attribute extension and not the chunk; a string attribute's pool index lives
+  in the `data` word rather than the packed size word; and a CDATA index sits immediately after
+  the node header. Each would have produced plausible wrong output.
+- **Nested .NET types reported by their bare name.** A nested type carries an empty namespace and
+  names its parent only through the `NestedClass` table, so `Logger+LogLevel` was surfacing as a
+  top-level `LogLevel`. After joining that table all fifteen type names match reflection exactly.
+- **A lazy regex that truncated every XML plist value** to one character, because a lazy body
+  followed by an optional closing tag matches as little as possible.
+- **A one-byte existence probe that reported every real file as absent.**
+  `readWorkspaceFile` refuses a file larger than the limit it is given, so probing with a limit of
+  one byte failed for anything bigger. The module graph found no modules at all until resolution
+  went through a real read.
+
+### Two oracles that were wrong
+
+Both times the independent authority disagreed with the reader and the reader was right, which is
+why the oracle gets validated before it is trusted:
+
+- **A shadowed assembly.** PowerShell's `Assembly::LoadFrom` returns an assembly already loaded
+  under the same simple name. For `System.Resources.Writer` the oracle reported version 10.0.0.0
+  with eight types while this reader reported 4.0.0.0 with a single TypeDef.
+  `AssemblyName.GetAssemblyName`, reading the file manifest directly, confirmed **4.0.0.0**. Three
+  of six candidate oracles were shadowed this way; only those whose loaded version equalled their
+  file version were used.
+- **A carried-forward source map name.** Node's `SourceMap` reports a name on a four-field segment,
+  which per Source Map Revision 3 carries none. The regression test *counts* the VLQ fields to
+  prove the segment has four, asserts this reader returns `null`, and pins Node's answer too, so a
+  later change that "fixes" the divergence is caught.
+
+## What the readers deliberately will not say
+
+Each reader states its own limits in a `limitations` array rather than implying completeness:
+
+- A firmware signature is **evidence of a format, not proof** — those byte sequences occur inside
+  compressed data — and a region length is the distance to the next signature, an upper bound.
+- Rust, Flutter and bundler identification rest on **embedded strings**, so a stripped build can
+  use them and show nothing.
+- The JavaScript tools are a **lexical scan, not a parse**; `stripNonCode` blanks comments,
+  strings, templates and regexes while preserving offsets so a match cannot fire inside them, but
+  no runtime construct is visible.
+- A **static fact raises a candidate obligation and never closes one**, and an **inferred
+  observation never promotes coverage**, so that case is `unknown` rather than covered.
+- `artifact.traceFeature` is a name match over a supplied inventory and says plainly that nothing
+  in it establishes that a matched entry implements the feature.
+- Secrets are withheld structurally: a script `nonce` is reported as present without its value,
+  and HAR header, cookie and body values are never copied, because a capture routinely carries
+  credentials.
+
+The 68 provider-backed tools need no further code — each becomes available as the operator reviews
+a template for it. That is provisioning, not implementation.
 
 ## Using it
 

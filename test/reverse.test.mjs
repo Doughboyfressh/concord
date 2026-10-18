@@ -38,8 +38,10 @@ test('the contract table covers REAs whole surface and every entry is classified
     assert.ok(entry.internalizable === true || entry.provider, entry.name);
     assert.ok(typeof entry.basis === 'string' && entry.basis.length, entry.name);
   }
-  assert.equal(table.tools.filter((e) => e.provider).length, 66);
-  assert.equal(table.tools.filter((e) => e.internalizable === true).length, 51);
+  // 68 and 49, not 66 and 51: reading REA's own docs showed both signal tools need
+  // caller-supplied sigrok, so the name-based rule had wrongly called them static.
+  assert.equal(table.tools.filter((e) => e.provider).length, 68);
+  assert.equal(table.tools.filter((e) => e.internalizable === true).length, 49);
 });
 
 test('with nothing provisioned only the catalog registers, and it reports the whole surface', () => {
@@ -51,7 +53,7 @@ test('with nothing provisioned only the catalog registers, and it reports the wh
   assert.equal(all.total, 117);
   // Naming a capability is never acquiring it.
   assert.equal(all.grantsCapabilities, false);
-  assert.equal(all.tools.filter((r) => r.realization === 'provider').length, 66);
+  assert.equal(all.tools.filter((r) => r.realization === 'provider').length, 68);
   assert.equal(all.availableNow, all.tools.filter((r) => r.available).length);
   // Static capabilities are reported here but registered in src/artifacts.mjs, never twice.
   for (const row of all.tools.filter((r) => r.realization === 'static')) {
