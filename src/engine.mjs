@@ -71,7 +71,12 @@ export function attenuatePolicy(policy, restriction = {}) {
   return normalizePolicy(next);
 }
 
-function schemaWellFormed(schema) {
+/**
+ * Does this schema validate at all? Exported because a foreign tool contract arrives with a
+ * schema nobody here wrote: src/foreign.mjs uses this to tell a schema it can enforce from one it
+ * must replace with a bounded fallback, rather than registering a tool whose input is unchecked.
+ */
+export function schemaWellFormed(schema) {
   try { validateSchema(null, schema); } catch (e) { if (e.code !== 'SCHEMA_MISMATCH') throw e; }
 }
 

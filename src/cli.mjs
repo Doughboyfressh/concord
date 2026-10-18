@@ -12,6 +12,7 @@ import { makeAgentTools } from './workers.mjs';
 import { makeCapabilityTools } from './capabilities.mjs';
 import { makeReverseTools } from './reverse.mjs';
 import { makeReaderTools } from './readers.mjs';
+import { makeForeignTools } from './foreign.mjs';
 import { makeArtifactTools } from './artifacts.mjs';
 import { makeBrowserTools } from './browser.mjs';
 
@@ -59,7 +60,7 @@ function readJson(filename) {
 function parseArgs(argv) {
   const [command = 'help', ...rest] = argv;
   const positional = [], flags = {};
-  const allowed = new Set(['policy', 'out', 'workspace', 'integrations', 'workers', 'browser', 'reverse', 'approvals', 'journal', 'plan', 'root']);
+  const allowed = new Set(['policy', 'out', 'workspace', 'integrations', 'workers', 'browser', 'reverse', 'foreign', 'approvals', 'journal', 'plan', 'root']);
   for (let i = 0; i < rest.length; i++) {
     if (!rest[i].startsWith('--')) { positional.push(rest[i]); continue; }
     const name = rest[i].slice(2);
@@ -84,6 +85,9 @@ function registryFor(catalog, flags) {
     ...makeBrowserTools(flags.browser ? readJson(flags.browser) : undefined),
     ...makeReverseTools(readJson(path.join(root, 'reverse-tools.json')), flags.reverse ? readJson(flags.reverse) : {}),
     ...makeReaderTools(),
+    ...makeForeignTools(fs.existsSync(path.join(root, 'foreign-capabilities.json'))
+      ? readJson(path.join(root, 'foreign-capabilities.json')) : { schemaVersion: 1, sources: [] },
+      flags.foreign ? readJson(flags.foreign) : {}),
   ];
   const registry = new Map();
   for (const tool of tools) {

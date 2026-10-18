@@ -13,6 +13,7 @@ import { makeArtifactTools } from '../src/artifacts.mjs';
 import { makeBrowserTools } from '../src/browser.mjs';
 import { makeReverseTools } from '../src/reverse.mjs';
 import { makeReaderTools } from '../src/readers.mjs';
+import { makeForeignTools } from '../src/foreign.mjs';
 import { buildChatContext } from '../src/chat-context.mjs';
 import { createChatHarness } from '../src/chat.mjs';
 import { createServer, listenServer } from '../src/server.mjs';
@@ -55,6 +56,9 @@ async function start() {
     ...makeBuiltinTools(), ...makeSourceTools(catalog), ...makeCapabilityTools(inventory), ...makeArtifactTools(),
     ...makeIntegrationTools(integrations), ...makeAgentTools(workers), ...makeBrowserTools(browser),
     ...makeReverseTools(reverseTable, reverse), ...makeReaderTools(),
+    ...makeForeignTools(fs.existsSync(path.join(root, 'foreign-capabilities.json'))
+      ? readJson(path.join(root, 'foreign-capabilities.json')) : { schemaVersion: 1, sources: [] },
+      flags.foreign ? readJson(flags.foreign) : {}),
   ];
   const registry = new Map(descriptors.map(d => [d.name, d]));
   if (registry.size !== descriptors.length) throw new HarnessError('CHAT_CONFIG', 'Duplicate tool name');

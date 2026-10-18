@@ -5,3 +5,4 @@ runs/
 .agents/evidence/
 upstream/
 coverage/
+foreign-capabilities.json

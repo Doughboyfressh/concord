@@ -12,6 +12,7 @@ import { makeArtifactTools } from './artifacts.mjs';
 import { makeIntegrationTools } from './integrations.mjs';
 import { makeReverseTools } from './reverse.mjs';
 import { makeReaderTools } from './readers.mjs';
+import { makeForeignTools } from './foreign.mjs';
 import { makeAgentTools } from './workers.mjs';
 import { makeBrowserTools } from './browser.mjs';
 import { buildChatContext } from './chat-context.mjs';
@@ -57,11 +58,11 @@ function readJsonFile(file, maxBytes = 33554432) {
 
 function parseArgs(argv) {
   const flags = {};
-  const allowed = ['workspace', 'policy', 'integrations', 'workers', 'browser', 'reverse'];
+  const allowed = ['workspace', 'policy', 'integrations', 'workers', 'browser', 'reverse', 'foreign'];
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i]?.replace(/^--/, '');
     if (!argv[i]?.startsWith('--') || !allowed.includes(key) || !argv[i + 1] || Object.hasOwn(flags, key)) {
-      throw new HarnessError('MCP_USAGE', 'Usage: node src/mcp.mjs [--workspace DIR] [--policy FILE] [--integrations FILE] [--workers FILE] [--browser FILE] [--reverse FILE]');
+      throw new HarnessError('MCP_USAGE', 'Usage: node src/mcp.mjs [--workspace DIR] [--policy FILE] [--integrations FILE] [--workers FILE] [--browser FILE] [--reverse FILE] [--foreign FILE]');
     }
     flags[key] = argv[i + 1];
   }
@@ -76,10 +77,14 @@ async function buildRegistry(flags) {
   const browser = flags.browser ? readJsonFile(flags.browser) : undefined;
   const reverseTable = readJsonFile(path.join(root, 'reverse-tools.json'));
   const reverse = flags.reverse ? readJsonFile(flags.reverse) : {};
+  const foreignPath = path.join(root, 'foreign-capabilities.json');
+  const foreignManifest = fs.existsSync(foreignPath) ? readJsonFile(foreignPath) : { schemaVersion: 1, sources: [] };
+  const foreign = flags.foreign ? readJsonFile(flags.foreign) : {};
   const descriptors = [
     ...makeBuiltinTools(), ...makeSourceTools(catalog), ...makeCapabilityTools(inventory), ...makeArtifactTools(),
     ...makeIntegrationTools(integrations), ...makeAgentTools(workers), ...makeBrowserTools(browser),
     ...makeReverseTools(reverseTable, reverse), ...makeReaderTools(),
+    ...makeForeignTools(foreignManifest, foreign),
   ];
   const registry = new Map();
   for (const tool of descriptors) {

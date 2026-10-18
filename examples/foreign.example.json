@@ -1,0 +1,25 @@
+{
+  "servers": [
+    {
+      "id": "concord-self",
+      "executable": "/usr/local/bin/node",
+      "executableSha256": "REPLACE_WITH_SHA256_OF_THE_REVIEWED_EXECUTABLE",
+      "args": ["src/mcp.mjs", "--workspace", "."],
+      "cwd": ".",
+      "allow": ["json_hash", "text_concat"],
+      "timeoutMs": 120000,
+      "maxOutputBytes": 1048576
+    },
+    {
+      "id": "some-other-mcp-server",
+      "executable": "/usr/bin/npx",
+      "executableSha256": "REPLACE_WITH_SHA256_OF_THE_REVIEWED_EXECUTABLE",
+      "args": ["-y", "@example/mcp-server@1.2.3"],
+      "cwd": ".",
+      "allowedEnv": ["EXAMPLE_API_TOKEN"],
+      "allow": ["search_documents"],
+      "timeoutMs": 60000,
+      "maxOutputBytes": 1048576
+    }
+  ]
+}
