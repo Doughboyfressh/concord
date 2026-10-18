@@ -10,6 +10,8 @@ import { loadSourceLock, makeSourceTools } from './sources.mjs';
 import { makeCapabilityTools } from './capabilities.mjs';
 import { makeArtifactTools } from './artifacts.mjs';
 import { makeIntegrationTools } from './integrations.mjs';
+import { makeReverseTools } from './reverse.mjs';
+import { makeReaderTools } from './readers.mjs';
 import { makeAgentTools } from './workers.mjs';
 import { makeBrowserTools } from './browser.mjs';
 import { buildChatContext } from './chat-context.mjs';
@@ -55,11 +57,11 @@ function readJsonFile(file, maxBytes = 33554432) {
 
 function parseArgs(argv) {
   const flags = {};
-  const allowed = ['workspace', 'policy', 'integrations', 'workers', 'browser'];
+  const allowed = ['workspace', 'policy', 'integrations', 'workers', 'browser', 'reverse'];
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i]?.replace(/^--/, '');
     if (!argv[i]?.startsWith('--') || !allowed.includes(key) || !argv[i + 1] || Object.hasOwn(flags, key)) {
-      throw new HarnessError('MCP_USAGE', 'Usage: node src/mcp.mjs [--workspace DIR] [--policy FILE] [--integrations FILE] [--workers FILE] [--browser FILE]');
+      throw new HarnessError('MCP_USAGE', 'Usage: node src/mcp.mjs [--workspace DIR] [--policy FILE] [--integrations FILE] [--workers FILE] [--browser FILE] [--reverse FILE]');
     }
     flags[key] = argv[i + 1];
   }
@@ -72,9 +74,12 @@ async function buildRegistry(flags) {
   const integrations = flags.integrations ? readJsonFile(flags.integrations) : {};
   const workers = flags.workers ? readJsonFile(flags.workers) : {};
   const browser = flags.browser ? readJsonFile(flags.browser) : undefined;
+  const reverseTable = readJsonFile(path.join(root, 'reverse-tools.json'));
+  const reverse = flags.reverse ? readJsonFile(flags.reverse) : {};
   const descriptors = [
     ...makeBuiltinTools(), ...makeSourceTools(catalog), ...makeCapabilityTools(inventory), ...makeArtifactTools(),
     ...makeIntegrationTools(integrations), ...makeAgentTools(workers), ...makeBrowserTools(browser),
+    ...makeReverseTools(reverseTable, reverse), ...makeReaderTools(),
   ];
   const registry = new Map();
   for (const tool of descriptors) {

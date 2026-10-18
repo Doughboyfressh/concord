@@ -69,7 +69,7 @@ function rejectSecrets(value, secrets) {
   }
   return value;
 }
-function limits(config, context, name, effect) {
+export function limits(config, context, name, effect) {
   const policy = context?.policy ?? {};
   if (Array.isArray(policy.allowedTools) && !policy.allowedTools.includes(name)) {
     fail('INTEGRATION_POLICY', 'Integration tool is not allowlisted');
@@ -419,7 +419,7 @@ function processConfig(value) {
 }
 
 /** Resolves and digest-verifies one process entry's executable and workspace-contained cwd. */
-async function resolveExecutable(config, workspaceRoot) {
+export async function resolveExecutable(config, workspaceRoot) {
   let executable, cwd;
   try {
     executable = await realpath(config.executable);
@@ -435,7 +435,7 @@ async function resolveExecutable(config, workspaceRoot) {
   return { executable, cwd };
 }
 
-function processEnv(config) {
+export function processEnv(config) {
   const env = { ...config.env };
   for (const key of config.allowedEnv) if (process.env[key] !== undefined) env[key] = process.env[key];
   const secrets = Object.entries(env).filter(([key, value]) => looksLikeSecret(key, value)).map(([, value]) => value);
@@ -443,7 +443,7 @@ function processEnv(config) {
 }
 
 /** One bounded child process: spawn, collect stdout/stderr under a shared byte budget, enforce a deadline. */
-function spawnBounded({ executable, args, cwd, env, secrets, timeoutMs, maxOutputBytes, signal }) {
+export function spawnBounded({ executable, args, cwd, env, secrets, timeoutMs, maxOutputBytes, signal }) {
   return new Promise((resolveSpawn, reject) => {
     const child = spawn(executable, args, { cwd, env, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let outcome;

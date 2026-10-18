@@ -12,7 +12,7 @@ MCP server, SDK, skill collection, or website body is installed by this catalog.
 | --- | --- | --- |
 | `ecc` | Workflow, skills, evaluation guidance | Reviewed instruction snapshots |
 | `ego-lite` | Agent runtime and orchestration reference | Explicit runtime adapter |
-| `rea` | Reverse engineering | Explicit analysis adapter |
+| `rea` | Reverse engineering | Internal readers plus catalogued inventory |
 | `twentyfirst-repository` | UI assets and registry protocol | Reviewed component snapshots |
 | `twentyfirst-website` | Hosted UI discovery | Recorded network acquisition |
 | `vercel-skills` | Skill discovery and distribution | Reviewed SKILL.md snapshots |
@@ -23,6 +23,10 @@ MCP server, SDK, skill collection, or website body is installed by this catalog.
 | `deepseek-harness` | Harness and evaluation reference | Explicit runtime adapter |
 | `awesome-cyber-skills` | Security practice environments | Reference catalog only |
 | `awesome-hacking` | Security resource index | Reference catalog only |
+
+Four of REA's 117 tools now run as native Concord tools rather than through an adapter; the rest
+are catalogued, 66 of them unable to be internalized because replay cannot cover a device or a
+live process: see [taking REA's capabilities internally](rea-internal.md).
 
 The `hermes-local` entry is an inventory of a hermes installation on this machine, acquired by
 static analysis without running it: see [taking the hermes capability surface](hermes-local.md).

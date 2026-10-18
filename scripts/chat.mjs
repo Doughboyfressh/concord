@@ -11,6 +11,8 @@ import { makeIntegrationTools } from '../src/integrations.mjs';
 import { makeAgentTools } from '../src/workers.mjs';
 import { makeArtifactTools } from '../src/artifacts.mjs';
 import { makeBrowserTools } from '../src/browser.mjs';
+import { makeReverseTools } from '../src/reverse.mjs';
+import { makeReaderTools } from '../src/readers.mjs';
 import { buildChatContext } from '../src/chat-context.mjs';
 import { createChatHarness } from '../src/chat.mjs';
 import { createServer, listenServer } from '../src/server.mjs';
@@ -47,9 +49,12 @@ async function start() {
   const integrations = flags.integrations ? readJson(flags.integrations) : {};
   const workers = flags.workers ? readJson(flags.workers) : {};
   const browser = flags.browser ? readJson(flags.browser) : undefined;
+  const reverseTable = readJson(path.join(root, 'reverse-tools.json'));
+  const reverse = flags.reverse ? readJson(flags.reverse) : {};
   const descriptors = [
     ...makeBuiltinTools(), ...makeSourceTools(catalog), ...makeCapabilityTools(inventory), ...makeArtifactTools(),
     ...makeIntegrationTools(integrations), ...makeAgentTools(workers), ...makeBrowserTools(browser),
+    ...makeReverseTools(reverseTable, reverse), ...makeReaderTools(),
   ];
   const registry = new Map(descriptors.map(d => [d.name, d]));
   if (registry.size !== descriptors.length) throw new HarnessError('CHAT_CONFIG', 'Duplicate tool name');

@@ -108,16 +108,25 @@ force so a client can display it instead of inferring it.
 ## What did not transfer, and why
 
 hermes is roughly 21,000 Python files with a long-lived gateway, a SQLite state store, plugins, an
-LSP bridge, sandboxes and desktop apps. Concord is Node ESM with **zero dependencies, ever**, and
-every tool output must be a pure function of its declared input so a recorded run can be replayed.
-A literal port is not available at any effort level — it is the wrong language and the opposite
+LSP bridge, sandboxes and desktop apps. Concord is Node ESM with **zero dependencies, ever**. A
+literal port is not available at any effort level — it is the wrong language and the opposite
 dependency and statefulness posture.
+
+**Correction.** This section previously added that "every tool output must be a pure function of
+its declared input so a recorded run can be replayed". That is true of `pure` and `read` tools and
+false as stated: `replayPlan` never calls `execute`, and for an effectful tool it takes the
+recorded value and asserts legality properties, which is how `process.run` and `browser.snapshot`
+already replay. Purity is not what rules out a long-lived gateway; see
+[taking REA's capabilities internally](rea-internal.md), where the same mistaken reasoning was
+corrected and 66 device-backed tools were implemented through a reviewed-provider route instead.
 
 So the transfer is deliberately three things: the **instruction corpus** (which is data, and moves
 losslessly), the **tool contracts** (which become searchable inert inventory), and the **one design
-idea** above (which became kernel code with its safety property tested). Session-held browser state,
-runtime tool hot-swap, and a persistent gateway are not missing features here; they are excluded by
-replay, which asserts the registry digest is unchanged between a run and its replay.
+idea** above (which became kernel code with its safety property tested). Runtime tool hot-swap genuinely is excluded, because
+replay asserts the registry digest is unchanged between a run and its replay. Session state held
+across separate approved calls is a different matter: it is a design choice, since each call is
+separately approved and bounded, and the `dsh.run` pattern of putting a whole multi-step protocol
+inside one bounded call is how that is expressed here.
 
 ## Reproducing it
 

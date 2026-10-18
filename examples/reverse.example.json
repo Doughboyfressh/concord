@@ -1,0 +1,39 @@
+{
+  "providers": [
+    {
+      "name": "adb",
+      "executable": "/usr/bin/adb",
+      "executableSha256": "REPLACE_WITH_SHA256_OF_THE_REVIEWED_ADB_BINARY",
+      "timeoutMs": 30000,
+      "maxOutputBytes": 1048576,
+      "commands": {
+        "list_adb_devices": ["devices", "-l"],
+        "list_adb_packages": ["-s", "{serial}", "shell", "pm", "list", "packages"],
+        "inspect_adb_package": ["-s", "{serial}", "shell", "dumpsys", "package", "{package}"],
+        "inspect_adb_device": ["-s", "{serial}", "shell", "getprop"],
+        "read_adb_logcat": ["-s", "{serial}", "logcat", "-d", "-t", "500"],
+        "pull_adb_file": ["-s", "{serial}", "pull", "{path}"]
+      }
+    },
+    {
+      "name": "objdump",
+      "executable": "/usr/bin/objdump",
+      "executableSha256": "REPLACE_WITH_SHA256_OF_THE_REVIEWED_OBJDUMP_BINARY",
+      "timeoutMs": 60000,
+      "maxOutputBytes": 4194304,
+      "commands": {
+        "inspect_with_objdump": ["--file-headers", "--section-headers", "{path}"]
+      }
+    },
+    {
+      "name": "rizin",
+      "executable": "/usr/bin/rizin",
+      "executableSha256": "REPLACE_WITH_SHA256_OF_THE_REVIEWED_RIZIN_BINARY",
+      "timeoutMs": 60000,
+      "maxOutputBytes": 4194304,
+      "commands": {
+        "rizin_debug_session_status": ["-v"]
+      }
+    }
+  ]
+}

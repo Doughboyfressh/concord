@@ -7,6 +7,7 @@ import { canonical, digest, parseJson, validateSchema, clone } from '../src/valu
 import { runPlan, replayPlan, inspectPlan, attenuatePolicy } from '../src/engine.mjs';
 import { makeBuiltinTools } from '../src/builtins.mjs';
 import { makeArtifactTools } from '../src/artifacts.mjs';
+import { makeReaderTools } from '../src/readers.mjs';
 import { HarnessError } from '../src/value.mjs';
 
 const registry = new Map(makeBuiltinTools().map(t => [t.name, t]));
@@ -247,8 +248,12 @@ test('every declared outputKeys set is really present in that tool\'s actual res
   // is checked as a subset and never over-promises.
   const temp = mkdtempSync(path.join(tmpdir(), 'concord-outputkeys-'));
   writeFileSync(path.join(temp, 'f.txt'), 'hello');
+  // Real carriers, so the tools below are exercised on their main path rather than their
+  // not-this-format fallback: an empty but valid WASM module, and legacy EVM bytecode.
+  writeFileSync(path.join(temp, 'm.wasm'), Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]));
+  writeFileSync(path.join(temp, 'code.bin'), Buffer.from([0x60, 0x01, 0x50, 0x00]));
   const context = { workspaceRoot: temp, policy: { maxOutputBytes: 100000 }, requestHash: 'a'.repeat(64) };
-  const tools = new Map([...makeBuiltinTools(), ...makeArtifactTools()].map(t => [t.name, t]));
+  const tools = new Map([...makeBuiltinTools(), ...makeArtifactTools(), ...makeReaderTools()].map(t => [t.name, t]));
   const candidate = await tools.get('memory.candidate').execute({ lesson: 'a lesson worth keeping', evidence: [{ a: 1 }] }, context);
   const inputs = {
     'json.hash': { a: 1 },
@@ -263,6 +268,29 @@ test('every declared outputKeys set is really present in that tool\'s actual res
     'files.read': { path: 'f.txt' },
     'files.write': { path: 'out.txt', content: { k: 1 } },
     'artifact.inspect': { path: 'f.txt' },
+    'artifact.wasmInterface': { path: 'm.wasm' },
+    'artifact.sqlite': { path: 'f.txt' },
+    'artifact.pcap': { path: 'f.txt' },
+    'artifact.packetFields': { path: 'f.txt' },
+    'artifact.peResources': { path: 'f.txt' },
+    'artifact.goBuildInfo': { path: 'f.txt' },
+    'artifact.dex': { path: 'f.txt' },
+    'artifact.dexClass': { path: 'f.txt', descriptor: 'Lx/Y;' },
+    'artifact.dexMethod': { path: 'f.txt', descriptor: 'Lx/Y;' },
+    'artifact.dexSearch': { path: 'f.txt', query: 'x' },
+    'artifact.dexReferences': { path: 'f.txt', type: 'Lx/Y;' },
+    'artifact.dexGraph': { path: 'f.txt' },
+    'artifact.androidManifest': { path: 'f.txt' },
+    'artifact.apk': { path: 'f.txt' },
+    'artifact.managed': { path: 'f.txt' },
+    'artifact.managedMembers': { path: 'f.txt' },
+    'artifact.managedNativeBoundaries': { path: 'f.txt' },
+    'artifact.managedGraph': { path: 'f.txt' },
+    'artifact.compareManagedMembers': { left: { members: [] }, right: { members: [] } },
+    'artifact.verifyManagedNativeBoundaries': { boundaries: [] },
+    'artifact.importManagedReconstruction': { observed: { members: [] }, reconstruction: [] },
+    'artifact.evmInterface': { path: 'code.bin', encoding: 'raw' },
+    'artifact.compareWasmInterfaces': { left: { state: 'complete', entries: [] }, right: { state: 'complete', entries: [] } },
     'memory.candidate': { lesson: 'a lesson worth keeping', evidence: [{ a: 1 }] },
     'memory.promote': candidate,
     'memory.recall': { query: 'lesson', limit: 3 },

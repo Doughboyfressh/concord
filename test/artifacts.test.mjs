@@ -606,3 +606,643 @@ test('a symlinked artifact is rejected, matching files.read\'s discipline', (t) 
   catch (e) { if (e.code === 'EPERM') return t.skip('Host disallows link creation'); throw e; }
   assert.throws(() => inspect.execute({ path: 'link.bin' }, { workspaceRoot: temp, policy }), (e) => e instanceof HarnessError && e.code === 'PATH_DENIED');
 });
+
+// REA recovers a WASM interface through WABT, an external toolkit. Concord decodes it from the
+// bytes instead, so the check that matters is agreement with an independent implementation rather
+// than with an expectation written here: Node's own WebAssembly reports the real names and kinds.
+const artifactTools = new Map(makeArtifactTools().map((t) => [t.name, t]));
+const wasmInterface = artifactTools.get('artifact.wasmInterface');
+const compareWasmInterfaces = artifactTools.get('artifact.compareWasmInterfaces');
+
+const leb = (n) => { const out = []; do { let b = n & 0x7f; n >>>= 7; if (n !== 0) b |= 0x80; out.push(b); } while (n !== 0); return out; };
+const wasmStr = (s) => { const b = [...Buffer.from(s, 'utf8')]; return [...leb(b.length), ...b]; };
+const wasmVec = (items) => [...leb(items.length), ...items.flat()];
+const wasmSection = (id, payload) => [id, ...leb(payload.length), ...payload];
+const wasmModule = (...sections) => Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, ...sections.flat()]);
+const wasmBody = (bytes) => [...leb(bytes.length), ...bytes];
+
+function wasmFixture(resultType, exportNames) {
+  const types = wasmSection(1, wasmVec([
+    [0x60, ...wasmVec([[0x7f]]), ...wasmVec([[0x7f]])],
+    [0x60, ...wasmVec([]), ...wasmVec([])],
+    [0x60, ...wasmVec([[0x7e], [0x7e]]), ...wasmVec([[resultType]])],
+  ]));
+  const imports = wasmSection(2, wasmVec([
+    [...wasmStr('env'), ...wasmStr('imported_func'), 0x00, ...leb(0)],
+    [...wasmStr('env'), ...wasmStr('mem'), 0x02, 0x00, ...leb(1)],
+    [...wasmStr('host'), ...wasmStr('tbl'), 0x01, 0x70, 0x01, ...leb(1), ...leb(10)],
+  ]));
+  const funcs = wasmSection(3, wasmVec([[...leb(1)], [...leb(2)]]));
+  const exported = wasmSection(7, wasmVec(exportNames));
+  // A function section is legal only with a matching code section.
+  const value = resultType === 0x7c ? [0x44, 0, 0, 0, 0, 0, 0, 0, 0] : [0x42, 0x00];
+  const code = wasmSection(10, wasmVec([wasmBody([0x00, 0x0b]), wasmBody([0x00, ...value, 0x0b])]));
+  return wasmModule(types, imports, funcs, exported, code);
+}
+
+test('WASM interface decoding agrees with Node WebAssembly, and resolves the function index space', () => {
+  const temp = tempWorkspace();
+  const context = { workspaceRoot: temp, policy };
+  const base = wasmFixture(0x7c, [
+    [...wasmStr('exported_void'), 0x00, ...leb(1)],
+    [...wasmStr('exported_math'), 0x00, ...leb(2)],
+    [...wasmStr('exported_mem'), 0x02, ...leb(0)],
+  ]);
+  const variant = wasmFixture(0x7e, [
+    [...wasmStr('exported_void'), 0x00, ...leb(1)],
+    [...wasmStr('exported_math'), 0x00, ...leb(2)],
+    [...wasmStr('added_export'), 0x00, ...leb(1)],
+  ]);
+  const cases = { 'full.wasm': base, 'variant.wasm': variant, 'empty.wasm': wasmModule() };
+
+  for (const [name, bytes] of Object.entries(cases)) {
+    writeFixture(temp, name, bytes);
+    // A fixture the real implementation rejects would make any agreement below vacuous.
+    assert.equal(WebAssembly.validate(bytes), true, name);
+    const module = new WebAssembly.Module(bytes);
+    const mine = wasmInterface.execute({ path: name }, context);
+    const kindOf = (k) => (k === 'func' ? 'function' : k);
+    const mineIn = mine.entries.filter((e) => e.direction === 'import').map((e) => [e.module, e.name, kindOf(e.kind)]).sort();
+    const mineOut = mine.entries.filter((e) => e.direction === 'export').map((e) => [e.name, kindOf(e.kind)]).sort();
+    assert.deepEqual(mineIn, WebAssembly.Module.imports(module).map((x) => [x.module, x.name, x.kind]).sort(), name);
+    assert.deepEqual(mineOut, WebAssembly.Module.exports(module).map((x) => [x.name, x.kind]).sort(), name);
+    assert.equal(mine.state, 'complete', name);
+  }
+
+  // Signatures are the part the oracle cannot report. exported_math is the second DEFINED
+  // function, so a parser that ignored the imported function would resolve the wrong type.
+  const full = wasmInterface.execute({ path: 'full.wasm' }, context);
+  const math = full.entries.find((e) => e.name === 'exported_math');
+  assert.deepEqual(math.signature, { kind: 'func', params: ['i64', 'i64'], results: ['f64'] });
+  assert.equal(math.wat_form, '(export "exported_math" (func (param i64 i64) (result f64)))');
+  const imported = full.entries.find((e) => e.name === 'imported_func');
+  assert.deepEqual(imported.signature, { kind: 'func', params: ['i32'], results: ['i32'] });
+  assert.equal(full.entries.find((e) => e.name === 'tbl').signature.element, 'funcref');
+  // Identical bytes decode identically, which replay depends on.
+  assert.deepEqual(wasmInterface.execute({ path: 'full.wasm' }, context), full);
+
+  const diff = compareWasmInterfaces.execute({ left: full, right: wasmInterface.execute({ path: 'variant.wasm' }, context), select: 'exports' });
+  assert.deepEqual(diff.summary, { added: 1, removed: 1, changed: 1, unchanged: 1, unknown: 0 });
+  assert.equal(diff.changes.find((c) => c.name === 'exported_math').state, 'changed');
+  assert.equal(diff.changes.find((c) => c.name === 'exported_mem').state, 'removed');
+  assert.equal(diff.changes.find((c) => c.name === 'added_export').state, 'added');
+  assert.equal(diff.changes.find((c) => c.name === 'exported_void').state, 'unchanged');
+  fs.rmSync(temp, { recursive: true, force: true });
+});
+
+test('WASM interface reports what it could not decode instead of an empty interface', () => {
+  const temp = tempWorkspace();
+  const context = { workspaceRoot: temp, policy };
+  const base = wasmFixture(0x7c, [[...wasmStr('only'), 0x00, ...leb(1)]]);
+
+  writeFixture(temp, 'cut.wasm', base.subarray(0, 24));
+  const cut = wasmInterface.execute({ path: 'cut.wasm' }, context);
+  assert.equal(cut.state, 'partial');
+  assert.ok(cut.limitations.length > 0);
+
+  // Not a module at all is an answer about the bytes, not a thrown error.
+  writeFixture(temp, 'plain.txt', Buffer.from('definitely not a wasm module'));
+  const plain = wasmInterface.execute({ path: 'plain.txt' }, context);
+  assert.equal(plain.state, 'partial');
+  assert.deepEqual(plain.entries, []);
+  assert.match(plain.limitations[0], /not a WASM module/);
+
+  // A duplicated name has no established correspondence, so equality is never claimed.
+  const left = { state: 'complete', entries: [
+    { direction: 'export', module: null, name: 'dup', kind: 'func', signature: { kind: 'func', params: [], results: [] } },
+    { direction: 'export', module: null, name: 'dup', kind: 'func', signature: { kind: 'func', params: ['i32'], results: [] } },
+  ] };
+  const right = { state: 'complete', entries: [
+    { direction: 'export', module: null, name: 'dup', kind: 'func', signature: { kind: 'func', params: [], results: [] } },
+  ] };
+  const dup = compareWasmInterfaces.execute({ left, right, select: 'exports' });
+  assert.equal(dup.summary.unknown, 1);
+  assert.equal(dup.summary.unchanged, 0);
+  assert.match(dup.changes[0].reason, /occurs more than once/);
+
+  // A partial side cannot be read as evidence of removal.
+  const partial = compareWasmInterfaces.execute({ left, right: { state: 'partial', entries: [] }, select: 'exports' });
+  assert.ok(partial.limitations.some((l) => /right interface is partial/.test(l)));
+  fs.rmSync(temp, { recursive: true, force: true });
+});
+
+// REA recovers EVM selectors with bundled EVMole plus a host prlimit. That dataflow analysis is
+// not reproduced here, so these tests check the two things that are actually determinate from the
+// bytes: that the opcode sweep skips PUSH immediates by width, and that a Solidity metadata
+// trailer is only accepted when its length prefix addresses a real CBOR root map.
+const evmInterface = artifactTools.get('artifact.evmInterface');
+
+test('EVM selector candidates agree with REAs own fixture and never read PUSH data as code', () => {
+  const temp = tempWorkspace();
+  const context = { workspaceRoot: temp, policy };
+
+  // Verbatim from REA scripts/verify-evm-interface.mjs, where EVMole is expected to report
+  // exactly 0x00000000: PUSH1 0, CALLDATALOAD, PUSH1 0xe0, SHR, PUSH4 0, EQ, PUSH1 0x10, JUMPI.
+  writeFixture(temp, 'zero-selector.hex', Buffer.from('60003560e01c630000000014601057005b00', 'utf8'));
+  const zero = evmInterface.execute({ path: 'zero-selector.hex', encoding: 'hex' }, context);
+  assert.equal(zero.supported, true);
+  assert.deepEqual(zero.selectorCandidates.map((s) => s.selector), ['00000000']);
+  assert.equal(zero.opcodes.jumpdests, 1);
+
+  // The property that separates a sweep from a substring search: a PUSH32 immediate containing
+  // the byte pattern of PUSH4 followed by a plausible selector must NOT yield that selector.
+  const hidden = Buffer.concat([
+    Buffer.from([0x7f]), // PUSH32
+    Buffer.from([0x63, 0xde, 0xad, 0xbe, 0xef]), // looks like PUSH4 deadbeef, but it is data
+    Buffer.alloc(27, 0x11),
+    Buffer.from([0x50]), // POP
+    Buffer.from([0x63, 0xa9, 0x05, 0x9c, 0xbb]), // a real PUSH4, in code position
+    Buffer.from([0x14, 0x00]), // EQ, STOP
+  ]);
+  writeFixture(temp, 'hidden.bin', hidden);
+  const swept = evmInterface.execute({ path: 'hidden.bin', encoding: 'raw' }, context);
+  assert.deepEqual(swept.selectorCandidates.map((s) => s.selector), ['a9059cbb']);
+  assert.equal(swept.selectorCandidates.some((s) => s.selector === 'deadbeef'), false);
+  assert.equal(swept.opcodes.pushes, 2);
+
+  // Candidates are labelled as candidates rather than asserted to be the interface.
+  assert.ok(swept.limitations.some((l) => /PUSH4 sweep/.test(l)));
+  fs.rmSync(temp, { recursive: true, force: true });
+});
+
+test('EVM carrier digests stay distinct, hex rules are strict, and EOF is refused by name', () => {
+  const temp = tempWorkspace();
+  const context = { workspaceRoot: temp, policy };
+
+  // The carrier digest covers the file as written; the bytecode digest covers the decoded bytes.
+  // Two carriers differing only in prefix and casing decode to identical bytecode.
+  writeFixture(temp, 'a.hex', Buffer.from('0x6000', 'utf8'));
+  writeFixture(temp, 'b.hex', Buffer.from('6000\n', 'utf8'));
+  const a = evmInterface.execute({ path: 'a.hex', encoding: 'hex' }, context);
+  const b = evmInterface.execute({ path: 'b.hex', encoding: 'hex' }, context);
+  assert.notEqual(a.carrierSha256, b.carrierSha256);
+  assert.equal(a.bytecodeSha256, b.bytecodeSha256);
+  assert.equal(a.bytecodeBytes, 2);
+
+  for (const [name, text, why] of [
+    ['odd.hex', '600', /odd number/],
+    ['sep.hex', '60 00', /interior separators/],
+    ['stray.hex', '60x00', /interior separators|stray x/],
+  ]) {
+    writeFixture(temp, name, Buffer.from(text, 'utf8'));
+    const bad = evmInterface.execute({ path: name, encoding: 'hex' }, context);
+    assert.equal(bad.supported, false, name);
+    assert.equal(bad.reason, 'carrier_invalid', name);
+    assert.match(bad.detail, why, name);
+    assert.equal(bad.bytecodeSha256, null, name);
+  }
+
+  // An EOF container is named as unsupported rather than decoded as legacy bytecode.
+  writeFixture(temp, 'eof.bin', Buffer.from([0xef, 0x00, 0x01, 0x01, 0x00]));
+  const eof = evmInterface.execute({ path: 'eof.bin', encoding: 'raw' }, context);
+  assert.equal(eof.supported, false);
+  assert.equal(eof.reason, 'unsupported_target');
+  assert.match(eof.detail, /EOF/);
+
+  // Empty bytecode is a valid carrier with nothing to report, not an error.
+  writeFixture(temp, 'empty.bin', Buffer.alloc(0));
+  const empty = evmInterface.execute({ path: 'empty.bin', encoding: 'raw' }, context);
+  assert.equal(empty.supported, true);
+  assert.deepEqual(empty.selectorCandidates, []);
+  fs.rmSync(temp, { recursive: true, force: true });
+});
+
+test('a Solidity metadata trailer is read only when its length prefix addresses a CBOR map', () => {
+  const temp = tempWorkspace();
+  const context = { workspaceRoot: temp, policy };
+  const code = Buffer.from([0x60, 0x01, 0x50, 0x00]);
+  // CBOR: {"solc": h'00081e'} is 10 bytes, followed by its big-endian length.
+  const cbor = Buffer.from([0xa1, 0x64, 0x73, 0x6f, 0x6c, 0x63, 0x43, 0x00, 0x08, 0x1e]);
+  writeFixture(temp, 'meta.bin', Buffer.concat([code, cbor, Buffer.from([0x00, 0x0a])]));
+  const withMeta = evmInterface.execute({ path: 'meta.bin', encoding: 'raw' }, context);
+  assert.deepEqual(withMeta.metadata.root, { solc: '00081e' });
+  assert.equal(withMeta.metadata.length, 10);
+  assert.equal(withMeta.metadata.offset, code.length);
+  // The trailer is excluded from the code region, so it is never swept as opcodes.
+  assert.equal(withMeta.opcodes.codeBytes, code.length);
+
+  // A length prefix pointing at something that is not a CBOR root map is reported, not believed.
+  // 0xfb is genuinely unassigned; 0xff would not be, since it is SELFDESTRUCT.
+  writeFixture(temp, 'lying.bin', Buffer.concat([code, Buffer.alloc(10, 0xfb), Buffer.from([0x00, 0x0a])]));
+  const lying = evmInterface.execute({ path: 'lying.bin', encoding: 'raw' }, context);
+  assert.equal(lying.metadata, null);
+  assert.ok(lying.limitations.some((l) => /did not address a CBOR root map/.test(l)));
+  assert.equal(lying.opcodes.codeBytes, lying.bytecodeBytes);
+
+  // Undefined opcodes are surfaced rather than skipped: the 0xfb bytes above are unassigned.
+  assert.ok(lying.opcodes.undefinedCount > 0);
+  // Cancun opcodes must NOT count as undefined, which a split 0x50-0x5b / 0x5f-0x9f table got wrong.
+  writeFixture(temp, 'cancun.bin', Buffer.from([0x5c, 0x5d, 0x5e, 0x5f]));
+  assert.deepEqual(evmInterface.execute({ path: 'cancun.bin', encoding: 'raw' }, context).opcodes.undefined, []);
+  // Identical bytes read identically, which replay depends on.
+  assert.deepEqual(evmInterface.execute({ path: 'meta.bin', encoding: 'raw' }, context), withMeta);
+  fs.rmSync(temp, { recursive: true, force: true });
+});
+
+// REA reads SQLite structure through the sqlite3 library. Concord reads the documented file
+// format directly, so the check is agreement with SQLite itself via Node's built-in node:sqlite,
+// not agreement with an expectation written here.
+const sqliteTool = artifactTools.get('artifact.sqlite');
+
+test('SQLite structure agrees with the engines own sqlite_master and header pragmas', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const temp = tempWorkspace();
+  const context = { workspaceRoot: temp, policy };
+  const file = path.join(temp, 'app.db');
+  const db = new DatabaseSync(file);
+  db.exec(`
+    PRAGMA user_version = 42;
+    CREATE TABLE accounts (id INTEGER PRIMARY KEY, email TEXT NOT NULL, balance REAL);
+    CREATE TABLE sessions (token TEXT PRIMARY KEY, account_id INTEGER REFERENCES accounts(id));
+    CREATE INDEX accounts_by_email ON accounts(email);
+    CREATE VIEW rich AS SELECT id FROM accounts WHERE balance > 1000;
+    CREATE TRIGGER touch AFTER UPDATE ON accounts BEGIN UPDATE accounts SET balance = balance; END;
+    INSERT INTO accounts (email, balance) VALUES ('a@example.com', 10.5), ('b@example.com', 2000);
+  `);
+  const oracle = db.prepare('SELECT type, name, tbl_name, rootpage, sql FROM sqlite_master ORDER BY name').all();
+  const pragma = (sql) => Object.values(db.prepare(sql).get())[0];
+  const expected = {
+    pageSize: pragma('PRAGMA page_size'), encoding: pragma('PRAGMA encoding'),
+    userVersion: pragma('PRAGMA user_version'), pageCount: pragma('PRAGMA page_count'),
+    schemaCookie: pragma('PRAGMA schema_version'),
+  };
+  db.close();
+
+  const mine = sqliteTool.execute({ path: 'app.db' }, context);
+  assert.equal(mine.supported, true);
+  assert.equal(mine.header.pageSize, expected.pageSize);
+  assert.equal(mine.header.textEncoding, expected.encoding);
+  assert.equal(mine.header.userVersion, expected.userVersion);
+  assert.equal(mine.header.pageCount, expected.pageCount);
+  assert.equal(mine.header.schemaCookie, expected.schemaCookie);
+
+  // rootPage is the assertion that matters most: it comes from a 1-byte signed serial type, and
+  // reading it with the 8-byte helper silently produced a string for every table.
+  const shape = (rows) => rows.map((r) => [r.type, r.name, r.tbl_name ?? r.tableName,
+    r.rootpage ?? r.rootPage, (r.sql ?? '').replace(/\s+/g, ' ').trim()]).sort((a, b) => (a[1] < b[1] ? -1 : 1));
+  assert.deepEqual(shape(mine.objects), shape(oracle));
+  assert.equal(mine.objects.length, 6);
+  assert.deepEqual(mine.counts, { table: 2, index: 2, view: 1, trigger: 1 });
+  assert.deepEqual(mine.limitations, []);
+  for (const object of mine.objects) {
+    if (object.type === 'table') assert.equal(typeof object.rootPage, 'number');
+  }
+  // Identical bytes read identically, which replay depends on.
+  assert.deepEqual(sqliteTool.execute({ path: 'app.db' }, context), mine);
+  fs.rmSync(temp, { recursive: true, force: true });
+});
+
+test('SQLite reading reports a non-database, a WAL journal and a truncated file honestly', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const temp = tempWorkspace();
+  const context = { workspaceRoot: temp, policy };
+
+  // Not a database at all is an answer about the bytes, not a thrown error.
+  writeFixture(temp, 'plain.txt', Buffer.from('definitely not a database'));
+  const plain = sqliteTool.execute({ path: 'plain.txt' }, context);
+  assert.equal(plain.supported, false);
+  assert.equal(plain.reason, 'not_sqlite');
+  assert.deepEqual(plain.objects, []);
+
+  const walPath = path.join(temp, 'wal.db');
+  const wal = new DatabaseSync(walPath);
+  wal.exec('PRAGMA journal_mode = WAL; CREATE TABLE t (x);');
+  wal.close();
+  const walRead = sqliteTool.execute({ path: 'wal.db' }, context);
+  assert.equal(walRead.header.writeVersion, 'wal');
+  assert.deepEqual(walRead.objects.map((o) => o.name), ['t']);
+
+  // A header-only file declares pages it does not contain: said plainly, not implied by a count.
+  writeFixture(temp, 'cut.db', fs.readFileSync(walPath).subarray(0, 100));
+  const cut = sqliteTool.execute({ path: 'cut.db' }, context);
+  assert.equal(cut.supported, true);
+  assert.deepEqual(cut.objects, []);
+  assert.ok(cut.limitations.some((l) => /truncated or sparse/.test(l)));
+
+  // A 65536-byte page size is encoded as 1, the one value that does not fit the 16-bit field.
+  const odd = Buffer.alloc(200);
+  odd.write('SQLite format 3\0', 0, 'latin1');
+  odd.writeUInt16BE(1, 16);
+  odd.writeUInt32BE(1, 28);
+  odd.writeUInt32BE(1, 56);
+  writeFixture(temp, 'big-page.db', odd);
+  const big = sqliteTool.execute({ path: 'big-page.db' }, context);
+  assert.equal(big.header.pageSize, 65536);
+  assert.equal(big.header.pageSizeValid, true);
+
+  // A page size that is not a power of two is refused rather than used to walk the file.
+  const bad = Buffer.from(odd);
+  bad.writeUInt16BE(1000, 16);
+  writeFixture(temp, 'bad-page.db', bad);
+  const badRead = sqliteTool.execute({ path: 'bad-page.db' }, context);
+  assert.equal(badRead.header.pageSizeValid, false);
+  assert.deepEqual(badRead.objects, []);
+  assert.ok(badRead.limitations.some((l) => /power of two/.test(l)));
+  fs.rmSync(temp, { recursive: true, force: true });
+});
+
+// REA reads captures, PE resources and Go metadata through external tooling. Concord reads the
+// documented layouts directly. Each fixture below encodes a distinctive value at a known offset,
+// so the assertion is that the reader returns exactly what was written there: an offset,
+// endianness or layer-walk error cannot pass.
+const pcapTool = artifactTools.get('artifact.pcap');
+const packetFieldsTool = artifactTools.get('artifact.packetFields');
+const peResourcesTool = artifactTools.get('artifact.peResources');
+const goBuildInfoTool = artifactTools.get('artifact.goBuildInfo');
+
+function ethernetTcpFrame() {
+  const ether = Buffer.concat([
+    Buffer.from([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+    Buffer.from([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]),
+    Buffer.from([0x08, 0x00]),
+  ]);
+  const ipv4 = Buffer.alloc(20);
+  ipv4[0] = 0x45;
+  ipv4.writeUInt16BE(40, 2);
+  ipv4[8] = 64;
+  ipv4[9] = 6;
+  Buffer.from([10, 0, 0, 1]).copy(ipv4, 12);
+  Buffer.from([192, 168, 7, 9]).copy(ipv4, 16);
+  const tcp = Buffer.alloc(20);
+  tcp.writeUInt16BE(43210, 0);
+  tcp.writeUInt16BE(443, 2);
+  tcp.writeUInt32BE(305419896, 4);
+  tcp[12] = 5 << 4;
+  tcp[13] = 0x02 | 0x10;
+  tcp.writeUInt16BE(64240, 14);
+  return Buffer.concat([ether, ipv4, tcp]);
+}
+
+function classicPcap({ bigEndian = false, records = [] } = {}) {
+  const global = Buffer.alloc(24);
+  (bigEndian ? Buffer.from([0xa1, 0xb2, 0xc3, 0xd4]) : Buffer.from([0xd4, 0xc3, 0xb2, 0xa1])).copy(global, 0);
+  const u16 = (v, o) => (bigEndian ? global.writeUInt16BE(v, o) : global.writeUInt16LE(v, o));
+  const u32 = (v, o) => (bigEndian ? global.writeUInt32BE(v, o) : global.writeUInt32LE(v, o));
+  u16(2, 4); u16(4, 6); u32(262144, 16); u32(1, 20);
+  const parts = [global];
+  for (const { seconds, sub, payload, originalLength } of records) {
+    const head = Buffer.alloc(16);
+    const w = (v, o) => (bigEndian ? head.writeUInt32BE(v, o) : head.writeUInt32LE(v, o));
+    w(seconds, 0); w(sub, 4); w(payload.length, 8); w(originalLength ?? payload.length, 12);
+    parts.push(head, payload);
+  }
+  return Buffer.concat(parts);
+}
+
+test('pcap reading recovers the global header, records and slicing in both byte orders', (t) => {
+  const temp = tempWorkspace();
+  const context = { workspaceRoot: temp, policy };
+  const frame = ethernetTcpFrame();
+  const records = [
+    { seconds: 1700000000, sub: 123456, payload: frame },
+    { seconds: 1700000005, sub: 654321, payload: frame, originalLength: 9999 },
+  ];
+  writeFixture(temp, 'two.pcap', classicPcap({ records }));
+  const cap = pcapTool.execute({ path: 'two.pcap' }, context);
+  assert.equal(cap.format, 'pcap');
+  assert.equal(cap.supported, true);
+  assert.equal(cap.header.byteOrder, 'little');
+  assert.equal(cap.header.timestampUnit, 'microseconds');
+  assert.equal(cap.header.linkType, 1);
+  assert.equal(cap.header.linkTypeName, 'ethernet');
+  assert.equal(cap.header.snapLength, 262144);
+  assert.deepEqual(cap.summary, {
+    packetCount: 2, capturedBytes: frame.length * 2, originalBytes: frame.length + 9999, slicedPackets: 1,
+    firstTimestamp: { seconds: 1700000000, sub: 123456 },
+    lastTimestamp: { seconds: 1700000005, sub: 654321 },
+  });
+  // A sliced packet is one whose wire length exceeds what was captured.
+  assert.deepEqual(cap.packets.map((p) => p.sliced), [false, true]);
+  assert.deepEqual(cap.limitations, []);
+
+  // The stored byte order decides how every field is read, so a big-endian file of the same
+  // capture must yield identical values rather than byte-swapped ones.
+  writeFixture(temp, 'be.pcap', classicPcap({ bigEndian: true, records: [records[0]] }));
+  const be = pcapTool.execute({ path: 'be.pcap' }, context);
+  assert.equal(be.header.byteOrder, 'big');
+  assert.equal(be.header.snapLength, cap.header.snapLength);
+  assert.equal(be.packets[0].timestampSeconds, cap.packets[0].timestampSeconds);
+  assert.equal(be.packets[0].timestampSub, cap.packets[0].timestampSub);
+
+  // Nanosecond captures are a different magic, and the unit rides along with it.
+  const nanos = classicPcap({ records: [records[0]] });
+  Buffer.from([0x4d, 0x3c, 0xb2, 0xa1]).copy(nanos, 0);
+  writeFixture(temp, 'nanos.pcap', nanos);
+  assert.equal(pcapTool.execute({ path: 'nanos.pcap' }, context).header.timestampUnit, 'nanoseconds');
+
+  // A record claiming more captured bytes than the file holds must stop the sweep.
+  const lying = classicPcap({ records: [records[0]] });
+  lying.writeUInt32LE(100000, 24 + 8);
+  writeFixture(temp, 'lying.pcap', lying);
+  const lyingRead = pcapTool.execute({ path: 'lying.pcap' }, context);
+  assert.deepEqual(lyingRead.packets, []);
+  assert.ok(lyingRead.limitations.some((l) => /more captured bytes/.test(l)));
+
+  // pcapng is a different container: recognised structurally, not mis-read as classic pcap.
+  const shb = Buffer.alloc(28);
+  shb.writeUInt32LE(0x0a0d0d0a, 0); shb.writeUInt32LE(28, 4); shb.writeUInt32LE(0x1a2b3c4d, 8);
+  shb.writeUInt16LE(1, 12); shb.writeUInt32LE(28, 24);
+  writeFixture(temp, 'cap.pcapng', shb);
+  const ng = pcapTool.execute({ path: 'cap.pcapng' }, context);
+  assert.equal(ng.format, 'pcapng');
+  assert.equal(ng.byteOrder, 'little');
+  assert.equal(ng.blocks.length, 1);
+  assert.ok(ng.limitations.some((l) => /block level/.test(l)));
+
+  writeFixture(temp, 'plain.txt', Buffer.from('not a capture at all'));
+  const plain = pcapTool.execute({ path: 'plain.txt' }, context);
+  assert.equal(plain.supported, false);
+  assert.equal(plain.reason, 'not_a_capture');
+  assert.deepEqual(pcapTool.execute({ path: 'two.pcap' }, context), cap);
+  fs.rmSync(temp, { recursive: true, force: true });
+});
+
+test('packet field decoding returns exactly the values encoded at each header offset', () => {
+  const temp = tempWorkspace();
+  const context = { workspaceRoot: temp, policy };
+  const frame = ethernetTcpFrame();
+  writeFixture(temp, 'one.pcap', classicPcap({ records: [{ seconds: 1, sub: 2, payload: frame }] }));
+  const decoded = packetFieldsTool.execute({ path: 'one.pcap' }, context);
+  assert.equal(decoded.supported, true);
+  assert.equal(decoded.linkTypeName, 'ethernet');
+  assert.equal(decoded.decoded, 1);
+  const layers = Object.fromEntries(decoded.frames[0].layers.map((l) => [l.layer, l]));
+  assert.equal(layers.ethernet.destination, 'aa:bb:cc:dd:ee:ff');
+  assert.equal(layers.ethernet.source, '11:22:33:44:55:66');
+  assert.equal(layers.ipv4.source, '10.0.0.1');
+  assert.equal(layers.ipv4.destination, '192.168.7.9');
+  assert.equal(layers.ipv4.ttl, 64);
+  assert.equal(layers.ipv4.protocolName, 'tcp');
+  assert.equal(layers.tcp.sourcePort, 43210);
+  assert.equal(layers.tcp.destinationPort, 443);
+  assert.equal(layers.tcp.sequence, 305419896);
+  assert.equal(layers.tcp.window, 64240);
+  assert.deepEqual(layers.tcp.flags, ['syn', 'ack']);
+
+  // A VLAN tag shifts every later layer by four bytes, so an unwrapped tag would misread the IP.
+  const tagged = Buffer.concat([
+    frame.subarray(0, 12), Buffer.from([0x81, 0x00]),
+    Buffer.from([0x20, 0x64]), Buffer.from([0x08, 0x00]), frame.subarray(14),
+  ]);
+  writeFixture(temp, 'vlan.pcap', classicPcap({ records: [{ seconds: 1, sub: 0, payload: tagged }] }));
+  const vlan = packetFieldsTool.execute({ path: 'vlan.pcap' }, context);
+  const vlanLayers = Object.fromEntries(vlan.frames[0].layers.map((l) => [l.layer, l]));
+  assert.equal(vlanLayers.vlan.id, 100);
+  assert.equal(vlanLayers.ipv4.source, '10.0.0.1');
+  assert.equal(vlanLayers.tcp.destinationPort, 443);
+
+  // A UDP frame takes the other transport branch.
+  const udp = Buffer.alloc(8);
+  udp.writeUInt16BE(53, 0); udp.writeUInt16BE(5353, 2); udp.writeUInt16BE(8, 4);
+  const udpFrame = Buffer.concat([frame.subarray(0, 14), (() => {
+    const ip = Buffer.from(frame.subarray(14, 34)); ip[9] = 17; return ip;
+  })(), udp]);
+  writeFixture(temp, 'udp.pcap', classicPcap({ records: [{ seconds: 1, sub: 0, payload: udpFrame }] }));
+  const udpLayers = Object.fromEntries(packetFieldsTool.execute({ path: 'udp.pcap' }, context).frames[0].layers.map((l) => [l.layer, l]));
+  assert.equal(udpLayers.ipv4.protocolName, 'udp');
+  assert.equal(udpLayers.udp.sourcePort, 53);
+  assert.equal(udpLayers.udp.destinationPort, 5353);
+
+  // A truncated frame reports truncation rather than reading past what was captured.
+  writeFixture(temp, 'cut.pcap', classicPcap({ records: [{ seconds: 1, sub: 0, payload: frame.subarray(0, 20), originalLength: frame.length }] }));
+  const cut = packetFieldsTool.execute({ path: 'cut.pcap' }, context);
+  assert.equal(cut.frames[0].truncated, true);
+  assert.ok(cut.limitations.some((l) => /sliced packet/.test(l)));
+
+  // Fields come from classic pcap only; pcapng says so rather than returning empty frames.
+  const shb = Buffer.alloc(28);
+  shb.writeUInt32LE(0x0a0d0d0a, 0); shb.writeUInt32LE(28, 4); shb.writeUInt32LE(0x1a2b3c4d, 8);
+  shb.writeUInt32LE(28, 24);
+  writeFixture(temp, 'x.pcapng', shb);
+  const ng = packetFieldsTool.execute({ path: 'x.pcapng' }, context);
+  assert.equal(ng.supported, false);
+  assert.deepEqual(ng.frames, []);
+  fs.rmSync(temp, { recursive: true, force: true });
+});
+
+test('PE resource reading walks the three-level tree and names the standard types', () => {
+  const temp = tempWorkspace();
+  const context = { workspaceRoot: temp, policy };
+  const buffer = Buffer.alloc(0x800);
+  buffer.write('MZ', 0, 'latin1');
+  buffer.writeInt32LE(64, 0x3c);
+  buffer.write('PE\0\0', 64, 'latin1');
+  buffer.writeUInt16LE(0x8664, 68);
+  buffer.writeUInt16LE(1, 70);           // one section
+  buffer.writeUInt16LE(240, 84);         // SizeOfOptionalHeader
+  const optionalAt = 88;
+  buffer.writeUInt16LE(0x20b, optionalAt); // PE32+
+  buffer.writeUInt32LE(16, optionalAt + 108); // NumberOfRvaAndSizes
+  const directoriesAt = optionalAt + 112;
+  buffer.writeUInt32LE(0x2000, directoriesAt + 16); // resource RVA
+  buffer.writeUInt32LE(0x400, directoriesAt + 20);  // resource size
+  const sectionAt = optionalAt + 240;
+  buffer.write('.rsrc\0\0\0', sectionAt, 'latin1');
+  buffer.writeUInt32LE(0x400, sectionAt + 8);   // VirtualSize
+  buffer.writeUInt32LE(0x2000, sectionAt + 12); // VirtualAddress
+  buffer.writeUInt32LE(0x400, sectionAt + 16);  // SizeOfRawData
+  buffer.writeUInt32LE(0x400, sectionAt + 20);  // PointerToRawData
+
+  // Resource bytes live at file 0x400, addressed as RVA 0x2000. Child offsets are relative to it.
+  const base = 0x400;
+  const dir = (at, named, ids) => {
+    buffer.writeUInt16LE(named.length, at + 12);
+    buffer.writeUInt16LE(ids.length, at + 14);
+    [...named, ...ids].forEach((entry, i) => {
+      // JS bitwise OR yields a signed 32-bit value, which writeUInt32LE refuses; the high bit
+      // that marks a name string or a subdirectory needs the unsigned coercion.
+      buffer.writeUInt32LE(entry.name >>> 0, at + 16 + i * 8);
+      buffer.writeUInt32LE(entry.data >>> 0, at + 20 + i * 8);
+    });
+  };
+  // Level 1: MANIFEST (24) and VERSION (16).
+  dir(base, [], [{ name: 24, data: 0x80 | 0x80000000 }, { name: 16, data: 0xc0 | 0x80000000 }]);
+  dir(base + 0x80, [], [{ name: 1, data: 0x100 | 0x80000000 }]);      // MANIFEST name id 1
+  dir(base + 0x100, [], [{ name: 1033, data: 0x180 }]);               // language 1033 -> leaf
+  dir(base + 0xc0, [{ name: 0x200 | 0x80000000, data: 0x140 | 0x80000000 }], []); // VERSION, named
+  dir(base + 0x140, [], [{ name: 1033, data: 0x1a0 }]);
+  // Leaves: IMAGE_RESOURCE_DATA_ENTRY is RVA, size, code page, reserved.
+  buffer.writeUInt32LE(0x2200, base + 0x180);
+  buffer.writeUInt32LE(42, base + 0x184);
+  buffer.writeUInt32LE(65001, base + 0x188);
+  buffer.writeUInt32LE(0x2300, base + 0x1a0);
+  buffer.writeUInt32LE(100, base + 0x1a4);
+  // A named entry points at a UTF-16LE counted string.
+  buffer.writeUInt16LE(7, base + 0x200);
+  buffer.write('MYENTRY', base + 0x202, 'utf16le');
+
+  writeFixture(temp, 'res.exe', buffer);
+  const read = peResourcesTool.execute({ path: 'res.exe' }, context);
+  assert.equal(read.supported, true);
+  assert.equal(read.pe32Plus, true);
+  assert.deepEqual(read.directory, { rva: 0x2000, bytes: 0x400 });
+  assert.equal(read.entryCount, 2);
+  assert.deepEqual(read.byType, { MANIFEST: 1, VERSION: 1 });
+
+  const manifest = read.resources.find((r) => r.id === 24);
+  assert.equal(manifest.typeName, 'MANIFEST');
+  const leaf = manifest.children[0].children[0];
+  assert.equal(leaf.id, 1033);
+  // The leaf's own RVA must map back through the section table to a real file offset.
+  assert.deepEqual(leaf.data, { rva: 0x2200, bytes: 42, codePage: 65001, fileOffset: 0x600 });
+
+  // The named entry proves the UTF-16LE counted string is decoded rather than skipped.
+  const version = read.resources.find((r) => r.id === 16);
+  assert.equal(version.typeName, 'VERSION');
+  assert.equal(version.children[0].named, true);
+  assert.equal(version.children[0].name, 'MYENTRY');
+
+  // A PE with no resource directory is reported as such, not as a failure.
+  const bare = minimalPe();
+  writeFixture(temp, 'bare.exe', bare);
+  const bareRead = peResourcesTool.execute({ path: 'bare.exe' }, context);
+  assert.equal(bareRead.supported, true);
+  assert.deepEqual(bareRead.resources, []);
+  assert.ok(bareRead.limitations.length > 0);
+
+  writeFixture(temp, 'notpe.bin', Buffer.from('MZ and nothing more'));
+  assert.equal(peResourcesTool.execute({ path: 'notpe.bin' }, context).reason, 'not_pe');
+  assert.deepEqual(peResourcesTool.execute({ path: 'res.exe' }, context), read);
+  fs.rmSync(temp, { recursive: true, force: true });
+});
+
+test('Go build information is read inline, and the pointer layout is reported unresolved', () => {
+  const temp = tempWorkspace();
+  const context = { workspaceRoot: temp, policy };
+  const magic = Buffer.from([0xff, 0x20, 0x47, 0x6f, 0x20, 0x62, 0x75, 0x69, 0x6c, 0x64, 0x69, 0x6e, 0x66, 0x3a]);
+  const leb = (n) => { const out = []; do { let b = n & 0x7f; n >>>= 7; if (n !== 0) b |= 0x80; out.push(b); } while (n !== 0); return Buffer.from(out); };
+  const counted = (s) => { const b = Buffer.from(s, 'utf8'); return Buffer.concat([leb(b.length), b]); };
+  const modInfo = 'path\texample.com/app\nmod\texample.com/app\t(devel)\t\nbuild\t-ldflags=-s -w\nbuild\tGOOS=windows\ndep\tgithub.com/x/y\tv1.2.3\th1:abc\n';
+  // Flag bit 1 selects the inline layout; the blob's strings begin 32 bytes in.
+  const blob = Buffer.concat([magic, Buffer.from([8, 0x02]), Buffer.alloc(16), counted('go1.24.2'), counted(modInfo)]);
+  writeFixture(temp, 'app.bin', Buffer.concat([Buffer.alloc(64, 0x90), blob, Buffer.alloc(32, 0)]));
+
+  const go = goBuildInfoTool.execute({ path: 'app.bin' }, context);
+  assert.equal(go.supported, true);
+  assert.equal(go.layout, 'inline');
+  assert.equal(go.pointerSize, 8);
+  assert.equal(go.endianness, 'little');
+  assert.equal(go.offset, 64);
+  assert.equal(go.version, 'go1.24.2');
+  const settings = Object.fromEntries(go.settings.map((s) => [s.key, s.value]));
+  assert.equal(settings.GOOS, 'windows');
+  assert.equal(settings['-ldflags'], '-s -w');
+  assert.equal(settings.dep, 'github.com/x/y v1.2.3');
+  assert.deepEqual(go.limitations, []);
+
+  // The pointer layout stores its strings in the data section: reported as present, not guessed.
+  writeFixture(temp, 'old.bin', Buffer.concat([magic, Buffer.from([4, 0x00]), Buffer.alloc(16)]));
+  const old = goBuildInfoTool.execute({ path: 'old.bin' }, context);
+  assert.equal(old.supported, true);
+  assert.equal(old.layout, 'pointer');
+  assert.equal(old.pointerSize, 4);
+  assert.equal(old.version, null);
+  assert.ok(old.limitations.some((l) => /not dereferenced/.test(l)));
+
+  writeFixture(temp, 'plain.bin', Buffer.from('no build info in here'));
+  const plain = goBuildInfoTool.execute({ path: 'plain.bin' }, context);
+  assert.equal(plain.supported, false);
+  assert.equal(plain.reason, 'no_build_info');
+  assert.deepEqual(goBuildInfoTool.execute({ path: 'app.bin' }, context), go);
+  fs.rmSync(temp, { recursive: true, force: true });
+});
