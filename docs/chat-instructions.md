@@ -4,7 +4,7 @@
 `src/chat-context.mjs` assembles everything a chat turn is grounded in. It reads only the explicit
 `instructionRoot` it is given; it never touches the clock, the network, or any ambient environment variable.
 
-## The twelve reviewed modules
+## The thirteen reviewed modules
 
 `instructions/manifest.json` lists one module per entry in `sources.lock.json` (`{sourceId, file, sha256,
 bytes}`). Every turn, `buildChatContext`:
@@ -13,10 +13,10 @@ bytes}`). Every turn, `buildChatContext`:
    no duplicate `sourceId`.
 2. Reads each module's file (bounded to 64 KiB) and recomputes its SHA-256. A mismatch against the manifest's
    recorded digest fails the turn closed rather than serving stale or tampered instruction text.
-3. Concatenates all twelve into the `systemPrompt` passed to a live model, and returns their source ids as
+3. Concatenates all thirteen into the `systemPrompt` passed to a live model, and returns their source ids as
    `sourceCoverage` for display.
 
-This is why `sourceCoverage.length` is always `12`: the instruction set is not retrieved or ranked per turn, it
+This is why `sourceCoverage.length` is always `13`: the instruction set is not retrieved or ranked per turn, it
 is the complete reviewed corpus, every time. Changing an instruction module's text without updating its
 manifest digest — or changing which sources are pinned without updating the manifest to match — breaks every
 subsequent chat turn until the manifest is regenerated, by design.
@@ -59,13 +59,13 @@ remains explicit; it cannot establish that an effect did not occur.
 
 Acquired skill excerpts, recalled memory, and selected catalog references are untrusted user-payload data,
 outside the system instructions. Skill and memory text are bounded to 1,500 characters each, with explicit
-truncation flags and source/candidate identity. Only the twelve reviewed, digest-checked modules are system
+truncation flags and source/candidate identity. Only the thirteen reviewed, digest-checked modules are system
 instructions. Delimiting references helps the model follow their intended role; the kernel remains the
 enforced authorization boundary.
 
 ## The offline deterministic reply
 
 When no `model.propose` tool is registered, `src/chat.mjs` uses this module's deterministic demonstration
-reply derived from the twelve source ids, and the message itself only
+reply derived from the thirteen source ids, and the message itself only
 feeds the `capabilities.search` query inside the demonstration plan it proposes. See
 [chat sessions](chat-session.md) for how that plan is built and run.

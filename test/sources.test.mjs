@@ -36,9 +36,9 @@ async function directoryLink(t, target, destination) {
   }
 }
 
-test('source lock covers ten immutable repositories and two explicitly mutable websites', () => {
-  assert.equal(lock.sources.length, 12);
-  assert.equal(lock.sources.filter((source) => source.kind === 'repository').length, 10);
+test('source lock covers eleven immutable repositories and two explicitly mutable websites', () => {
+  assert.equal(lock.sources.length, 13);
+  assert.equal(lock.sources.filter((source) => source.kind === 'repository').length, 11);
   for (const source of lock.sources) {
     assert.equal(source.integration.runtimeInstalled, false);
     assert.ok(source.license.caveat);

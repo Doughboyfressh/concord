@@ -33,6 +33,44 @@ export function normalizePolicy(policy) {
   return deepFreeze(result);
 }
 
+/**
+ * Derive a strictly narrower policy for a single turn.
+ *
+ * Modelled on hermes's webhook-safe toolset: when a turn's input arrives from somewhere the
+ * operator does not vouch for, the authority available to that turn is reduced before the model
+ * is ever asked to plan. The property that makes this safe to apply automatically is that
+ * attenuation can only ever remove authority. A restriction naming a tool, effect or origin the
+ * base policy withholds is a mistake rather than a grant, so it throws instead of silently
+ * widening, and numeric budgets may only be lowered. The attenuated policy is what the request
+ * hash binds, so a recorded run proves which authority was actually in force.
+ */
+export function attenuatePolicy(policy, restriction = {}) {
+  const base = normalizePolicy(policy);
+  validateSchema(restriction, objectSchema({
+    allowedTools: strings,
+    allowedEffects: { type: 'array', items: { enum: effects } },
+    allowedOrigins: { type: 'array', items: { type: 'string', maxLength: 2048 } },
+    maxTasks: { type: 'integer', minimum: 1, maximum: 10000 },
+    maxOutputBytes: { type: 'integer', minimum: 1, maximum: 33554432 },
+    maxJournalBytes: { type: 'integer', minimum: 1024, maximum: 268435456 },
+    timeoutMs: { type: 'integer', minimum: 1, maximum: 300000 }
+  }, []));
+  const next = { ...base };
+  for (const key of ['allowedTools', 'allowedEffects', 'allowedOrigins']) {
+    if (restriction[key] === undefined) continue;
+    const held = new Set(base[key]);
+    assert(restriction[key].every((value) => held.has(value)), 'POLICY_NOT_ATTENUATED',
+      'Attenuation cannot grant authority the base policy withholds');
+    next[key] = [...restriction[key]];
+  }
+  for (const key of ['maxTasks', 'maxOutputBytes', 'maxJournalBytes', 'timeoutMs']) {
+    if (restriction[key] === undefined) continue;
+    assert(restriction[key] <= base[key], 'POLICY_NOT_ATTENUATED', 'Attenuation cannot raise a policy budget');
+    next[key] = restriction[key];
+  }
+  return normalizePolicy(next);
+}
+
 function schemaWellFormed(schema) {
   try { validateSchema(null, schema); } catch (e) { if (e.code !== 'SCHEMA_MISMATCH') throw e; }
 }
@@ -56,6 +94,23 @@ export function registryManifest(registry) {
 function assertNotStringifiedRef(value) {
   if (typeof value !== 'string') return;
   const text = value.trim();
+  // A reference written in an invented shorthand, e.g. "$task:read/text". Measured in round 020:
+  // the model emitted exactly that, the kernel accepted it as an ordinary string, concatenated it
+  // literally and produced a wrong answer with a faithful receipt. The JSON-object check below
+  // cannot see it because it is not JSON. The signature is a string that BEGINS with $task, so
+  // prose that merely mentions a reference form is untouched.
+  if (text.startsWith('$task')) {
+    throw new HarnessError('INVALID_REFERENCE',
+      // The repaired SHAPE is shown, never the offending value: the proposal may contain content
+      // copied from an untrusted source, so echoing it back would reopen the channel round 006
+      // closed. Round 020 measured both remaining failures in the same position — a reference
+      // beside a literal inside an array — so the array form is spelled out, since that is where
+      // the mistake is actually made.
+      'A task reference was written as shorthand text. Write it as an object placed where the value belongs: '
+      + '{"$task": "<task id>", "path": "<RFC 6901 pointer>"}. Beside a literal inside an array, that is '
+      + '["<your literal>", {"$task": "<task id>", "path": "<pointer>"}] — the array may mix a literal and a '
+      + 'reference, and the reference must stay an object rather than becoming text');
+  }
   if (!text.startsWith('{') || !text.includes('$task')) return;
   let parsed;
   try { parsed = JSON.parse(text); } catch { return; }
@@ -240,11 +295,23 @@ export async function runPlan(options) {
           failure = { code: 'OUTPUT_REJECTED',
             reason: error instanceof HarnessError ? error.message : 'Tool output could not be recorded' };
         }
-      } catch {
-        failure = { code: tool.effect === 'pure' ? 'TOOL_FAILED' : 'EFFECT_INDETERMINATE' };
+      } catch (error) {
+        // Indeterminate only for an effect that can actually change the world. grantedEffects
+        // already names exactly those, and a read is not among them: it requires no approval and
+        // a failed read leaves nothing mutated, so there is nothing to be uncertain about. Round
+        // 010 split pure from non-pure and left read on the wrong side, which told an operator
+        // "may have occurred, do not retry" about an observation that is always safe to repeat.
+        // Found by generating the composition matrix rather than by review.
+        failure = { code: grantedEffects.includes(tool.effect) ? 'EFFECT_INDETERMINATE' : 'TOOL_FAILED',
+          // The tool's own code, when it raised a HarnessError. Absent for an unhandled
+          // exception, and that absence is itself diagnostic: it distinguishes a tool reporting a
+          // condition it anticipated from one that crashed.
+          ...(error instanceof HarnessError && typeof error.code === 'string' ? { toolCode: error.code } : {}) };
       } finally { clearTimeout(timer); }
       if (failure) {
-        emit('failed', { taskId: id, code: failure.code, ...(failure.reason ? { reason: failure.reason } : {}) });
+        emit('failed', { taskId: id, code: failure.code,
+          ...(failure.toolCode ? { toolCode: failure.toolCode } : {}),
+          ...(failure.reason ? { reason: failure.reason } : {}) });
         outcome = { status: 'failed', taskId: id, code: failure.code }; break;
       }
     }
@@ -307,10 +374,19 @@ export function replayPlan(options) {
       // also takes a value it cannot reproduce and then asserts properties of it. The check that
       // matters survives: a journal cannot claim a pure tool's TOOL_FAILED for an effectful tool,
       // nor OUTPUT_REJECTED without the output having been produced in the first place.
-      const legal = tool.effect === 'pure' ? ['TOOL_FAILED', 'OUTPUT_REJECTED'] : ['EFFECT_INDETERMINATE', 'OUTPUT_REJECTED'];
+      const legal = grantedEffects.includes(tool.effect) ? ['EFFECT_INDETERMINATE', 'OUTPUT_REJECTED']
+        : tool.effect === 'read'
+          // Permissive for read: journals recorded before this narrowing used
+          // EFFECT_INDETERMINATE, and they must keep verifying. New runs record TOOL_FAILED.
+          ? ['TOOL_FAILED', 'EFFECT_INDETERMINATE', 'OUTPUT_REJECTED']
+          : ['TOOL_FAILED', 'OUTPUT_REJECTED'];
       const recorded = take('failed');
       assert(recorded && recorded.taskId === id && legal.includes(recorded.code), 'REPLAY_TRANSITION', 'Illegal recorded failure for this tool effect');
-      assert(canonical(Object.keys(recorded).sort()) === canonical(recorded.reason === undefined ? ['code', 'taskId'] : ['code', 'reason', 'taskId']), 'REPLAY_TRANSITION', 'Unexpected failure receipt fields');
+      const expectedKeys = ['code', 'taskId',
+        ...(recorded.toolCode === undefined ? [] : ['toolCode']),
+        ...(recorded.reason === undefined ? [] : ['reason'])].sort();
+      assert(canonical(Object.keys(recorded).sort()) === canonical(expectedKeys), 'REPLAY_TRANSITION', 'Unexpected failure receipt fields');
+      assert(recorded.toolCode === undefined || /^[A-Z][A-Z0-9_]*$/.test(recorded.toolCode), 'REPLAY_TRANSITION', 'A tool code must be a bare identifier');
       assert(recorded.reason === undefined || typeof recorded.reason === 'string', 'REPLAY_TRANSITION', 'Failure reason must be text');
       outcome = { status: 'failed', taskId: id, code: recorded.code }; break;
     }

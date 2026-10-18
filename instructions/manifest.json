@@ -1,77 +1,83 @@
 {
-  "schemaVersion": 1,
   "modules": [
     {
-      "sourceId": "awesome-cyber-skills",
+      "bytes": 1098,
       "file": "awesome-cyber-skills.md",
       "sha256": "0e50f3d4c33694c7fd659d6ae6c71418eaddfd5ea2216bbdd2780856449cf1b3",
-      "bytes": 1098
+      "sourceId": "awesome-cyber-skills"
     },
     {
-      "sourceId": "awesome-hacking",
+      "bytes": 1085,
       "file": "awesome-hacking.md",
       "sha256": "2e09e4ce4cfad832bb7116a7cb1230b4f87e1679a622675e2f0c3c1984044c41",
-      "bytes": 1085
+      "sourceId": "awesome-hacking"
     },
     {
-      "sourceId": "deepseek-harness",
+      "bytes": 1122,
       "file": "deepseek-harness.md",
       "sha256": "758a6c9ffe1b53709a1324f873dcf421485562e5d2a53efb0af780ccb99c87dc",
-      "bytes": 1122
+      "sourceId": "deepseek-harness"
     },
     {
-      "sourceId": "ecc",
+      "bytes": 1095,
       "file": "ecc.md",
       "sha256": "65224cd0aec3cde3886d9f422938e798514c40714c14aae5650b73cebfa2576e",
-      "bytes": 1095
+      "sourceId": "ecc"
     },
     {
-      "sourceId": "ego-lite",
+      "bytes": 1107,
       "file": "ego-lite.md",
       "sha256": "b9bdbf88930c56cd0290dcd941394273b10fb04ab249241ca7ec8b9837c0f63b",
-      "bytes": 1107
+      "sourceId": "ego-lite"
     },
     {
-      "sourceId": "hermes-agent",
+      "bytes": 1173,
       "file": "hermes-agent.md",
       "sha256": "55933df252ef9e12466b00eca028df7a90467b104540a5afd093e67bc3f02c7a",
-      "bytes": 1173
+      "sourceId": "hermes-agent"
     },
     {
-      "sourceId": "orca",
+      "bytes": 1387,
+      "file": "hermes-local.md",
+      "sha256": "c13123daa1c90a7ec3f8e6fb58086678ff4181c43301f2bf2cdc7bf173250eac",
+      "sourceId": "hermes-local"
+    },
+    {
+      "bytes": 1083,
       "file": "orca.md",
       "sha256": "3ecb50d511c598422e21cdb28a5682a0aca49327cd70eada75c169866f8acaa1",
-      "bytes": 1083
+      "sourceId": "orca"
     },
     {
-      "sourceId": "rea",
+      "bytes": 1095,
       "file": "rea.md",
       "sha256": "d11739b788b0a10e0bbd7448ee80f48e089368979ec7b19e15d35374c3878d0e",
-      "bytes": 1095
+      "sourceId": "rea"
     },
     {
-      "sourceId": "twentyfirst-repository",
+      "bytes": 1087,
       "file": "twentyfirst-repository.md",
       "sha256": "3090f48fc29890be60b7812624a61e0ef86b91fa8e2df19097306338b959e700",
-      "bytes": 1087
+      "sourceId": "twentyfirst-repository"
     },
     {
-      "sourceId": "twentyfirst-website",
+      "bytes": 1087,
       "file": "twentyfirst-website.md",
       "sha256": "7616de308ba14ee6721410720cd0adc2754eb863593e93ae9f12fd7a54ef9434",
-      "bytes": 1087
+      "sourceId": "twentyfirst-website"
     },
     {
-      "sourceId": "typesafe-docs",
+      "bytes": 1095,
       "file": "typesafe-docs.md",
       "sha256": "a305ce46bed0cd87f380e893926c9abf740c3fde21c2aba8d93f7ae3c4908ebe",
-      "bytes": 1095
+      "sourceId": "typesafe-docs"
     },
     {
-      "sourceId": "vercel-skills",
+      "bytes": 1077,
       "file": "vercel-skills.md",
       "sha256": "2d32d9d9977f4579bb566e0572089c25c9c2ecb1b23c0e14f19321f43a5d1bee",
-      "bytes": 1077
+      "sourceId": "vercel-skills"
     }
-  ]
+  ],
+  "schemaVersion": 1
 }

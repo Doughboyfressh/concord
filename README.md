@@ -30,7 +30,7 @@ Chat evidence and snapshots persist under the printed local store. This version 
 
 ## Supervised improvement
 
-Three supervised training rounds have turned live failures into context and supervisor fixes,
+Twenty supervised training rounds have turned live failures into context and supervisor fixes,
 regression tests, and an evidence-linked memory: [round 001](docs/training-round-001.md) (tool schemas,
 recall, receipts), [round 002](docs/training-round-002.md) (execution provenance, so an unexecuted
 intention can never read as performed work; injection resistance then tested and passed), and [round
@@ -56,7 +56,41 @@ several, so it now delivers up to six within a byte bound, which raised the righ
 rate from 7/10 to 10/10, and sixteen distilled lessons were promoted into memory. [Round 012](docs/training-round-012.md)
 measured the interpretation gap that round 002 called irreducible: six of six receipt-reporting
 conditions were faithful across two trials, and the one imprecision found traced to memory.recall
-returning a ranked list whose length is not a match count, now stated as matchedCount. This improves harness behavior and
+returning a ranked list whose length is not a match count, now stated as matchedCount. [Round 013](docs/training-round-013.md)
+closed the enforceable part of that gap: a reply may anchor a claim to a recorded task's output
+hash, optionally with a verbatim quote, and the supervisor verifies every anchor against the run
+ledger before committing the reply — so a fabricated digest, or a real receipt quoted falsely, is
+refused rather than merely auditable. [Round 014](docs/training-round-014.md) applied the same
+principle to memory: a lesson whose evidence came from a task reference has an evidence hash
+identical to that task's recorded output hash, so the approval gate now says whether a lesson about
+to be persisted is backed by recorded execution or only asserted. [Round
+015](docs/training-round-015.md) made the harness distil its own lessons: a rejected proposal or
+failed run now composes a lesson candidate from the supervisor's recorded diagnostic, grounded in
+that run's own root, offered for review and never promoted automatically. [Round
+016](docs/training-round-016.md) closed the three asymmetries that left open: a successful
+composition now distils its own lesson naming the topology and reference paths that worked, every
+lesson carries the principle behind its cause plus a recurrence count, and a thrown tool records
+its own error code — an identifier, never its message, which keeps caller data out of the
+diagnostic. [Round 017](docs/training-round-017.md) encoded the measurement method itself as a
+capability: experiment.compare takes named conditions and reports a verdict per condition with no
+aggregate score, flagging conditions that vary nothing, expectations that cannot discriminate, and
+outcomes that were never testable — the exact instrument faults rounds 004 to 015 committed. [Round
+018](docs/training-round-018.md) removed the hand-written probe as the limit on learning: the
+composition matrix is now generated from each tool's declared inputSchema and outputKeys, and 629
+compositions ran in 0.575 seconds, proving 170 topologies and finding a misclassification
+seventeen hand-written rounds had missed — a failed read reported as a possibly-occurred effect,
+when a read changes nothing and is always safe to repeat. [Round
+019](docs/training-round-019.md) answered the two limits that left: every one of the 170 working
+compositions resolves its reference to exactly the right value, checked against the kernel's own
+inputHash commitment rather than approximated, and the model reproduced eight of eight sampled
+compositions with the correct reference path — the first capability measurement in this series
+whose targets were established by execution rather than written by the measurer. [Round
+020](docs/training-round-020.md) chained those verified pairs into 400 three-task plans, every one of
+which held, and then stopped naming tools at all: given only a goal, the model chose its own
+composition and the value was checked against an independently computed answer. That found a
+shorthand reference the kernel had been accepting as ordinary text — a wrong answer carrying a
+faithful receipt — and localised every remaining failure to one position, a reference beside a
+literal inside an array, where a position-specific diagnostic took the result to six of six. This improves harness behavior and
 guidance; it does not retrain model weights. `scripts/train.mjs` provides an explicitly opt-in six-turn local
 model exercise with exact network grants, a reviewed pure tool plan, and replay checks. See the report for
 the command, observations and limits. Normal validation remains offline.
@@ -104,7 +138,7 @@ The demo selects skills with deterministic scoring, checks a postcondition, prop
 | [awesome-cyber-skills](https://github.com/joe-shenouda/awesome-cyber-skills) | Searchable security skill corpus |
 | [Awesome-Hacking](https://github.com/Hack-with-Github/Awesome-Hacking) | Categorized security references and labs |
 
-Exact audited revisions and license boundaries are in [sources.lock.json](sources.lock.json). Original source trees and ZIP archives are under `upstream/` after you run `./scripts/acquire-upstreams.ps1` (see [source intake](docs/source-intake.md)); `upstream/` is git-ignored and is not part of a fresh clone, with acquisition metadata and per-file SHA-256 inventory written alongside it once acquired. Git history, Git LFS object payloads, submodule contents and linked external services are not part of GitHub source archives. Symbolic links are retained as inert text and disclosed in the manifest; original ZIPs retain their source representation.
+Exact audited revisions and license boundaries are in [sources.lock.json](sources.lock.json). A hermes installation on this machine was additionally inventoried in place — 99 tool contracts and 98 skill corpora, by static analysis without running it, plus the per-turn least-authority attenuation its webhook-safe toolset models: see [taking the hermes capability surface](docs/hermes-local.md). Original source trees and ZIP archives are under `upstream/` after you run `./scripts/acquire-upstreams.ps1` (see [source intake](docs/source-intake.md)); `upstream/` is git-ignored and is not part of a fresh clone, with acquisition metadata and per-file SHA-256 inventory written alongside it once acquired. Git history, Git LFS object payloads, submodule contents and linked external services are not part of GitHub source archives. Symbolic links are retained as inert text and disclosed in the manifest; original ZIPs retain their source representation.
 
 After acquisition, [capabilities.lock.json](capabilities.lock.json) indexes skills, agents, commands, plugins and documentation headings from every source tree. Entries are inert, unreviewed source material; search never executes them.
 
@@ -143,6 +177,6 @@ API callers must provide a fully qualified canonical real workspace path and pin
 
 ## Project map
 
-`src/engine.mjs` owns compilation, execution and replay. `src/value.mjs` owns values/schemas. Builtins provide verification, skill ranking, memory candidates and file effects. Source tools snapshot inert skills. Capability tools search the inventory. Integrations and workers own external transports. On top of that kernel, `src/chat-context.mjs` assembles the twelve reviewed instruction modules each turn (see [source-derived instructions](docs/chat-instructions.md)), `src/chat.mjs` is the session broker that proposes, blocks, approves and replays (see [chat sessions](docs/chat-session.md)), `src/server.mjs` plus `app/` are the local HTTP interface (see [the local interface](docs/chat-ui.md)), and `src/mcp.mjs` is a third transport — a hand-rolled stdio [MCP server](docs/mcp.md) so external MCP clients can call Concord's tools, read its reviewed instructions as resources, and drive the same chat harness. [The architecture artifact](plans/concord/index.html) predates the chat layer and exports only the kernel/transport/source annotations below it; it has not been regenerated since.
+`src/engine.mjs` owns compilation, execution and replay. `src/value.mjs` owns values/schemas. Builtins provide verification, skill ranking, memory candidates and file effects. Source tools snapshot inert skills. Capability tools search the inventory. Integrations and workers own external transports. On top of that kernel, `src/chat-context.mjs` assembles the thirteen reviewed instruction modules each turn (see [source-derived instructions](docs/chat-instructions.md)), `src/chat.mjs` is the session broker that proposes, blocks, approves and replays (see [chat sessions](docs/chat-session.md)), `src/server.mjs` plus `app/` are the local HTTP interface (see [the local interface](docs/chat-ui.md)), and `src/mcp.mjs` is a third transport — a hand-rolled stdio [MCP server](docs/mcp.md) so external MCP clients can call Concord's tools, read its reviewed instructions as resources, and drive the same chat harness. [The architecture artifact](plans/concord/index.html) predates the chat layer and exports only the kernel/transport/source annotations below it; it has not been regenerated since.
 
 Tests cover local HTTP, fixture subprocesses, policy/approval changes, tampered and rehashed traces, pointers, links, credentials, deadlines and output bounds. The test runner selects Concord's tests explicitly and never discovers tests in downloaded source trees. See [validation evidence](docs/validation.md).

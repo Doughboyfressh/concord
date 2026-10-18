@@ -144,6 +144,22 @@
       "caveats": ["Adaptive memory and newly generated skills require explicit versioned snapshots before later execution."]
     },
     {
+      "id": "hermes-local",
+      "kind": "repository",
+      "requestedUrl": "https://github.com/NousResearch/hermes-agent.git",
+      "url": "https://github.com/NousResearch/hermes-agent",
+      "repository": "NousResearch/hermes-agent",
+      "defaultBranch": "main",
+      "revision": "f17021fbec01d7f6b1277d897c97b639b9a15765",
+      "mutability": "immutable-reference",
+      "roles": ["agent-runtime-reference", "skills", "tool-contract-reference", "least-authority-reference"],
+      "primaryLinks": ["https://github.com/NousResearch/hermes-agent/tree/f17021fbec01d7f6b1277d897c97b639b9a15765"],
+      "license": {"spdx": "MIT", "scope": "repository", "caveat": "Copyright (c) 2025 Nous Research. Preserve the upstream MIT notice when copying covered material; bundled skills, model providers and external tools may impose separate terms."},
+      "integration": {"status": "catalogued-from-local-install", "mode": "static-surface-inventory", "runtimeInstalled": false},
+      "capabilities": ["225 declared tool contracts with descriptions, parameter names and required fields", "98 SKILL.md instruction corpora, 29 of them absent from the pinned hermes-agent revision", "A declared least-authority tool subset for untrusted input, used as the model for per-turn attenuation"],
+      "caveats": ["The same repository as hermes-agent at a different, later snapshot: 1487 commits ahead of base 0.22.2. Both entries are kept because they describe different content.", "The revision comes from the installation's own install-stamp.json, which reported dirty false. It was not verified against the remote, so blob links are unverified.", "The inventory is static analysis of source text. No hermes module was imported and no gateway was contacted; Concord never executes this code.", "Tool effects are classified by explicit rule and carry an effectBasis. A name matching no rule is left unclassified rather than guessed."]
+    },
+    {
       "id": "deepseek-harness",
       "kind": "repository",
       "requestedUrl": "https://github.com/deepseek-ai/deepseek-harness.git",

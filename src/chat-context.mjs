@@ -107,7 +107,20 @@ export function buildChatContext({ message, history, observations = [], proposed
   if (Buffer.byteLength(contractText) > 65536) throw new HarnessError('CHAT_CONTEXT', 'Tool contracts exceed the context budget');
   const toolNames = toolContracts.map(t => t.name);
   const outputContract = 'Respond with exactly one JSON object and nothing else: ' +
-    '{"reply": "<your message to the user, as plain text>", "plan": <optional>}. ' +
+    '{"reply": "<your message to the user, as plain text>", "plan": <optional>, "citations": <optional>}. ' +
+    // Round 013. Effects were already verifiable; narration was the last thing taken on trust.
+    // A citation anchors a stated fact to the exact output hash of a recorded task, which the
+    // supervisor checks against the run ledger before committing the reply.
+    'When your reply states a fact taken from a tool result, anchor it with "citations": an array of ' +
+    '{"taskId": "<the task whose receipt you read>", "outputHash": "<that receipt\'s outputHash>"}, ' +
+    'optionally with "runId", and with "quote" holding the exact text you read from that receipt. A ' +
+    'quote is checked verbatim against the recorded output, so quoting is the strongest way to make ' +
+    'a claim checkable: it proves the fact is in the receipt rather than only that the receipt ' +
+    'exists. Use no other properties inside a citation. ' +
+    'Copy the hash exactly from an observed receipt; the supervisor verifies ' +
+    'every citation against the recorded ledger and rejects the entire response if one does not match ' +
+    'a completed task, so a guessed or remembered hash fails. Omit "citations" when the turn reports ' +
+    'no tool result. Citing does not replace reporting accurately — it makes the claim checkable. ' +
     'Omit "plan" entirely unless a registered tool should actually run. When present, "plan" must be ' +
     '{"version": 1, "tasks": [{"id": "<short id>", "tool": "<one of the names below>", "input": {...}, ' +
     '"dependsOn": ["<other task id>"]}]} — "dependsOn" and task-to-task references are optional, used only ' +

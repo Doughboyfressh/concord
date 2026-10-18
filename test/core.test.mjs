@@ -4,9 +4,10 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync, linkSync,
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { canonical, digest, parseJson, validateSchema, clone } from '../src/value.mjs';
-import { runPlan, replayPlan, inspectPlan } from '../src/engine.mjs';
+import { runPlan, replayPlan, inspectPlan, attenuatePolicy } from '../src/engine.mjs';
 import { makeBuiltinTools } from '../src/builtins.mjs';
 import { makeArtifactTools } from '../src/artifacts.mjs';
+import { HarnessError } from '../src/value.mjs';
 
 const registry = new Map(makeBuiltinTools().map(t => [t.name, t]));
 const policy = { version: 1, allowedTools: [...registry.keys()], allowedEffects: ['pure', 'read', 'write'], maxOutputBytes: 10000, maxJournalBytes: 100000 };
@@ -252,6 +253,11 @@ test('every declared outputKeys set is really present in that tool\'s actual res
   const inputs = {
     'json.hash': { a: 1 },
     'json.assert': { value: 1, schema: true },
+    // Round 017 added this tool, and this test caught it unexercised on the first run — round 005's
+    // rule that a declared output shape must be verified against real execution, working as built.
+    'experiment.compare': { hypothesis: 'a varied factor explains the difference',
+      conditions: [{ name: 'a', varied: { factor: 1 }, expected: 1, actual: 1 },
+        { name: 'b', varied: { factor: 2 }, expected: 2, actual: 2 }] },
     'text.concat': { values: ['a', 'b'], separator: '-' },
     'json.mergeShallow': { values: [{ a: 1 }, { b: 2 }] },
     'files.read': { path: 'f.txt' },
@@ -415,4 +421,195 @@ test('a failure after the tool returned is not reported as a possibly-occurred e
   forged.root = previous;
   assert.throws(() => replayPlan({ ...throwCase, journal: forged }), e => e.code === 'REPLAY_TRANSITION');
   rmSync(temp, { recursive: true, force: true });
+});
+
+test('a thrown tool records its own error code, which replay verifies as an identifier', async () => {
+  // Round 015 produced "no diagnostic was recorded" for every thrown tool, because the engine kept
+  // only the outer category. Surfacing the tool's MESSAGE was refused: a message is written by the
+  // tool author and can interpolate caller data. A CODE is a closed-vocabulary identifier and
+  // cannot, so this is the granularity that is both informative and safe.
+  const raising = { name: 'r', version: '1', effect: 'pure', inputSchema: true,
+    execute() { throw new HarnessError('MERGE_COLLISION', 'a message that is deliberately not recorded'); } };
+  const crashing = { name: 'c', version: '1', effect: 'pure', inputSchema: true, execute() { throw new Error('plain crash'); } };
+  const reg = new Map([['r', raising], ['c', crashing]]);
+  const opts = (tool) => ({ plan: { version: 1, tasks: [{ id: 'a', tool, input: null }] }, registry: reg,
+    sourceLock: { version: 1 }, workspaceRoot: path.resolve('/explicit/workspace'),
+    policy: { version: 1, allowedTools: ['r', 'c'], allowedEffects: ['pure'], maxOutputBytes: 10000, maxJournalBytes: 100000 } });
+
+  const raised = await runPlan(opts('r'));
+  const raisedEvent = raised.events.find(e => e.type === 'failed');
+  assert.equal(raisedEvent.data.code, 'TOOL_FAILED');
+  assert.equal(raisedEvent.data.toolCode, 'MERGE_COLLISION', 'the tool names the condition it hit');
+  assert.equal(raisedEvent.data.reason, undefined, 'the message itself is deliberately not recorded');
+  replayPlan({ ...opts('r'), journal: raised });
+
+  // An unhandled exception records no tool code, and that absence is itself diagnostic.
+  const crashed = await runPlan(opts('c'));
+  assert.equal(crashed.events.find(e => e.type === 'failed').data.toolCode, undefined);
+  replayPlan({ ...opts('c'), journal: crashed });
+
+  // Replay rejects a forged tool code that is not a bare identifier, so the field cannot become a
+  // smuggling channel for text after the fact.
+  const forged = clone(raised);
+  forged.events.find(e => e.type === 'failed').data.toolCode = 'some free text';
+  let previous = digest(forged.header);
+  for (const e of forged.events) { e.previous = previous; e.hash = digest({ previous, seq: e.seq, type: e.type, data: e.data }); previous = e.hash; }
+  forged.root = previous;
+  assert.throws(() => replayPlan({ ...opts('r'), journal: forged }), e => e.code === 'REPLAY_TRANSITION');
+});
+
+test('experiment.compare detects the measurement faults this project kept making', () => {
+  // Sixteen rounds produced one finding more reliable than any other: the instrument is usually
+  // wrong before the system under test is. These faults are mechanically detectable, so they are
+  // checked rather than hoped for. Each case below is a real fault from a real round.
+  const compare = new Map(makeBuiltinTools().map(t => [t.name, t])).get('experiment.compare');
+
+  // Round 007: five runs of an unvaried test treated as five data points, and a conclusion
+  // published then withdrawn. The conditions vary nothing between them.
+  const unvaried = compare.execute({ hypothesis: 'the model cannot emit nested references', conditions: [
+    { name: 'try 1', varied: { form: 'mixed array' }, expected: 'emitted', actual: 'stringified' },
+    { name: 'try 2', varied: { form: 'mixed array' }, expected: 'emitted', actual: 'stringified' },
+  ] });
+  assert.deepEqual(unvaried.refuted, ['try 1', 'try 2']);
+  const codes = unvaried.warnings.map(w => w.code);
+  assert.ok(codes.includes('UNVARIED_CONDITIONS'));
+  assert.match(unvaried.warnings.find(w => w.code === 'UNVARIED_CONDITIONS').detail, /one data point rather than 2/);
+
+  // Round 012: a test that reads identically whether or not the defect is present, because every
+  // condition declares the same expectation.
+  assert.equal(unvaried.discriminating, false);
+  assert.ok(codes.includes('NONDISCRIMINATING_EXPECTATION'));
+
+  // Rounds 008 and 012: a probe whose expectation was never written, scored as a result anyway.
+  const missing = compare.execute({ hypothesis: 'receipts are reported faithfully', conditions: [
+    { name: 'digest', varied: { kind: 'hash' }, expected: { ok: true }, actual: { ok: true } },
+    { name: 'number', varied: { kind: 'number' }, actual: { ok: true, value: 7 } },
+  ] });
+  assert.deepEqual(missing.untestable, ['number']);
+  assert.equal(missing.verdicts.find(v => v.name === 'number').why, 'no expectation was declared');
+  assert.deepEqual(missing.confirmed, ['digest']);
+
+  // Round 008 done properly: one factor varied per condition, distinct expectations, no warnings.
+  const sound = compare.execute({ hypothesis: 'topology determines whether a plan computes correctly', conditions: [
+    { name: 'chain', varied: { topology: 'chain' }, expected: 'ab', actual: 'ab' },
+    { name: 'fan-in', varied: { topology: 'fan-in' }, expected: 'pq+rs', actual: 'pq+rs' },
+    { name: 'diamond', varied: { topology: 'diamond' }, expected: 'mn-L,mn-R', actual: 'mn-L,mn-R' },
+  ] });
+  assert.deepEqual(sound.warnings, []);
+  assert.equal(sound.discriminating, true);
+  assert.deepEqual(sound.confirmed, ['chain', 'fan-in', 'diamond']);
+
+  // A single condition cannot isolate a cause, and says so.
+  assert.ok(compare.execute({ hypothesis: 'h', conditions: [{ name: 'only', varied: {}, expected: 1, actual: 1 }] })
+    .warnings.some(w => w.code === 'SINGLE_CONDITION'));
+
+  // No aggregate is emitted at all. "Nine of ten" is exactly how rounds 004 and 005 drew the wrong
+  // conclusion from their own results, so the shape makes that reading unavailable.
+  for (const key of ['rate', 'score', 'passRate', 'total', 'summary']) assert.ok(!(key in sound), key);
+  assert.throws(() => compare.execute({ hypothesis: 'h', conditions: [
+    { name: 'dup', varied: {}, expected: 1, actual: 1 }, { name: 'dup', varied: {}, expected: 2, actual: 2 }] }),
+    e => e.code === 'INPUT_INVALID', 'condition names must be distinct to be addressable');
+});
+
+test('a failed read is not reported as a possibly-occurred effect', async () => {
+  // Found by generating the composition matrix rather than by review: 26 of 629 generated
+  // compositions reported EFFECT_INDETERMINATE for a read. A read requires no approval and a
+  // failed read leaves nothing mutated, so "may have occurred, do not retry" was both wrong and
+  // consequential — retrying an observation is always safe. Round 010 split pure from non-pure
+  // and left read on the wrong side; grantedEffects already names the effects that can change
+  // the world, so that is the line the classification should follow.
+  const temp = mkdtempSync(path.join(tmpdir(), 'concord-readfail-'));
+  const tools = new Map(makeBuiltinTools().map(t => [t.name, t]));
+  const opts = {
+    plan: { version: 1, tasks: [{ id: 'r', tool: 'files.read', input: { path: 'nonexistent.txt' } }] },
+    registry: tools, sourceLock: { version: 1 }, workspaceRoot: temp,
+    policy: { version: 1, allowedTools: [...tools.keys()], allowedEffects: ['pure', 'read'], maxOutputBytes: 100000, maxJournalBytes: 1000000 },
+  };
+  const journal = await runPlan(opts);
+  assert.equal(tools.get('files.read').effect, 'read');
+  assert.equal(journal.outcome.code, 'TOOL_FAILED', 'a read that fails changed nothing');
+  replayPlan({ ...opts, journal });
+
+  // A write that throws stays indeterminate, because it genuinely may have landed before throwing.
+  const throwing = { name: 'w', version: '1', effect: 'write', inputSchema: true, execute() { throw new Error('midway'); } };
+  const writeOpts = { plan: { version: 1, tasks: [{ id: 'w', tool: 'w', input: null }] },
+    registry: new Map([['w', throwing]]), sourceLock: { version: 1 }, workspaceRoot: temp,
+    policy: { version: 1, allowedTools: ['w'], allowedEffects: ['write'], maxOutputBytes: 100000, maxJournalBytes: 1000000 } };
+  const blocked = await runPlan(writeOpts);
+  const wrote = await runPlan({ ...writeOpts, approvals: [blocked.outcome.requestHash] });
+  assert.equal(wrote.outcome.code, 'EFFECT_INDETERMINATE');
+  replayPlan({ ...writeOpts, approvals: [blocked.outcome.requestHash], journal: wrote });
+
+  // A journal recorded before this narrowing still verifies, so the change does not invalidate
+  // recorded history — the same compatibility stance round 010 took for its own narrowing.
+  const legacy = clone(journal);
+  legacy.events.find(e => e.type === 'failed').data.code = 'EFFECT_INDETERMINATE';
+  // The settled event carries its own copy of the outcome, so a legacy journal has to be
+  // consistent in both places; mutating only the envelope leaves an illegal transition.
+  legacy.events.find(e => e.type === 'settled').data.code = 'EFFECT_INDETERMINATE';
+  legacy.outcome.code = 'EFFECT_INDETERMINATE';
+  let previous = digest(legacy.header);
+  for (const e of legacy.events) { e.previous = previous; e.hash = digest({ previous, seq: e.seq, type: e.type, data: e.data }); previous = e.hash; }
+  legacy.root = previous;
+  assert.equal(replayPlan({ ...opts, journal: legacy }).replayed, true, 'older read journals still verify');
+  rmSync(temp, { recursive: true, force: true });
+});
+
+test('a reference written in invented shorthand is refused, and prose mentioning one is not', async () => {
+  // Round 020 measured a new mis-serialisation: asked to join a literal with a file's text, the
+  // model emitted the string "$task:read/text" — its own shorthand, not JSON. The kernel accepted
+  // it as an ordinary string, concatenated it literally and produced "body=$task:read/text", a
+  // wrong answer with a faithful receipt. Round 005's check could not see it because it only
+  // matches a JSON object inside a string. The signature is a value that BEGINS with $task, which
+  // leaves prose that merely mentions the form alone.
+  const reg = new Map(makeBuiltinTools().map(t => [t.name, t]));
+  const opts = (plan) => ({ plan, registry: reg, sourceLock: { version: 1 }, workspaceRoot: path.resolve('/explicit/workspace'),
+    policy: { version: 1, allowedTools: [...reg.keys()], allowedEffects: ['pure', 'read'], maxOutputBytes: 10000, maxJournalBytes: 100000 } });
+
+  for (const form of ['$task:read/text', '$task.read', '$task read /text', '$task']) {
+    const plan = { version: 1, tasks: [
+      { id: 'read', tool: 'json.value', input: 1 },
+      { id: 'j', tool: 'text.concat', input: { values: ['body=', form], separator: '' }, dependsOn: ['read'] }] };
+    await assert.rejects(runPlan(opts(plan)), e => e.code === 'INVALID_REFERENCE' && /shorthand text/.test(e.message), form);
+  }
+
+  // Prose that mentions a reference must still pass: the check is anchored, not a substring search.
+  for (const benign of ['use {"$task":"x"} here', 'the $task field', 'cost is $task-free', 'plain text']) {
+    const j = await runPlan(opts({ version: 1, tasks: [{ id: 'a', tool: 'json.value', input: { v: benign } }] }));
+    assert.equal(j.outcome.status, 'completed', benign);
+  }
+
+  // The genuine object form is still the way to do it, and still computes correctly.
+  const good = { version: 1, tasks: [
+    { id: 'read', tool: 'json.value', input: { text: 'contents' } },
+    { id: 'j', tool: 'text.concat', input: { values: ['body=', { $task: 'read', path: '/text' }], separator: '' }, dependsOn: ['read'] }] };
+  const journal = await runPlan(opts(good));
+  assert.equal(journal.results.j.value, 'body=contents');
+  replayPlan({ ...opts(good), journal });
+});
+
+test('policy attenuation only ever narrows authority, and the narrowed set is what the engine enforces', async () => {
+  // hermes restricts untrusted webhook input to a no-execution subset of its toolset. What makes
+  // that safe to apply without review is that attenuation cannot grant anything, so the check
+  // below is that widening is refused in every dimension, not merely that narrowing works.
+  const narrowed = attenuatePolicy(policy, { allowedTools: ['json.value', 'text.concat'], allowedEffects: ['pure'], maxOutputBytes: 500 });
+  assert.deepEqual(narrowed.allowedTools, ['json.value', 'text.concat']);
+  assert.deepEqual(narrowed.allowedEffects, ['pure']);
+  assert.equal(narrowed.maxOutputBytes, 500);
+  for (const name of narrowed.allowedTools) assert.ok(policy.allowedTools.includes(name));
+  for (const effect of narrowed.allowedEffects) assert.ok(policy.allowedEffects.includes(effect));
+
+  for (const widening of [{ allowedTools: ['tool.not.in.the.base.policy'] }, { allowedEffects: ['network'] },
+    { maxOutputBytes: policy.maxOutputBytes + 1 }, { maxJournalBytes: policy.maxJournalBytes + 1 }, { timeoutMs: 300000 }]) {
+    assert.throws(() => attenuatePolicy(policy, widening), e => e.code === 'POLICY_NOT_ATTENUATED', JSON.stringify(widening));
+  }
+
+  // Enforced rather than merely reported: a read the base policy permits is denied once attenuated away.
+  const read = { version: 1, tasks: [{ id: 'a', tool: 'files.read', input: { path: 'x.txt' } }] };
+  await assert.rejects(runPlan(base(read, { policy: narrowed })), e => e.code === 'POLICY_DENIED');
+  const allowed = await runPlan(base(one, { policy: narrowed }));
+  assert.equal(allowed.outcome.status, 'completed');
+
+  // Attenuating nothing is the identity, so an unrestricted turn is not quietly altered.
+  assert.deepEqual(attenuatePolicy(policy, {}), attenuatePolicy(policy));
 });

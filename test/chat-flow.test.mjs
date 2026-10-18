@@ -21,13 +21,13 @@ function setup(workspaceRoot, additional = []) {
   return createChatHarness({registry,policy:{version:1,allowedTools:[...registry.keys()],allowedEffects:['pure','read','write','network'],maxTasks:32,maxOutputBytes:1048576,maxJournalBytes:16777216,timeoutMs:10000},sourceLock:catalog,workspaceRoot,buildContext:context});
 }
 
-test('chat uses all twelve reviewed instruction modules and executes/replays its evidence plan', async () => {
+test('chat uses all thirteen reviewed instruction modules and executes/replays its evidence plan', async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-chat-flow-'));
   try {
     const harness = setup(temp);
     const turn = await harness.send('Combine deterministic replay, browser tools, security review and memory in this chat harness.');
     assert.equal(turn.mode, 'offline-demo');
-    assert.equal(turn.sourceCoverage.length, 12);
+    assert.equal(turn.sourceCoverage.length, 13);
     assert.ok(turn.history.some(m => m.role === 'assistant' && m.content.length));
     assert.ok(turn.proposedPlan?.tasks.length);
     const state = await harness.executePlan();
@@ -151,4 +151,34 @@ test('replay reproduces the skill-enrichment, memory-enrichment, and primary run
     const replay = await harness.replay(run.id);
     assert.equal(replay.replayed, true);
   }
+});
+
+test('a turn attenuated for untrusted input narrows the whole turn and still replays', async () => {
+  // hermes serves untrusted webhook payloads from a reduced toolset. The same shape here: the
+  // caller declares the turn untrusted and the turn loses authority before the model plans.
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-attenuate-'));
+  try {
+    const harness = setup(temp);
+    const open = await harness.send('Summarise what this harness does.');
+    assert.equal(open.authority.allowedEffects.includes('write'), true);
+
+    const narrowed = await harness.send('Summarise what this harness does.', {
+      attenuate: { allowedEffects: ['pure', 'read'], maxOutputBytes: 65536 },
+    });
+    assert.deepEqual(narrowed.authority.allowedEffects, ['pure', 'read']);
+    assert.equal(narrowed.authority.maxOutputBytes, 65536);
+    // The context the model is given describes the reduced authority, not the base policy.
+    assert.equal(narrowed.authority.allowedEffects.includes('write'), false);
+
+    // Recorded per run, so an attenuated turn replays against the authority it actually had.
+    for (const run of narrowed.runs) assert.equal((await harness.replay(run.id)).replayed, true);
+
+    // A later unattenuated turn is not permanently reduced by an earlier narrowed one.
+    const restored = await harness.send('And again, without restriction.');
+    assert.equal(restored.authority.allowedEffects.includes('write'), true);
+
+    // Attenuation cannot be used to grant authority the base policy withholds.
+    await assert.rejects(harness.send('try to widen', { attenuate: { allowedEffects: ['pure', 'process'] } }),
+      e => e.code === 'POLICY_NOT_ATTENUATED');
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });

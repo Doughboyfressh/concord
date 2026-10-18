@@ -37,7 +37,7 @@ request headers are never forwarded to the client; an unrecognized error becomes
 
 `app/client.mjs` is a single ES module, loaded same-origin under that CSP (no inline scripts, no `eval`). It
 fetches `/api/state` once for the token, then renders seven panels from the harness snapshot: the mode badge,
-the source-knowledge sidebar (all twelve `sourceCoverage` entries plus any matching `selected` capability
+the source-knowledge sidebar (all thirteen `sourceCoverage` entries plus any matching `selected` capability
 references), the conversation, the pending-approval card, the proposed-plan card, the active-context card, and
 the run-evidence list with per-run replay buttons. Every value that could contain model- or capability-derived
 text is written through `textContent`, never `innerHTML` — a malicious plan, reply, or capability title cannot

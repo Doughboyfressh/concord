@@ -1,6 +1,8 @@
 # Sources and local skill snapshots
 
-`sources.lock.json` records all twelve references requested for this harness. Ten
+`sources.lock.json` records the twelve references originally requested for this harness,
+plus `hermes-local`, a locally installed hermes build catalogued separately from the pinned
+`hermes-agent` revision. Eleven
 repository entries name full forty-character Git commits. The two hosted websites
 are explicitly unpinned mutable observations. `observedOn` is audit metadata written
 into the file; source tools never read the clock. No repository, upstream runtime,
@@ -17,9 +19,13 @@ MCP server, SDK, skill collection, or website body is installed by this catalog.
 | `orca` | Browser automation and testing | Explicit browser adapter |
 | `typesafe-docs` | Typed contracts and evaluation reference | Hosted documentation reference |
 | `hermes-agent` | Agent runtime, skills, memory | Explicit runtime adapter |
+| `hermes-local` | Tool contracts, skills, least-authority posture | Static surface inventory |
 | `deepseek-harness` | Harness and evaluation reference | Explicit runtime adapter |
 | `awesome-cyber-skills` | Security practice environments | Reference catalog only |
 | `awesome-hacking` | Security resource index | Reference catalog only |
+
+The `hermes-local` entry is an inventory of a hermes installation on this machine, acquired by
+static analysis without running it: see [taking the hermes capability surface](hermes-local.md).
 
 The lock includes the original normalized URL, canonical primary links, revision,
 license scope and caveat, capabilities, and integration status for each entry.

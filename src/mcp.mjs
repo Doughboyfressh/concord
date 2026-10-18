@@ -101,7 +101,7 @@ function blockedDetail(result) {
 function publicChatState(snapshot) {
   // Mirror server.mjs's publicState allowlist; never expose provider config or credentials.
   const result = {};
-  for (const key of ['mode', 'history', 'selected', 'sourceCoverage', 'pending', 'proposedPlan', 'runs', 'lastError', 'observations']) {
+  for (const key of ['mode', 'history', 'selected', 'sourceCoverage', 'pending', 'proposedPlan', 'runs', 'lastError', 'observations', 'lessonCandidates', 'authority']) {
     if (snapshot && Object.hasOwn(snapshot, key)) result[key] = snapshot[key];
   }
   return result;

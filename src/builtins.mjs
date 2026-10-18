@@ -68,6 +68,71 @@ export function makeBuiltinTools() {
         }).sort((a, b) => b.score - a.score || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
         return { strategy: 'lexical-overlap-v1', ranked: ranked.slice(0, limit) };
       } },
+    // Measurement discipline as a capability rather than as advice. Sixteen rounds of this project
+    // produced one finding more reliable than any other: the instrument is usually wrong before the
+    // system under test is. Round 007 treated five runs of an UNVARIED test as five data points and
+    // published a conclusion it had to withdraw. Rounds 008 through 015 each shipped a probe whose
+    // own expectation was faulty — an impossible demand, a better outcome scored as failure, a
+    // bucket that silently absorbed an unanticipated case, a test that passed identically whether or
+    // not the defect was present. Those are mechanically detectable, and detecting them is worth
+    // more than any individual lesson, so they are checked here instead of being hoped for.
+    //
+    // Deliberately emits NO aggregate score. "Nine of ten" hides which condition failed, which is
+    // precisely how rounds 004 and 005 drew the wrong conclusion from their own results table.
+    { name: 'experiment.compare', version: '1.0.0',
+      outputKeys: ['hypothesis', 'verdicts', 'confirmed', 'refuted', 'untestable', 'warnings', 'discriminating'],
+      effect: 'pure',
+      inputSchema: object({
+        hypothesis: string,
+        conditions: { type: 'array', minItems: 1, maxItems: 200, items: object({
+          name: string, varied: true, expected: true, actual: true,
+        }, ['name', 'varied']) },
+      }),
+      execute({ hypothesis, conditions }) {
+        const names = conditions.map((c) => c.name);
+        if (new Set(names).size !== names.length) throw new HarnessError('INPUT_INVALID', 'Condition names must be distinct');
+
+        const verdicts = conditions.map((c) => {
+          // An absent expectation or outcome cannot be judged. Reporting it as a pass or a failure
+          // is how a probe invents a finding; untestable is the honest third verdict.
+          if (c.expected === undefined) return { name: c.name, verdict: 'untestable', why: 'no expectation was declared' };
+          if (c.actual === undefined) return { name: c.name, verdict: 'untestable', why: 'no outcome was recorded' };
+          return canonical(c.actual) === canonical(c.expected)
+            ? { name: c.name, verdict: 'confirmed' }
+            : { name: c.name, verdict: 'refuted', why: 'the recorded outcome differs from the declared expectation' };
+        });
+
+        const warnings = [];
+        if (conditions.length === 1) {
+          warnings.push({ code: 'SINGLE_CONDITION', detail: 'One condition cannot isolate a cause; vary a named factor and compare.' });
+        }
+        // Identical varied factors are one data point repeated, not several. This is the round 007
+        // error stated mechanically.
+        const byVaried = new Map();
+        for (const c of conditions) {
+          const key = canonical(c.varied);
+          byVaried.set(key, [...(byVaried.get(key) ?? []), c.name]);
+        }
+        for (const group of byVaried.values()) {
+          if (group.length > 1) {
+            warnings.push({ code: 'UNVARIED_CONDITIONS',
+              detail: `These conditions vary nothing between them, so they are one data point rather than ${group.length}: ${group.join(', ')}.` });
+          }
+        }
+        // If every condition expects the same thing, a pass does not show the varied factor
+        // mattered — the test would read identically whether or not the effect was present.
+        const expectations = new Set(conditions.filter((c) => c.expected !== undefined).map((c) => canonical(c.expected)));
+        const discriminating = !(conditions.length > 1 && expectations.size === 1);
+        if (!discriminating) {
+          warnings.push({ code: 'NONDISCRIMINATING_EXPECTATION',
+            detail: 'Every condition declares the same expectation, so the result cannot distinguish the varied factor from a test that would pass regardless.' });
+        }
+
+        const count = (v) => verdicts.filter((x) => x.verdict === v).map((x) => x.name);
+        // Per condition, never a rate: an aggregate conceals which condition failed.
+        return { hypothesis, verdicts, confirmed: count('confirmed'), refuted: count('refuted'),
+          untestable: count('untestable'), warnings, discriminating };
+      } },
     { name: 'judgment.gate', version: '1.0.0', effect: 'pure', inputSchema: object({ score: { type: 'number', minimum: 0, maximum: 1 }, threshold: { type: 'number', minimum: 0, maximum: 1 }, evidence: true }),
       execute({ score, threshold, evidence }) {
         if (score < threshold) throw new HarnessError('JUDGMENT_REJECTED', 'Evidence does not meet the declared threshold');

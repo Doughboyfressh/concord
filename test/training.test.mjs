@@ -411,3 +411,269 @@ test('a single stored lesson still delivers exactly as before, with no related s
     assert.equal(memory.related, undefined, 'no empty related array when there is nothing related');
   } finally { f.close(); }
 });
+
+test('a fabricated citation rejects the whole response', async () => {
+  // Round 002 called the interpretation gap irreducible; round 012 measured this model reporting
+  // receipts faithfully but with nothing PREVENTING a misreport. A citation closes the enforceable
+  // part: an anchor is a SHA-256 over a recorded output, so it cannot be invented without a
+  // preimage. The semantic half of the gap stays open and that is stated, not papered over.
+  const f = fixture(() => ({ reply: 'The digest was abc.', citations: [{ taskId: 'ghost', outputHash: 'f'.repeat(64) }] }));
+  try {
+    const state = await send(f.harness, 'What was the digest?');
+    assert.equal(state.lastError.code, 'MODEL_PROPOSAL_INVALID');
+    assert.equal(state.lastError.reasonCode, 'CITATION_UNVERIFIED');
+    assert.match(state.lastError.reason, /No recorded completed task "ghost"/);
+    // Rejected atomically: the narrative that carried the bad anchor never reaches history.
+    assert.equal(state.history.at(-1).role, 'user');
+  } finally { f.close(); }
+});
+
+test('a citation matching a real receipt is verified and recorded on the turn', async () => {
+  const plan = { version: 1, tasks: [{ id: 'join', tool: 'text.concat', input: { values: ['a', 'b'], separator: '-' } }] };
+  let seen = null;
+  const f = fixture((input) => {
+    // Second turn: cite the receipt the first turn produced, read from the real observations.
+    const payload = JSON.parse(input.prompt);
+    const receipt = (payload.observations.records ?? [])
+      .flatMap(r => r.tasks ?? []).find(t => t.tool === 'text.concat' && t.outputHash);
+    if (!receipt) return { reply: 'Joining the values.', plan };
+    seen = receipt;
+    return { reply: 'The joined value is a-b.', citations: [{ taskId: receipt.taskId, outputHash: receipt.outputHash }] };
+  });
+  try {
+    await send(f.harness, 'Join a and b.');
+    await f.harness.executePlan();
+    const state = await send(f.harness, 'What was the joined value?');
+    assert.ok(seen, 'the fixture found a real receipt to cite');
+    assert.equal(state.lastError, null);
+    const turn = state.history.at(-1);
+    assert.equal(turn.content, 'The joined value is a-b.');
+    assert.equal(turn.citations.length, 1);
+    assert.equal(turn.citations[0].outputHash, seen.outputHash);
+    // The supervisor resolves which run and tool the anchor belongs to, rather than trusting it.
+    assert.equal(turn.citations[0].tool, 'text.concat');
+    assert.match(turn.citations[0].runId, /^[a-f0-9]{24}$/);
+  } finally { f.close(); }
+});
+
+test('a citation naming a real task but the wrong hash is refused', async () => {
+  const plan = { version: 1, tasks: [{ id: 'join', tool: 'text.concat', input: { values: ['x'], separator: '' } }] };
+  let turns = 0;
+  const f = fixture(() => {
+    turns += 1;
+    if (turns === 1) return { reply: 'Joining.', plan };
+    // Real taskId, plausible-looking hash that was never recorded.
+    return { reply: 'The value was x.', citations: [{ taskId: 'join', outputHash: '0'.repeat(64) }] };
+  });
+  try {
+    await send(f.harness, 'Join x.');
+    await f.harness.executePlan();
+    const state = await send(f.harness, 'What was it?');
+    assert.equal(state.lastError.reasonCode, 'CITATION_UNVERIFIED');
+    assert.match(state.lastError.reason, /has output hash 0{16}/);
+  } finally { f.close(); }
+});
+
+test('a turn that cites nothing is unaffected', async () => {
+  const f = fixture(() => ({ reply: 'Nothing to report from a tool.' }));
+  try {
+    const state = await send(f.harness, 'Just answer in words.');
+    assert.equal(state.lastError, null);
+    assert.equal(state.history.at(-1).citations, undefined, 'no empty citations key when nothing is cited');
+  } finally { f.close(); }
+});
+
+test('a quoted citation is verified verbatim against the recorded output', async () => {
+  // Anchoring proves the receipt exists. Quoting proves the asserted fragment is really in it,
+  // which is strictly stronger and the furthest a harness can go without judging meaning. Round
+  // 013 added this after measuring the model trying to supply more than the schema allowed.
+  const plan = { version: 1, tasks: [{ id: 'join', tool: 'text.concat', input: { values: ['red', 'blue'], separator: '/' } }] };
+  let turns = 0;
+  let receipt = null;
+  const f = fixture((input) => {
+    turns += 1;
+    if (turns === 1) return { reply: 'Joining.', plan };
+    const payload = JSON.parse(input.prompt);
+    receipt = (payload.observations.records ?? []).flatMap(r => r.tasks ?? []).find(t => t.outputHash && t.tool === 'text.concat');
+    if (!receipt) return { reply: 'no receipt yet' };
+    if (turns === 2) return { reply: 'The value is red/blue.', citations: [{ taskId: receipt.taskId, outputHash: receipt.outputHash, quote: 'red/blue' }] };
+    // A quote that was never in the output must be refused even though the anchor itself is real.
+    return { reply: 'The value is green.', citations: [{ taskId: receipt.taskId, outputHash: receipt.outputHash, quote: 'green' }] };
+  });
+  try {
+    await send(f.harness, 'Join red and blue.');
+    await f.harness.executePlan();
+
+    const good = await send(f.harness, 'What is the value?');
+    assert.equal(good.lastError, null);
+    assert.equal(good.history.at(-1).citations[0].quote, 'red/blue');
+
+    const bad = await send(f.harness, 'Say it again.');
+    assert.equal(bad.lastError.reasonCode, 'CITATION_UNVERIFIED');
+    assert.match(bad.lastError.reason, /quoted text does not appear in the recorded output/);
+    // The anchor was genuine, so only the quote check caught this: a real receipt cannot be used
+    // to launder a fabricated fact about its contents.
+    assert.ok(receipt && receipt.outputHash, 'the citation pointed at a real receipt');
+  } finally { f.close(); }
+});
+
+test('the approval gate says whether a lesson is backed by recorded execution', async () => {
+  // memory.candidate hashes each evidence item, and a $task reference resolves to the referenced
+  // task's real output before the tool runs — so a grounded evidence hash EQUALS that task's
+  // recorded outputHash, while invented prose matches nothing. The distinction was already
+  // provable from data the harness held and had never been surfaced, which meant a lesson backed
+  // by execution looked identical at the approval gate to one backed by a sentence.
+  const grounded = { version: 1, tasks: [
+    { id: 'src', tool: 'text.concat', input: { values: ['real', 'output'], separator: '-' } },
+    { id: 'cand', tool: 'memory.candidate', input: { lesson: 'A grounded lesson.', evidence: [{ $task: 'src' }] }, dependsOn: ['src'] },
+    { id: 'save', tool: 'memory.promote', input: { $task: 'cand' }, dependsOn: ['cand'] },
+  ] };
+  const f = fixture(() => ({ reply: 'Recording a grounded lesson.', plan: grounded }));
+  try {
+    await send(f.harness, 'Record what we just computed.');
+    const blocked = await f.harness.executePlan();
+    assert.equal(blocked.pending.tool, 'memory.promote');
+    const provenance = blocked.pending.evidenceProvenance;
+    assert.ok(provenance, 'the gate reports evidence provenance for a promotion');
+    assert.equal(provenance.groundedCount, 1, 'the evidence is a real recorded output');
+    assert.equal(provenance.unverifiedHereCount, 0);
+    // It resolves WHICH run and task the evidence came from, rather than asserting a count.
+    assert.equal(provenance.grounded[0].taskId, 'src');
+    assert.match(provenance.grounded[0].runId, /^[a-f0-9]{24}$/);
+  } finally { f.close(); }
+});
+
+test('asserted evidence is labelled unverifiable rather than called fabricated', async () => {
+  // "Unverifiable here" is the honest label: an item could be genuine evidence from an earlier
+  // session whose runs are not in this ledger. Calling it fabricated would be a claim the harness
+  // cannot support, which is the same discipline as OUTPUT_REJECTED versus EFFECT_INDETERMINATE.
+  const asserted = { version: 1, tasks: [
+    { id: 'cand', tool: 'memory.candidate', input: { lesson: 'An asserted lesson.', evidence: [{ trainingRound: 9, verifiedBy: 'a sentence I wrote' }] } },
+    { id: 'save', tool: 'memory.promote', input: { $task: 'cand' }, dependsOn: ['cand'] },
+  ] };
+  const f = fixture(() => ({ reply: 'Recording an asserted lesson.', plan: asserted }));
+  try {
+    await send(f.harness, 'Record this claim.');
+    const blocked = await f.harness.executePlan();
+    const provenance = blocked.pending.evidenceProvenance;
+    assert.equal(provenance.groundedCount, 0);
+    assert.equal(provenance.unverifiedHereCount, 1);
+    assert.deepEqual(provenance.grounded, []);
+    // The promotion is still offered for approval: provenance informs the decision, it does not
+    // make it. An operator may legitimately want to record a lesson that has no run behind it.
+    assert.match(blocked.pending.requestHash, /^[a-f0-9]{64}$/);
+  } finally { f.close(); }
+});
+
+test('a rejected proposal distils itself into a grounded lesson candidate', async () => {
+  // Rounds 002-014 each turned one measured failure into a durable improvement, by hand. The
+  // diagnostic that made that possible is machine-readable, so the harness can derive the same
+  // lesson from its own experience — including for failures nobody anticipated. The text is
+  // composed by the supervisor from recorded facts, never by the model.
+  const refWithoutDependency = { version: 1, tasks: [
+    { id: 'join', tool: 'text.concat', input: { values: ['x', 'y'], separator: '-' } },
+    { id: 'hash', tool: 'json.hash', input: { value: { $task: 'join', path: '/value' } } }, // no dependsOn
+  ] };
+  const f = fixture(() => ({ reply: 'Joining then hashing.', plan: refWithoutDependency }));
+  try {
+    const state = await send(f.harness, 'Join then hash.');
+    assert.equal(state.lastError.reasonCode, 'INVALID_REFERENCE');
+    const candidate = state.lessonCandidates.at(-1);
+    assert.ok(candidate, 'a lesson candidate was distilled from the rejection');
+    // The lesson carries the supervisor's own diagnostic, so it is actionable rather than generic.
+    assert.match(candidate.lesson, /MODEL_PROPOSAL_INVALID/);
+    assert.match(candidate.lesson, /INVALID_REFERENCE/);
+    assert.match(candidate.lesson, /direct declared dependency/);
+    assert.equal(candidate.runId, state.lastError.runId);
+    // Its suggested evidence is the run's own root, which classifyEvidence can verify, so
+    // promoting it would be grounded rather than prose about a failure.
+    assert.equal(candidate.evidenceGrounded, true);
+    assert.deepEqual(candidate.suggestedEvidence.length, 1);
+  } finally { f.close(); }
+});
+
+test('a failed run distils a candidate naming the tool that failed', async () => {
+  const failing = { version: 1, tasks: [{ id: 'check', tool: 'json.assert', input: { value: 1, schema: { const: 2 } } }] };
+  const f = fixture(() => ({ reply: 'Checking.', plan: failing }));
+  try {
+    await send(f.harness, 'Check it.');
+    const state = await f.harness.executePlan();
+    const candidate = state.lessonCandidates.at(-1);
+    assert.match(candidate.lesson, /json\.assert \(task "check"\)/, 'names the tool and task that failed');
+    assert.equal(candidate.code, 'TOOL_FAILED');
+    assert.equal(candidate.evidenceGrounded, true);
+  } finally { f.close(); }
+});
+
+test('candidates are suggestions, bounded, and never promoted automatically', async () => {
+  const failing = { version: 1, tasks: [{ id: 'check', tool: 'json.assert', input: { value: 1, schema: { const: 2 } } }] };
+  const f = fixture(() => ({ reply: 'Checking.', plan: failing }));
+  try {
+    // More failures than the bound, to prove the teaching log cannot grow without limit.
+    for (let i = 0; i < 20; i += 1) {
+      await send(f.harness, 'attempt ' + i);
+      await f.harness.executePlan();
+    }
+    const state = await f.harness.snapshot();
+    assert.ok(state.lessonCandidates.length <= 16, 'bounded like every other context record');
+    // A candidate never becomes a stored lesson without an operator's exact grant, because learned
+    // text becoming authority without review is the hazard this project refuses. Asserted on what
+    // the snapshot actually exposes: no write was offered for approval, and memory.promote appears
+    // in no observed receipt. An earlier version of this check defaulted an unexposed
+    // workspaceRoot to '.', which silently pointed at the real repository store and passed for the
+    // wrong reason.
+    assert.equal(state.pending, null, 'no write was offered for approval');
+    const observedTools = (state.observations.records ?? []).flatMap(r => (r.tasks ?? []).map(t => t.tool));
+    assert.ok(!observedTools.includes('memory.promote'), 'no promotion was executed');
+  } finally { f.close(); }
+});
+
+test('a failure lesson carries the principle behind the cause and counts recurrence', async () => {
+  // Round 015 produced precise but uninsightful lessons: they named a cause without explaining the
+  // rule behind it. PRINCIPLES is a finite, reviewable mapping from observed condition to the
+  // generalizable rule that rounds 002-015 actually established, and recurrence is insight only
+  // the harness can supply — a human-written lesson cannot know this is the second occurrence.
+  const failing = { version: 1, name: 'probe', tasks: [{ id: 'check', tool: 'json.assert', input: { value: 1, schema: { const: 2 } } }] };
+  const f = fixture(() => ({ reply: 'Checking.', plan: failing }));
+  try {
+    await send(f.harness, 'first');
+    await f.harness.executePlan();
+    await send(f.harness, 'second');
+    const state = await f.harness.executePlan();
+    const failures = state.lessonCandidates.filter(c => c.kind === 'failure');
+    const latest = failures.at(-1);
+    // The tool's own code becomes the cause, where TOOL_FAILED alone is only a category.
+    assert.equal(latest.cause, 'SCHEMA_MISMATCH');
+    assert.match(latest.lesson, /Principle: Check each input against the declared schema/);
+    assert.equal(latest.occurrence, 2);
+    assert.match(latest.lesson, /occurrence 2 of this cause/);
+    assert.match(latest.lesson, /treat it as a pattern rather than an incident/);
+    assert.equal(latest.evidenceGrounded, true);
+  } finally { f.close(); }
+});
+
+test('a successful composition distils its own lesson, and infrastructure plans do not', async () => {
+  // Round 015 only learned from failures, which it recorded as a real asymmetry: a working
+  // topology is exactly the transferable fact round 008 established by hand, and nothing captured
+  // it. Infrastructure plans are excluded because they run every turn and teach nothing about the
+  // work that was asked for.
+  const composed = { version: 1, name: 'real-work', tasks: [
+    { id: 'first', tool: 'text.concat', input: { values: ['a', 'b'], separator: '' } },
+    { id: 'second', tool: 'json.hash', input: { value: { $task: 'first', path: '/value' } }, dependsOn: ['first'] },
+  ] };
+  const f = fixture(() => ({ reply: 'Composing.', plan: composed }));
+  try {
+    await send(f.harness, 'Compose it.');
+    const state = await f.harness.executePlan();
+    const wins = state.lessonCandidates.filter(c => c.kind === 'success');
+    assert.equal(wins.length, 1, 'exactly one success lesson, not one per infrastructure run');
+    assert.deepEqual(wins[0].tools, ['text.concat', 'json.hash']);
+    assert.match(wins[0].lesson, /2-task composition completed: text\.concat then json\.hash/);
+    assert.match(wins[0].lesson, /consumed an earlier result by reference using "\/value"/);
+    assert.match(wins[0].lesson, /known to work, so reuse them/);
+    assert.equal(wins[0].evidenceGrounded, true);
+    // The harness's own enrichment and model plans produced no success lesson.
+    assert.ok(!wins.some(w => (w.tools ?? []).includes('model.propose')));
+    assert.ok(!wins.some(w => (w.tools ?? []).includes('memory.recall')));
+  } finally { f.close(); }
+});
