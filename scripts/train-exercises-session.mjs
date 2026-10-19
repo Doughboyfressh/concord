@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { createClientChannel, makePeerTools } from '../src/peer.mjs';
 import { makeSourceTools, loadSourceLock } from '../src/sources.mjs';
 import { makeReverseTools } from '../src/reverse.mjs';
+import os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { parseJson } from '../src/value.mjs';
 
@@ -69,6 +71,44 @@ async function answered(pending, reply, made) {
 
 /** The committed reverse table, for the config refusals that need a valid one. */
 const reverseTable = () => parseJson(fs.readFileSync(path.join(root, 'reverse-tools.json'), 'utf8'));
+
+/**
+ * Making a file unreadable, so the filesystem catch-all can be reached at all.
+ *
+ * SOURCE_READ_FAILED sits behind the specific errors — a missing path answers SOURCE_NOT_FOUND, a
+ * forbidden character PATH_DENIED, a symlink loop PATH_DENIED — so reaching it needs a fault that
+ * is none of those. A denied read is the one such fault that can be arranged without elevation.
+ *
+ * Whether it can be arranged is checked rather than assumed: chmod is largely advisory for reads
+ * on Windows and ACLs do not exist elsewhere, so the capability is probed once at load and the
+ * exercise is simply absent where it does not hold. A machine that cannot deny itself a read
+ * should report one fewer exercise, not a finding about its own filesystem.
+ */
+const denyRead = (file) => {
+  if (process.platform === 'win32') execFileSync('icacls', [file, '/deny', `${process.env.USERNAME}:(R)`], { stdio: 'pipe' });
+  else fs.chmodSync(file, 0o000);
+};
+const restoreRead = (file) => {
+  try {
+    if (process.platform === 'win32') execFileSync('icacls', [file, '/remove:d', process.env.USERNAME ?? ''], { stdio: 'pipe' });
+    else fs.chmodSync(file, 0o600);
+  } catch { /* best effort: the scratch directory is disposable either way */ }
+};
+
+const CAN_DENY_READ = (() => {
+  let probeDir = null;
+  try {
+    probeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-acl-probe-'));
+    const file = path.join(probeDir, 'probe.md');
+    fs.writeFileSync(file, 'probe\n');
+    denyRead(file);
+    let unreadable = false;
+    try { fs.readFileSync(file); } catch { unreadable = true; }
+    restoreRead(file);
+    return unreadable;
+  } catch { return false; }
+  finally { if (probeDir) { try { fs.rmSync(probeDir, { recursive: true, force: true }); } catch { /* disposable */ } } }
+})();
 
 const sourceTools = () => loadSourceLock(path.join(root, 'sources.lock.json'))
   .then((catalog) => ({ tools: byName(makeSourceTools(catalog)), sourceId: catalog.sources[0].id }));
@@ -272,5 +312,27 @@ export function sessionExercises() {
       },
       lesson: 'A value filling an argv template slot may not begin with a dash, and is refused REVERSE_INPUT naming the slot. Argv comes only from a reviewed template, and a slot value that looks like a flag is how a path turns into an option the reviewer never approved — so it is rejected while the command line is being built, before any process exists.',
     },
+
+    // ---- the filesystem catch-all, where a read can actually be denied ------------------
+    ...(CAN_DENY_READ ? [{
+      family: 'catalog', tool: 'skills.snapshot', expectThrow: 'SOURCE_READ_FAILED', workspace: 'temp',
+      call: async ({ workspaceRoot }) => {
+        const skill = path.join(workspaceRoot, 'unreadable-skill');
+        fs.mkdirSync(skill, { recursive: true });
+        fs.writeFileSync(path.join(skill, 'SKILL.md'),
+          '---\nname: unreadable-skill\ndescription: A valid skill with one file the reader cannot open.\n---\n\n# Unreadable\n');
+        const blocked = path.join(skill, 'blocked.md');
+        fs.writeFileSync(blocked, '# this file denies its own reader\n');
+        denyRead(blocked);
+        try {
+          const { tools, sourceId } = await sourceTools();
+          return await tools.get('skills.snapshot').execute({ path: 'unreadable-skill', sourceId }, { workspaceRoot, policy: toolPolicy });
+        } finally {
+          // Restored so the round can delete its own scratch directory afterwards.
+          restoreRead(blocked);
+        }
+      },
+      lesson: 'A file the reader is not permitted to open fails the snapshot with SOURCE_READ_FAILED, and the filesystem code is carried in the detail. This is the catch-all behind the specific errors, and the ordering is the point: a missing path answers SOURCE_NOT_FOUND and a symlink loop answers PATH_DENIED, so anything arriving here is a fault nobody anticipated — reported as unanticipated rather than guessed at. A partial snapshot is never returned, because a skill missing one file is not the skill that was asked for.',
+    }] : []),
   ];
 }
