@@ -13,6 +13,7 @@ import { makeBrowserTools } from './browser.mjs';
 import { makeReverseTools } from './reverse.mjs';
 import { makeReaderTools } from './readers.mjs';
 import { makeForeignTools } from './foreign.mjs';
+import { makeMailboxTools } from './peer.mjs';
 import { buildChatContext } from './chat-context.mjs';
 import { createChatHarness } from './chat.mjs';
 import { createServer, listenServer } from './server.mjs';
@@ -86,6 +87,7 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
     ...makeIntegrationTools(integrations), ...makeAgentTools(workers), ...makeBrowserTools(browser),
     ...makeReverseTools(reverseTable, reverse), ...makeReaderTools(),
     ...makeForeignTools(foreignManifest, flags.foreign ? readJson(flags.foreign) : {}),
+    ...makeMailboxTools({ directory: path.join(root, 'runs', 'peer-mailbox') }),
   ];
   const registry = new Map(descriptors.map(d => [d.name, d]));
   if (registry.size !== descriptors.length) throw new HarnessError('CHAT_CONFIG', 'Duplicate tool name');

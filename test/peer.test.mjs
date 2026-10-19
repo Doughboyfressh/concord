@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createClientChannel, makePeerTools } from '../src/peer.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createClientChannel, makePeerTools, makeMailboxTools } from '../src/peer.mjs';
 import { createMcpServer } from '../src/mcp.mjs';
 
 // The other direction of the MCP session: Concord asking, the client answering. Every test drives
@@ -317,4 +320,89 @@ test('a request Concord cannot render for a person is refused before it is sent'
   // Only a string field can offer a fixed set of choices.
   await assert.rejects(request([{ name: 'n', type: 'number', enum: ['a'] }]), (e) => e.code === 'PEER_REQUEST');
   assert.equal(sent.length, 0);
+});
+
+// The mailbox is the half that needs no client. Only two MCP directions reach anyone and they
+// reach different people: sampling asks the client's model, elicitation asks the person operating
+// it. Against a client that declares elicitation and not sampling, nothing reaches the connected
+// agent at all — so these two tools are files rather than protocol.
+
+function mailbox() {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-mailbox-'));
+  const tools = byName(makeMailboxTools({ directory }));
+  return { directory, post: tools.get('peer.post'), inbox: tools.get('peer.inbox') };
+}
+
+test('a message posted by one process is collected by another', () => {
+  const { directory, post, inbox } = mailbox();
+  // Writing a file that outlives the run takes a grant; collecting letters does not.
+  assert.equal(post.effect, 'write');
+  assert.equal(inbox.effect, 'read');
+
+  const first = post.execute({ message: 'Concord has something to say.', subject: 'hello' });
+  assert.equal(first.seq, 1);
+  assert.equal(first.for, 'agent');
+  assert.match(first.id, /^000001-[0-9a-f]{12}$/);
+  assert.equal(post.execute({ message: 'and another' }).seq, 2);
+
+  // A separate construction over the same directory is the cross-process case: the desktop
+  // application posts and the MCP server collects, and they never share memory.
+  const elsewhere = byName(makeMailboxTools({ directory })).get('peer.inbox');
+  const seen = elsewhere.execute({});
+  assert.equal(seen.total, 2);
+  assert.equal(seen.latestSeq, 2);
+  assert.deepEqual(seen.messages.map((m) => m.message), ['Concord has something to say.', 'and another']);
+  assert.equal(seen.messages[0].subject, 'hello');
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test('an unread mailbox is empty rather than an error, and reading never consumes', () => {
+  const absent = byName(makeMailboxTools({ directory: path.join(os.tmpdir(), 'concord-mailbox-never-created-' + process.pid) })).get('peer.inbox');
+  // A mailbox nobody has written to yet and one that does not exist are the same thing to a
+  // reader, and neither is a failure.
+  assert.deepEqual(absent.execute({}).messages, []);
+  assert.equal(absent.execute({}).total, 0);
+
+  const { directory, post, inbox } = mailbox();
+  post.execute({ message: 'one' });
+  assert.equal(inbox.execute({}).returned, 1);
+  // Reading twice returns the same letter: a tool that quietly consumed evidence would make a
+  // lost message indistinguishable from one that was never sent.
+  assert.equal(inbox.execute({}).returned, 1);
+  assert.equal(inbox.execute({ after: 1 }).returned, 0);
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test('a letter says who it is for, and pages without being drained', () => {
+  const { directory, post, inbox } = mailbox();
+  post.execute({ message: 'for the agent' });
+  post.execute({ message: 'for the operator', for: 'operator' });
+  post.execute({ message: 'for the agent again', for: 'agent' });
+
+  assert.deepEqual(inbox.execute({ for: 'agent' }).messages.map((m) => m.seq), [1, 3]);
+  assert.deepEqual(inbox.execute({ for: 'operator' }).messages.map((m) => m.seq), [2]);
+  assert.deepEqual(inbox.execute({ after: 1 }).messages.map((m) => m.seq), [2, 3]);
+  assert.deepEqual(inbox.execute({ limit: 1 }).messages.map((m) => m.seq), [1]);
+  // total counts the whole mailbox even when a filter or a page returns less of it.
+  const page = inbox.execute({ limit: 1 });
+  assert.equal(page.returned, 1);
+  assert.equal(page.total, 3);
+  assert.equal(page.latestSeq, 3);
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test('the mailbox ignores what it did not write, and needs an absolute directory', () => {
+  const { directory, post, inbox } = mailbox();
+  post.execute({ message: 'real' });
+  // Anything not matching the mailbox's own naming is not a letter, and a letter that cannot be
+  // parsed is skipped rather than failing the whole collection.
+  fs.writeFileSync(path.join(directory, 'notes.txt'), 'not a letter');
+  fs.writeFileSync(path.join(directory, '000009-abcdefabcdef.json'), '{ this is not json');
+  const seen = inbox.execute({});
+  assert.deepEqual(seen.messages.map((m) => m.message), ['real']);
+  assert.equal(seen.total, 2, 'the malformed letter still counts as occupying a slot');
+
+  assert.throws(() => makeMailboxTools({ directory: 'relative/path' }), (e) => e.code === 'PEER_CONFIG');
+  assert.throws(() => makeMailboxTools({}), (e) => e.code === 'PEER_CONFIG');
+  fs.rmSync(directory, { recursive: true, force: true });
 });

@@ -8,7 +8,7 @@ import { runPlan } from './engine.mjs';
 import { makeBuiltinTools } from './builtins.mjs';
 import { loadSourceLock, makeSourceTools } from './sources.mjs';
 import { makeCapabilityTools } from './capabilities.mjs';
-import { createClientChannel, makePeerTools } from './peer.mjs';
+import { createClientChannel, makePeerTools, makeMailboxTools } from './peer.mjs';
 import { makeArtifactTools } from './artifacts.mjs';
 import { makeIntegrationTools } from './integrations.mjs';
 import { makeReverseTools } from './reverse.mjs';
@@ -100,7 +100,12 @@ function buildPolicy(flags, registry, integrations) {
   return {
     version: 1, allowedTools: [...registry.keys()].sort(), allowedEffects: ['pure', 'read', 'write', 'network', 'process'],
     allowedOrigins: [...new Set([integrations.model?.origin, integrations.typesafe?.origin, integrations.registry?.origin].filter(Boolean))].sort(),
-    maxTasks: 32, maxOutputBytes: 1048576, maxJournalBytes: 16777216, timeoutMs: 60000,
+    maxTasks: 32, maxOutputBytes: 1048576, maxJournalBytes: 16777216,
+    // This transport registers peer.request, which waits on a person answering a prompt, and a
+    // policy deadline is the ceiling every tool shares. Sixty seconds killed a real elicitation
+    // while its dialog was still on screen. This is the kernel's own maximum from the policy
+    // schema; a tool that returns quickly still returns quickly, since a ceiling is not a target.
+    timeoutMs: 300000,
   };
 }
 
@@ -360,7 +365,10 @@ export async function main(argv = process.argv.slice(2)) {
   // The other direction of this session. It exists only on this transport: a browser is not an
   // agent that can be asked anything, so the desktop and terminal launchers register none of it.
   const channel = createClientChannel({ send: (line) => process.stdout.write(line + '\n') });
-  for (const tool of makePeerTools({ channel })) {
+  // The mailbox is registered on both transports because it is files, not protocol: Concord's
+  // own agent posts from the desktop application and the connected agent collects here, and the
+  // two are different processes that never meet.
+  for (const tool of [...makePeerTools({ channel }), ...makeMailboxTools({ directory: path.join(root, 'runs', 'peer-mailbox') })]) {
     if (registry.has(tool.name)) throw new HarnessError('MCP_CONFIG', 'Peer tool name collision', { tool: tool.name });
     registry.set(tool.name, tool);
   }

@@ -1,4 +1,6 @@
-import { HarnessError, canonical } from './value.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import { HarnessError, canonical, digest, parseJson } from './value.mjs';
 
 /**
  * The other direction of the MCP session.
@@ -335,7 +337,13 @@ export function makePeerTools({ channel } = {}) {
           if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name)) fail('PEER_REQUEST', 'A requested field name must be a portable identifier', { field: name });
         }
 
-        const deadline = Math.min(DEFAULT_TIMEOUT_MS, context?.policy?.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+        // A person is on the far end of this one, and people are slower than models. Measured:
+        // a first attempt died at the sixty-second default while the prompt was still on screen
+        // waiting to be read. So this takes the policy's whole deadline rather than a shorter
+        // fixed cap, stopping a moment early only so the failure reads PEER_TIMEOUT — the client
+        // did not answer — instead of the kernel's generic TIMEOUT.
+        const ceiling = context?.policy?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+        const deadline = Math.max(1000, ceiling - 1000);
         const result = await channel.request('elicitation/create', {
           message: input.message,
           requestedSchema: requestedSchema(fields),
@@ -372,6 +380,131 @@ export function makePeerTools({ channel } = {}) {
           limitations: [
             'A notification has no reply, so this records that the line was written to the session and not that the client read, showed or understood it',
           ],
+        };
+      },
+    },
+  ];
+}
+
+/**
+ * The mailbox: how Concord reaches the agent when the protocol cannot.
+ *
+ * The channel above is live and needs a client on the other end. Only two of MCP's directions
+ * actually reach anyone, and they reach different people: sampling asks the client's model,
+ * elicitation asks the person operating it. Measured against Claude Code, which declares
+ * elicitation and not sampling, that leaves a real gap — Concord can reach the operator and can
+ * log at the client, and has no protocol path into the connected agent's context at all.
+ *
+ * So this does not use the protocol. A message is a file. Concord writes one when it has
+ * something to say to the agent; the agent reads it the next time it looks, over whichever
+ * transport it happens to be using. That makes these two tools unlike the rest of this module:
+ * they need no live client, they work from the desktop application as readily as from the MCP
+ * server, and the two sides can be separate processes that never meet — which they are.
+ *
+ * It is a mailbox and is described as one. Nothing here notifies anybody; a letter sits until it
+ * is collected.
+ */
+
+const MAX_MESSAGE = 65_536;
+const MAX_SUBJECT = 200;
+const MAX_MESSAGES = 10_000;
+const MAX_FILE_BYTES = 1_048_576;
+const FILE_PATTERN = /^(\d{6})-[0-9a-f]{12}\.json$/;
+
+function mailboxFiles(directory) {
+  let entries;
+  try { entries = fs.readdirSync(directory); }
+  catch (error) {
+    // An empty mailbox and a mailbox that does not exist yet are the same thing to a reader.
+    if (error.code === 'ENOENT') return [];
+    throw new HarnessError('PEER_MAILBOX', 'The mailbox directory could not be read');
+  }
+  return entries.filter((name) => FILE_PATTERN.test(name)).sort();
+}
+
+export function makeMailboxTools({ directory } = {}) {
+  if (typeof directory !== 'string' || !path.isAbsolute(directory)) fail('PEER_CONFIG', 'The mailbox needs an absolute directory');
+
+  return [
+    {
+      // A write effect: it puts a file on disk that outlives the run, so it takes a grant like
+      // any other write. The recipient is named in the message rather than implied, because
+      // "for the agent" and "for the operator" are different audiences and a letter that does
+      // not say which it is will be read by the wrong one.
+      name: 'peer.post', version: '1.0.0', effect: 'write',
+      outputKeys: ['seq', 'id', 'for', 'bytes', 'limitations'],
+      inputSchema: {
+        type: 'object', additionalProperties: false, required: ['message'],
+        properties: {
+          message: { type: 'string', minLength: 1, maxLength: MAX_MESSAGE },
+          subject: { type: 'string', maxLength: MAX_SUBJECT },
+          for: { type: 'string', enum: ['agent', 'operator'] },
+        },
+      },
+      execute(input) {
+        const existing = mailboxFiles(directory);
+        if (existing.length >= MAX_MESSAGES) fail('PEER_MAILBOX', 'The mailbox holds as many messages as the bound permits', { messages: existing.length });
+        // The sequence comes from what is already in the directory, not from a clock, so two
+        // readers of the same mailbox see the same order and a run stays reproducible.
+        const last = existing.length ? Number(existing[existing.length - 1].slice(0, 6)) : 0;
+        const seq = last + 1;
+        const record = {
+          seq,
+          for: input.for ?? 'agent',
+          ...(input.subject === undefined ? {} : { subject: input.subject }),
+          message: input.message,
+        };
+        const body = canonical(record);
+        const id = String(seq).padStart(6, '0') + '-' + digest(record).slice(0, 12);
+        fs.mkdirSync(directory, { recursive: true });
+        // `wx` rather than a plain write: an identical message posted twice is two letters, and
+        // a collision on the content digest at the same sequence would otherwise destroy one.
+        fs.writeFileSync(path.join(directory, id + '.json'), body + '\n', { flag: 'wx' });
+        return {
+          seq, id, for: record.for, bytes: Buffer.byteLength(input.message),
+          limitations: ['A mailbox notifies nobody; this records that the message was filed, not that anyone has read it'],
+        };
+      },
+    },
+    {
+      name: 'peer.inbox', version: '1.0.0', effect: 'read',
+      outputKeys: ['messages', 'returned', 'total', 'latestSeq', 'limitations'],
+      inputSchema: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          after: { type: 'integer', minimum: 0, maximum: MAX_MESSAGES },
+          limit: { type: 'integer', minimum: 1, maximum: 100 },
+          for: { type: 'string', enum: ['agent', 'operator'] },
+        },
+      },
+      execute(input) {
+        const files = mailboxFiles(directory);
+        const after = input.after ?? 0;
+        const limit = input.limit ?? 20;
+        const messages = [];
+        let latestSeq = 0;
+        for (const name of files) {
+          const seq = Number(name.slice(0, 6));
+          latestSeq = Math.max(latestSeq, seq);
+          if (seq <= after || messages.length >= limit) continue;
+          const file = path.join(directory, name);
+          let record;
+          try {
+            if (fs.statSync(file).size > MAX_FILE_BYTES) continue;
+            record = parseJson(fs.readFileSync(file, 'utf8'));
+          } catch { continue; }
+          if (input.for !== undefined && record.for !== input.for) continue;
+          messages.push(record);
+        }
+        return {
+          messages,
+          returned: messages.length,
+          total: files.length,
+          latestSeq,
+          // Reading does not remove: the same letter is returned again unless the caller pages
+          // past it, because a tool that quietly consumed evidence would make a lost message
+          // indistinguishable from one that was never sent.
+          limitations: ['Reading leaves the mailbox unchanged; page with "after" using latestSeq rather than expecting messages to be consumed'],
         };
       },
     },

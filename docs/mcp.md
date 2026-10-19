@@ -62,6 +62,8 @@ over the stdio connection that client already opened.
 | `peer_ask` | `network` | `sampling/createMessage`: asks the client's **model**, returns its answer |
 | `peer_request` | `network` | `elicitation/create`: asks the client to **obtain** an answer, usually from a person |
 | `peer_tell` | `network` | `notifications/message`: one line, no reply |
+| `peer_post` | `write` | files a message for the agent or the operator to collect |
+| `peer_inbox` | `read` | collects what has been filed |
 
 **Which one works depends on the client, and the two are not interchangeable.** Sampling asks the
 client's model; elicitation asks the client to go and get input. A client declares what it supports
@@ -79,6 +81,37 @@ It declares `elicitation` and `roots`, and **not** `sampling`. So on Claude Code
 the channel that works and `peer_ask` is the one that refuses — with `PEER_UNSUPPORTED`, before a
 line is written. That is not a limitation worked around; it is the capability gate doing its job on
 a real client, and the reason the gate exists.
+
+**The two directions reach different people, and that is the whole problem.** Sampling asks the
+client's *model*. Elicitation asks the *person* operating it. They are not two ways of doing one
+thing. Driven live against Claude Code, `peer_request` worked exactly as designed and the prompt
+went to the operator, who answered it by hand — which is correct behaviour and still not what
+"Concord talks to the agent" means. With `sampling` undeclared by that client, there is **no MCP
+direction at all that reaches the connected agent's context**. That is a property of the client,
+not a gap in Concord, and it cannot be worked around inside the protocol.
+
+So the mailbox is not protocol. `peer_post` writes a message to a directory and `peer_inbox`
+collects it. That makes those two unlike everything else here: they need no live client, they are
+registered on the desktop application as readily as on the MCP server, and the two sides can be
+separate processes that never meet — which is exactly the real arrangement, since Concord's own
+agent runs in the desktop process and the connected agent arrives over stdio. Verified across two
+independent server processes: one posted, the other collected the same letter.
+
+A letter names its recipient (`agent` or `operator`) rather than leaving it implied, because a
+message that does not say which audience it is for gets read by the wrong one. Reading never
+consumes: pass `after` with the reported `latestSeq` to page. A tool that quietly drained the
+mailbox would make a lost message indistinguishable from one that was never sent. The sequence
+comes from what is already in the directory rather than from a clock, so two readers see the same
+order. And nothing about this notifies anybody — it is a mailbox, and a letter sits until it is
+collected.
+
+**A deadline that was wrong, measured.** The first live elicitation failed with `TIMEOUT` while its
+dialog was still on screen waiting to be read: the MCP server's default policy allowed sixty
+seconds, and a policy deadline is the ceiling every tool shares. People are slower than models.
+That default is now the kernel's own 300-second maximum, and `peer_request` takes the policy's
+whole deadline rather than a shorter fixed cap, stopping a second early only so the failure reads
+`PEER_TIMEOUT` — the client did not answer — rather than the kernel's generic `TIMEOUT`. A tool
+that returns quickly still returns quickly; a ceiling is not a target.
 
 `peer_request` sends a message and a `requestedSchema` built from a declared field list. MCP keeps
 that schema to a flat object of primitives because the client has to render it, and building it
