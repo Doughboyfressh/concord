@@ -3,7 +3,7 @@
     "name": "model.propose",
     "origin": "http://127.0.0.1:11434",
     "path": "/v1/chat/completions",
-    "model": "qwen3.8-flash",
+    "model": "qwen3.8-27b",
     "apiKeyEnv": "CONCORD_MODEL_API_KEY",
     "timeoutMs": 300000,
     "maxOutputBytes": 1048576

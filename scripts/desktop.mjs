@@ -30,6 +30,13 @@ async function start() {
   const windowSize = flags['window-size'] ?? '1180,860';
   delete flags['window-size'];
   if (flags.port === undefined) flags.port = '0';
+  // Live by default. Typing in Concord's own chat box and getting the offline demonstration is
+  // the wrong answer when a model is configured and running: the operator has to remember a flag
+  // to get the behaviour they already set up. An explicit --integrations still wins.
+  if (flags.integrations === undefined) {
+    const live = path.join(root, 'config', 'concord-live.json');
+    if (fs.existsSync(live)) flags.integrations = live;
+  }
 
   // Decide the model credential before the harness is built, because the adapter reads the
   // environment at call time and a placeholder decided afterwards would arrive too late. No

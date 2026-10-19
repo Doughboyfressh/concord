@@ -8,7 +8,7 @@ import { runPlan } from './engine.mjs';
 import { makeBuiltinTools } from './builtins.mjs';
 import { loadSourceLock, makeSourceTools } from './sources.mjs';
 import { makeCapabilityTools } from './capabilities.mjs';
-import { createClientChannel, makePeerTools, makeMailboxTools } from './peer.mjs';
+import { createClientChannel, makePeerTools, makeMailboxTools, readMailbox, fileMessage } from './peer.mjs';
 import { makeArtifactTools } from './artifacts.mjs';
 import { makeIntegrationTools } from './integrations.mjs';
 import { makeReverseTools } from './reverse.mjs';
@@ -27,6 +27,13 @@ const MAX_LINE_BYTES = 8 * 1048576;
 const GRANTED_EFFECTS = ['write', 'network', 'process'];
 const RAW_PLAN_NAME = 'concord-mcp';
 const RAW_TASK_ID = 'call';
+// The MCP Apps extension: a server may hand the host an HTML document and the host renders it as
+// an interface. Claude Desktop declares this and declares neither sampling nor elicitation, so on
+// that client this is the only direction in which Concord can present anything of its own.
+const UI_EXTENSION = 'io.modelcontextprotocol/ui';
+const UI_MIME_TYPE = 'text/html;profile=mcp-app';
+const UI_RESOURCE_URI = 'ui://concord/chat';
+
 const CHAT_TOOL_NAMES = ['concord_chat', 'concord_approve', 'concord_execute_plan', 'concord_replay', 'concord_chat_state'];
 
 class McpProtocolError extends Error {
@@ -59,11 +66,11 @@ function readJsonFile(file, maxBytes = 33554432) {
 
 function parseArgs(argv) {
   const flags = {};
-  const allowed = ['workspace', 'policy', 'integrations', 'workers', 'browser', 'reverse', 'foreign'];
+  const allowed = ['workspace', 'policy', 'integrations', 'workers', 'browser', 'reverse', 'foreign', 'mailbox'];
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i]?.replace(/^--/, '');
     if (!argv[i]?.startsWith('--') || !allowed.includes(key) || !argv[i + 1] || Object.hasOwn(flags, key)) {
-      throw new HarnessError('MCP_USAGE', 'Usage: node src/mcp.mjs [--workspace DIR] [--policy FILE] [--integrations FILE] [--workers FILE] [--browser FILE] [--reverse FILE] [--foreign FILE]');
+      throw new HarnessError('MCP_USAGE', 'Usage: node src/mcp.mjs [--workspace DIR] [--policy FILE] [--integrations FILE] [--workers FILE] [--browser FILE] [--reverse FILE] [--foreign FILE] [--mailbox DIR]');
     }
     flags[key] = argv[i + 1];
   }
@@ -147,7 +154,7 @@ function publicChatState(snapshot) {
  * the chat harness as five `concord_*` tools. Collisions in the dotted-to-underscored name
  * map are asserted here, at construction, rather than at first call.
  */
-export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, harness, instructionModules, channel = null }) {
+export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, harness, instructionModules, channel = null, uiApp = null, mailboxDir = null }) {
   const visibleRegistry = new Map([...registry].filter(([name, tool]) => policy.allowedTools.includes(name) && policy.allowedEffects.includes(tool.effect)));
   const nameMap = new Map();
   const wrapped = new Set();
@@ -248,6 +255,52 @@ export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, h
     return { type: 'object', properties: { value: {} }, required: ['value'], additionalProperties: false };
   }
 
+  /** Questions the operator asked through Concord that no one has answered yet. */
+  function openQuestions() {
+    if (!mailboxDir) return [];
+    try { return readMailbox(mailboxDir).filter((entry) => entry.open && entry.for === 'agent'); }
+    catch { return []; }
+  }
+
+  /**
+   * The push.
+   *
+   * MCP has no way for a server to put text in front of a client's model unless that client
+   * declares sampling, and neither Anthropic client does — measured, not assumed. But a tool's
+   * description IS model-visible text, and a server may tell a client its tool list changed.
+   * So Concord advertises the pending question in the description of the tool used to answer it,
+   * and notifies. The client re-reads, and the question is in the agent's context without the
+   * operator relaying anything.
+   *
+   * Honest about its own reach: this arrives when the client next reads its tools, not at an
+   * instant of Concord's choosing, and a client that ignores listChanged will never look.
+   */
+  function answerToolDefinition() {
+    const open = openQuestions();
+    if (!open.length) {
+      return { name: 'concord_answer', description: 'Answer a question the operator asked through Concord. Nothing is waiting right now.',
+        inputSchema: { type: 'object', properties: { seq: { type: 'integer', minimum: 1 }, answer: { type: 'string', minLength: 1, maxLength: 65536 } }, required: ['seq', 'answer'], additionalProperties: false } };
+    }
+    // Newest first, and quoted. The oldest open item is usually the one nobody wanted; the one
+    // that just arrived is the one being pushed. Quoting by sequence alone would notify that
+    // something happened without ever saying what, which is not a message, only an alarm.
+    const newest = open[open.length - 1];
+    const quote = (entry) => {
+      const text = entry.message.length > 300 ? entry.message.slice(0, 300) + '…' : entry.message;
+      return `#${entry.seq}: "${text}"`;
+    };
+    const older = open.slice(0, -1).slice(-2).map(quote);
+    return {
+      name: 'concord_answer',
+      description: `The operator asked Concord ${open.length} question${open.length === 1 ? '' : 's'} that ${open.length === 1 ? 'is' : 'are'} waiting for you. `
+        + `Most recent ${quote(newest)}. `
+        + (older.length ? `Also open ${older.join(' and ')}. ` : '')
+        + `Answer by calling this tool with that seq and your answer; it appears in Concord's own interface. `
+        + `All open sequences: ${open.map((entry) => entry.seq).join(', ')}.`,
+      inputSchema: { type: 'object', properties: { seq: { type: 'integer', minimum: 1 }, answer: { type: 'string', minLength: 1, maxLength: 65536 } }, required: ['seq', 'answer'], additionalProperties: false },
+    };
+  }
+
   function toolDefinitions() {
     const defs = [];
     for (const [toolName, tool] of visibleRegistry) {
@@ -259,22 +312,34 @@ export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, h
       });
     }
     defs.push(
-      { name: 'concord_chat', description: 'Send a message to Concord\'s deterministic chat harness, grounded in its reviewed source instructions, and get its reply.', inputSchema: { type: 'object', properties: { message: { type: 'string', minLength: 1, maxLength: 32768 } }, required: ['message'], additionalProperties: false } },
+      { name: 'concord_chat', description: 'Send a message to Concord\'s deterministic chat harness, grounded in its reviewed source instructions, and get its reply.', inputSchema: { type: 'object', properties: { message: { type: 'string', minLength: 1, maxLength: 32768 } }, required: ['message'], additionalProperties: false },
+        // Calling this opens Concord's own interface in hosts that render apps, so the
+        // conversation continues in Concord's surface rather than in the host's chat box.
+        ...(uiApp ? { _meta: { ui: { resourceUri: UI_RESOURCE_URI, visibility: ['model', 'app'] } } } : {}) },
       { name: 'concord_approve', description: 'Approve a pending write/network/process effect in the chat harness by its exact request hash.', inputSchema: { type: 'object', properties: { requestHash: { type: 'string', minLength: 64, maxLength: 64 } }, required: ['requestHash'], additionalProperties: false } },
       { name: 'concord_execute_plan', description: 'Attempt the chat harness\'s currently proposed plan again (e.g. after approving a dependency), or adopt and attempt a new plan.', inputSchema: { type: 'object', properties: { plan: { type: 'object' } }, additionalProperties: false } },
       { name: 'concord_replay', description: 'Independently replay a prior chat run by id and verify it reproduces the same recorded outcome.', inputSchema: { type: 'object', properties: { runId: { type: 'string', minLength: 1, maxLength: 128 } }, required: ['runId'], additionalProperties: false } },
-      { name: 'concord_chat_state', description: 'Read the chat harness\'s current state (history, pending approval, proposed plan, run list) without changing anything.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+      ...(mailboxDir ? [answerToolDefinition()] : []),
+      { name: 'concord_chat_state', description: 'Read the chat harness\'s current state (history, pending approval, proposed plan, run list) without changing anything.', inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+        // The state tool is how a host asks "what is Concord right now", which makes it the other
+        // natural way in. Attaching the surface only to concord_chat meant a host that opened with
+        // a read saw text where it could have shown the interface.
+        ...(uiApp ? { _meta: { ui: { resourceUri: UI_RESOURCE_URI, visibility: ['model', 'app'] } } } : {}) },
     );
     return defs;
   }
 
   function resourceDefinitions() {
-    return [...instructionsBySourceId.values()]
+    const ui = uiApp
+      ? [{ uri: UI_RESOURCE_URI, name: 'concord_chat_app', title: 'Concord', description: "Concord's own chat interface, rendered by the host and driven by the concord_* tools.", mimeType: UI_MIME_TYPE }]
+      : [];
+    return ui.concat([...instructionsBySourceId.values()]
       .map(m => ({ uri: 'concord://instructions/' + m.sourceId, name: m.sourceId, title: m.sourceId, description: `Reviewed Concord source instruction module (${m.file})`, mimeType: 'text/markdown' }))
-      .sort((a, b) => a.uri < b.uri ? -1 : a.uri > b.uri ? 1 : 0);
+      .sort((a, b) => a.uri < b.uri ? -1 : a.uri > b.uri ? 1 : 0));
   }
 
   function readResource(uri) {
+    if (uiApp && uri === UI_RESOURCE_URI) return { uri, mimeType: UI_MIME_TYPE, text: uiApp };
     const match = /^concord:\/\/instructions\/([a-z0-9-]+)$/.exec(typeof uri === 'string' ? uri : '');
     const module = match ? instructionsBySourceId.get(match[1]) : undefined;
     return module ? { uri, mimeType: 'text/markdown', text: module.text } : null;
@@ -285,6 +350,18 @@ export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, h
     const rawArgs = params.arguments;
     const args = rawArgs === undefined ? {} : rawArgs;
     if (typeof args !== 'object' || args === null || Array.isArray(args)) throw new McpProtocolError(-32602, 'Invalid params: "arguments" must be an object');
+    if (mailboxDir && params.name === 'concord_answer') {
+      if (!Number.isInteger(args.seq) || typeof args.answer !== 'string' || !args.answer.trim()) {
+        throw new McpProtocolError(-32602, 'Invalid params: "seq" and "answer" are required');
+      }
+      try {
+        const filed = fileMessage(mailboxDir, { message: args.answer, audience: 'operator', replyTo: args.seq, subject: 'answered by the connected provider' });
+        return { content: [{ type: 'text', text: canonical({ answered: args.seq, seq: filed.seq, note: "Filed in Concord’s exchange; it appears in Concord’s own interface." }) }] };
+      } catch (error) {
+        const code = error instanceof HarnessError ? error.code : 'ANSWER_FAILED';
+        return { content: [{ type: 'text', text: canonical({ status: 'failed', code, message: error.message }) }], isError: true };
+      }
+    }
     if (CHAT_TOOL_NAMES.includes(params.name)) return callChatTool(params.name, args);
     const toolName = nameMap.get(params.name);
     if (!toolName) throw new McpProtocolError(-32602, 'Unknown tool: ' + params.name);
@@ -308,7 +385,12 @@ export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, h
           // `logging` is declared because peer.tell sends notifications/message. A server that
           // emits log notifications without declaring it is sending something the client never
           // agreed to receive.
-          capabilities: { tools: { listChanged: false }, resources: { listChanged: false, subscribe: false }, logging: {} },
+          capabilities: {
+            tools: { listChanged: Boolean(mailboxDir) }, resources: { listChanged: false, subscribe: false }, logging: {},
+            // Declared only when a document was actually loaded. A capability a server cannot
+            // honour is worse than one it never claimed.
+            ...(uiApp ? { extensions: { [UI_EXTENSION]: { mimeTypes: [UI_MIME_TYPE] } } } : {}),
+          },
           serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
           instructions: 'Concord is a deterministic AI chat harness: every write, network, or process effect requires an exact content-derived approval hash before it runs. A raw tool call that needs a grant returns a "blocked" result with a requestHash; call the same tool again with "_confirm" set to that hash to execute it. The concord_* tools drive a stateful, instruction-grounded chat session over the same kernel; resources/* exposes the 12 reviewed source instruction modules.',
         };
@@ -356,7 +438,7 @@ export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, h
     }
   }
 
-  return { handleLine };
+  return { handleLine, openQuestions };
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -368,7 +450,9 @@ export async function main(argv = process.argv.slice(2)) {
   // The mailbox is registered on both transports because it is files, not protocol: Concord's
   // own agent posts from the desktop application and the connected agent collects here, and the
   // two are different processes that never meet.
-  for (const tool of [...makePeerTools({ channel }), ...makeMailboxTools({ directory: path.join(root, 'runs', 'peer-mailbox') })]) {
+  // Redirectable so a test, or a second operator, can hold an exchange of its own.
+  const mailboxDir = path.resolve(flags.mailbox ?? path.join(root, 'runs', 'peer-mailbox'));
+  for (const tool of [...makePeerTools({ channel }), ...makeMailboxTools({ directory: mailboxDir })]) {
     if (registry.has(tool.name)) throw new HarnessError('MCP_CONFIG', 'Peer tool name collision', { tool: tool.name });
     registry.set(tool.name, tool);
   }
@@ -385,7 +469,33 @@ export async function main(argv = process.argv.slice(2)) {
   const resourceContext = buildContext({ message: 'Concord MCP server startup', history: [] });
   const harness = createChatHarness({ registry, policy, sourceLock, workspaceRoot, buildContext });
 
-  const server = createMcpServer({ registry, policy, sourceLock, workspaceRoot, harness, instructionModules: resourceContext.instructions, channel });
+  // Read once at startup, like every other runtime file, so the served document and the digest in
+  // the source lock describe the same bytes.
+  const uiAppPath = path.join(root, 'app', 'mcp-app.html');
+  const uiApp = fs.existsSync(uiAppPath) ? fs.readFileSync(uiAppPath, 'utf8') : null;
+  const server = createMcpServer({ registry, policy, sourceLock, workspaceRoot, harness, instructionModules: resourceContext.instructions, channel, uiApp, mailboxDir });
+
+  // Watch the exchange and tell the client when what it should know has changed. This is the
+  // push: the question is already in the tool description by the time the client re-reads, so
+  // notifying is all that is left to do. Signature-compared so an unrelated file touch does not
+  // nag a client that has nothing new to learn.
+  fs.mkdirSync(mailboxDir, { recursive: true });
+  let advertised = canonical(server.openQuestions().map((entry) => entry.seq));
+  let settle;
+  const announce = () => {
+    clearTimeout(settle);
+    // A single answer rewrites one file and touches the directory more than once; let it finish.
+    settle = setTimeout(() => {
+      const next = canonical(server.openQuestions().map((entry) => entry.seq));
+      if (next === advertised) return;
+      advertised = next;
+      try { channel.notify('notifications/tools/list_changed', {}); }
+      catch { /* a client that has gone away is not an error worth stopping the server for */ }
+    }, 150);
+    settle.unref?.();
+  };
+  try { fs.watch(mailboxDir, announce).unref?.(); }
+  catch { /* no watcher available: the description is still correct the next time tools are read */ }
 
   let decoder = new TextDecoder('utf-8', { fatal: true });
   let buffered = '';

@@ -13,7 +13,7 @@ import { makeBrowserTools } from './browser.mjs';
 import { makeReverseTools } from './reverse.mjs';
 import { makeReaderTools } from './readers.mjs';
 import { makeForeignTools } from './foreign.mjs';
-import { makeMailboxTools } from './peer.mjs';
+import { makeMailboxTools, fileMessage, readMailbox } from './peer.mjs';
 import { buildChatContext } from './chat-context.mjs';
 import { createChatHarness } from './chat.mjs';
 import { createServer, listenServer } from './server.mjs';
@@ -82,12 +82,13 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
   const reverse = flags.reverse ? readJson(flags.reverse) : {};
   const foreignManifest = fs.existsSync(path.join(root, 'foreign-capabilities.json'))
     ? readJson(path.join(root, 'foreign-capabilities.json')) : { schemaVersion: 1, sources: [] };
+  const mailboxDir = path.join(root, 'runs', 'peer-mailbox');
   const descriptors = [
     ...makeBuiltinTools(), ...makeSourceTools(catalog), ...makeCapabilityTools(inventory), ...makeArtifactTools(),
     ...makeIntegrationTools(integrations), ...makeAgentTools(workers), ...makeBrowserTools(browser),
     ...makeReverseTools(reverseTable, reverse), ...makeReaderTools(),
     ...makeForeignTools(foreignManifest, flags.foreign ? readJson(flags.foreign) : {}),
-    ...makeMailboxTools({ directory: path.join(root, 'runs', 'peer-mailbox') }),
+    ...makeMailboxTools({ directory: mailboxDir }),
   ];
   const registry = new Map(descriptors.map(d => [d.name, d]));
   if (registry.size !== descriptors.length) throw new HarnessError('CHAT_CONFIG', 'Duplicate tool name');
@@ -124,8 +125,17 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
       }
     }
   });
-  const wrapped = { snapshot: () => harness.snapshot() };
+  const wrapped = { snapshot: () => harness.snapshot(), exchange: () => readMailbox(mailboxDir) };
   for (const method of ['send', 'approve', 'executePlan', 'replay']) wrapped[method] = async (...args) => {
+    // A prompt typed here goes three places: Concord's own model, Concord's pipeline, and the
+    // provider connected over MCP. The third is a file rather than a call because no MCP client
+    // measured so far declares sampling, so the provider collects rather than being pushed to.
+    // Filed directly rather than through peer.post: this is Concord writing to its own outbox,
+    // the same class of internal evidence as the run journal, not an effect on anything outside.
+    if (method === 'send' && typeof args[0] === 'string' && args[0].trim()) {
+      try { fileMessage(mailboxDir, { message: args[0], audience: 'agent', subject: 'asked in Concord' }); }
+      catch { /* a full or unwritable outbox must never cost the operator their turn */ }
+    }
     const result = await harness[method](...args);
     // Append-only chat snapshots are reviewable; no automatic effect resumption on restart.
     fs.appendFileSync(path.join(store, 'session.jsonl'), canonical(harness.snapshot()) + '\n');

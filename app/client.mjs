@@ -44,6 +44,8 @@ async function call(path, body) {
   return payload;
 }
 
+setInterval(fetchExchange, 5000);
+
 async function fetchState() {
   const response = await fetch('/api/state');
   const payload = await response.json();
@@ -51,6 +53,7 @@ async function fetchState() {
   token = payload.token;
   status = payload.status ?? status;
   applyState(payload.state ?? state);
+  fetchExchange();
 }
 
 function applyState(next) {
@@ -77,8 +80,16 @@ function renderModeBadge() {
     description.textContent = 'Offline deterministic demonstration: pure-tool plans execute automatically; nothing leaves this process.';
     composerMode.textContent = 'Offline demonstration';
   } else {
-    badge.textContent = 'Connecting';
-    description.textContent = 'Connecting to your local harness…';
+    // Before the first turn the harness reports no mode, and saying "Connecting" forever makes a
+    // ready interface look broken. What is configured is already known from the tool inventory,
+    // so report that instead of a state the session left minutes ago.
+    const live = Array.isArray(status.tools) && status.tools.includes('model.propose');
+    badge.textContent = live ? 'Live model' : 'Local harness';
+    badge.classList.add(live ? 'live' : 'offline');
+    description.textContent = live
+      ? 'A configured model proposes replies and plans; protected effects still need your approval.'
+      : 'No model is configured, so Concord answers from its own deterministic tools.';
+    composerMode.textContent = live ? 'Live model' : 'Local harness';
   }
 }
 
@@ -91,7 +102,8 @@ function renderSources() {
   if (!state.sourceCoverage.length) {
     const p = document.createElement('p');
     p.className = 'muted small';
-    p.textContent = 'Loading source coverage…';
+    // Not loading: there is genuinely nothing to show until a turn selects sources.
+    p.textContent = 'Source coverage appears with your first turn.';
     list.append(p);
     return;
   }
@@ -299,7 +311,64 @@ function render() {
   renderPlan();
   renderContext();
   renderRuns();
+  renderExchange();
   renderInventory();
+}
+
+
+// ---- the connected provider ------------------------------------------------------------
+// Concord cannot push a prompt to an MCP client: no client measured so far declares sampling.
+// So the exchange is pull-based. Concord files what you typed, the provider collects it on its
+// own schedule, and its answer lands back here. Nothing below assumes a provider is listening.
+let exchange = [];
+
+async function fetchExchange() {
+  try {
+    const response = await fetch('/api/exchange');
+    if (!response.ok) return;
+    const payload = await response.json();
+    exchange = Array.isArray(payload.messages) ? payload.messages : [];
+    renderExchange();
+  } catch { /* the panel is supplementary; a failed poll must not disturb the conversation */ }
+}
+
+function renderExchange() {
+  const content = document.getElementById('exchange-content');
+  const count = document.getElementById('exchange-count');
+  if (!content) return;
+  const answers = new Map();
+  for (const entry of exchange) if (Number.isInteger(entry.replyTo)) answers.set(entry.replyTo, entry);
+  const asked = exchange.filter((entry) => !Number.isInteger(entry.replyTo));
+  if (count) count.textContent = String(asked.filter((entry) => entry.open).length);
+
+  clearChildren(content);
+  if (!asked.length) {
+    const empty = document.createElement('p');
+    empty.className = 'muted small';
+    empty.textContent = 'Every prompt you send here is also filed for the provider connected over MCP.';
+    content.append(empty);
+    return;
+  }
+  for (const entry of asked.slice(-6)) {
+    const row = document.createElement('div');
+    row.className = 'exchange-row';
+    const head = document.createElement('div');
+    head.className = 'eyebrow';
+    head.textContent = entry.open ? 'waiting for the provider' : 'answered';
+    const asked_text = document.createElement('p');
+    asked_text.className = 'small';
+    // Written through textContent: this is operator- and provider-supplied text, never markup.
+    asked_text.textContent = entry.message;
+    row.append(head, asked_text);
+    const answer = answers.get(entry.seq);
+    if (answer) {
+      const reply = document.createElement('p');
+      reply.className = 'small provider-answer';
+      reply.textContent = answer.message;
+      row.append(reply);
+    }
+    content.append(row);
+  }
 }
 
 function setBusy(next, label) {

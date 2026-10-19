@@ -1,0 +1,284 @@
+<!--
+  Concord's own interface, rendered inside an MCP host.
+
+  This is not app/index.html. That one is the loopback web client: it fetches /api/* from a local
+  HTTP server and authorizes with a session token. Neither exists here. An MCP app runs in a
+  sandboxed iframe with no reachable loopback server, so this client's entire backend is the host
+  itself — every action below is a tools/call sent over postMessage to whichever host rendered it,
+  which forwards it to the same five concord_* tools and the same kernel.
+
+  The point is ownership of the surface. Talking to Concord through a provider's chat box makes
+  the provider's UI primary and Concord a thing it calls. Here Concord presents its own interface,
+  and the model is on the other side of a tool boundary.
+-->
+<div id="root">
+  <header>
+    <div>
+      <span class="eyebrow">CONCORD</span>
+      <h1>Your tools, in one conversation.</h1>
+    </div>
+    <span id="mode" class="badge">connecting…</span>
+  </header>
+
+  <div id="error" class="error" hidden></div>
+
+  <section id="pending" class="card gated" hidden>
+    <div class="card-title">This needs your exact grant</div>
+    <div id="pending-body" class="mono"></div>
+    <button id="approve" class="primary">Approve this exact request</button>
+  </section>
+
+  <section id="plan" class="card" hidden>
+    <div class="card-title">Proposed plan</div>
+    <pre id="plan-body" class="mono"></pre>
+    <button id="execute">Execute it</button>
+  </section>
+
+  <main id="history" aria-live="polite"></main>
+
+  <section id="runs" class="card" hidden>
+    <div class="card-title">Recorded runs</div>
+    <div id="runs-body"></div>
+  </section>
+
+  <form id="composer">
+    <input id="message" autocomplete="off" placeholder="Ask Concord…" />
+    <button id="send" class="primary" type="submit">Send</button>
+  </form>
+</div>
+
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0a1410; color: #e7f2ec;
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #root { max-width: 860px; margin: 0 auto; padding: 20px 18px 28px; display: flex; flex-direction: column; gap: 14px; }
+  header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .eyebrow { font-size: 11px; letter-spacing: .14em; color: #8bdaa8; }
+  h1 { margin: 2px 0 0; font-size: 19px; font-weight: 600; }
+  .badge { flex: none; font-size: 12px; padding: 4px 10px; border: 1px solid #2c4538; border-radius: 999px; color: #dfcb9e; }
+  .card { border: 1px solid #2c4538; border-radius: 12px; padding: 12px 14px; background: #0d1a15; }
+  .card.gated { border-color: #d9bd7c; }
+  .card-title { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: #8bdaa8; margin-bottom: 8px; }
+  .gated .card-title { color: #e6cb8c; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12.5px;
+    white-space: pre-wrap; word-break: break-word; color: #cfe3d8; }
+  pre.mono { margin: 0; max-height: 220px; overflow: auto; }
+  main { display: flex; flex-direction: column; gap: 10px; }
+  .turn { border: 1px solid #1e3328; border-radius: 12px; padding: 10px 13px; background: #0c1813; }
+  .turn.user { background: #10231a; border-color: #2c4538; }
+  .who { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: #8bdaa8; margin-bottom: 4px; }
+  .turn.user .who { color: #dfcb9e; }
+  .body { white-space: pre-wrap; word-break: break-word; }
+  .receipt { margin-top: 6px; font-size: 11.5px; color: #93a79b; }
+  form { display: flex; gap: 8px; }
+  input { flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid #2c4538;
+    background: #0d1a15; color: inherit; font: inherit; }
+  input:focus { outline: 2px solid #8bdaa8; outline-offset: 1px; }
+  button { padding: 9px 14px; border-radius: 10px; border: 1px solid #2c4538; background: #12241b;
+    color: #e7f2ec; font: inherit; cursor: pointer; }
+  button.primary { background: #8bdaa8; color: #072018; border-color: #8bdaa8; font-weight: 600; }
+  button[disabled] { opacity: .5; cursor: default; }
+  .error { border: 1px solid #7a3b3b; background: #1d1010; color: #f3c2a4; border-radius: 10px; padding: 10px 13px; font-size: 13px; }
+  .run { display: flex; justify-content: space-between; gap: 10px; align-items: center; padding: 4px 0; font-size: 12.5px; }
+  .run code { color: #93a79b; }
+  .muted { color: #93a79b; font-size: 13px; }
+</style>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---- the host bridge -----------------------------------------------------------------
+  // An MCP app is itself an MCP client, speaking JSON-RPC to its host over postMessage. The
+  // host's origin is not knowable from in here, so '*' is the target: the host decides what it
+  // renders, and nothing secret is ever sent upward — only tool names and the text you typed.
+  const PROTOCOL = '2026-01-26';
+  const pending = new Map();
+  let nextId = 0;
+
+  function post(message) { window.parent.postMessage(message, '*'); }
+
+  function call(method, params) {
+    const id = ++nextId;
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      post({ jsonrpc: '2.0', id, method, params });
+    });
+  }
+
+  window.addEventListener('message', (event) => {
+    const message = event.data;
+    if (!message || message.jsonrpc !== '2.0') return;
+    if (Object.prototype.hasOwnProperty.call(message, 'id') && !message.method) {
+      const waiting = pending.get(message.id);
+      if (!waiting) return;
+      pending.delete(message.id);
+      if (message.error) waiting.reject(new Error(message.error.message || 'The host refused the call'));
+      else waiting.resolve(message.result);
+      return;
+    }
+    // The host hands the opening tool's own result straight to the view, so the first paint can
+    // show real state instead of an empty shell waiting on a round trip.
+    if (message.method === 'ui/notifications/tool-result') adopt(readContent(message.params));
+  });
+
+  // ---- talking to Concord --------------------------------------------------------------
+  function readContent(payload) {
+    const text = payload && payload.content && payload.content[0] && payload.content[0].text;
+    if (typeof text !== 'string') return null;
+    try { return JSON.parse(text); } catch { return null; }
+  }
+
+  async function concord(name, args) {
+    const result = await call('tools/call', { name, arguments: args || {} });
+    const body = readContent(result);
+    if (body && body.status === 'failed') throw new Error(body.code + ': ' + (body.message || 'refused'));
+    return body;
+  }
+
+  // ---- rendering -----------------------------------------------------------------------
+  const el = (id) => document.getElementById(id);
+  const text = (node, value) => { node.textContent = value == null ? '' : String(value); };
+
+  let busy = false;
+  function setBusy(value) {
+    busy = value;
+    for (const id of ['send', 'approve', 'execute']) {
+      const node = el(id);
+      if (node) node.disabled = value;
+    }
+  }
+
+  function fail(error) {
+    const node = el('error');
+    text(node, error && error.message ? error.message : String(error));
+    node.hidden = false;
+  }
+
+  function adopt(body) {
+    if (!body || !body.state) return;
+    render(body.state);
+    const problem = body.state.lastError;
+    el('error').hidden = !problem;
+    if (problem) text(el('error'), problem.code + (problem.taskId ? ' on task ' + problem.taskId : ''));
+  }
+
+  function render(state) {
+    text(el('mode'), state.mode || 'ready');
+
+    const history = el('history');
+    history.replaceChildren();
+    const turns = Array.isArray(state.history) ? state.history : [];
+    if (!turns.length) {
+      const empty = document.createElement('p');
+      empty.className = 'muted';
+      empty.textContent = 'Nothing yet. Every effect you ask for is proposed here before it runs.';
+      history.append(empty);
+    }
+    for (const turn of turns) {
+      const wrap = document.createElement('div');
+      wrap.className = 'turn' + (turn && turn.role === 'user' ? ' user' : '');
+      const who = document.createElement('div');
+      who.className = 'who';
+      who.textContent = turn && turn.role === 'user' ? 'you' : 'concord';
+      const body = document.createElement('div');
+      body.className = 'body';
+      // Every value below is written through textContent: a reply, a plan or a capability title
+      // is model- or source-derived text, and none of it may become markup in this page.
+      body.textContent = turn && typeof turn.content === 'string' ? turn.content : JSON.stringify(turn);
+      wrap.append(who, body);
+      if (turn && turn.execution && turn.execution.kind) {
+        const receipt = document.createElement('div');
+        receipt.className = 'receipt';
+        receipt.textContent = 'execution: ' + turn.execution.kind
+          + (turn.execution.planHash ? ' · plan ' + String(turn.execution.planHash).slice(0, 12) : '')
+          + (typeof turn.execution.runsAtCommit === 'number' ? ' · ' + turn.execution.runsAtCommit + ' runs' : '');
+        wrap.append(receipt);
+      }
+      history.append(wrap);
+    }
+
+    const gate = state.pending;
+    el('pending').hidden = !gate;
+    if (gate) {
+      text(el('pending-body'), gate.tool + '  (' + gate.effect + ' effect)\n' + String(gate.requestHash || ''));
+      el('approve').dataset.hash = gate.requestHash || '';
+    }
+
+    el('plan').hidden = !state.proposedPlan;
+    if (state.proposedPlan) text(el('plan-body'), JSON.stringify(state.proposedPlan, null, 2));
+
+    const runs = Array.isArray(state.runs) ? state.runs : [];
+    el('runs').hidden = runs.length === 0;
+    const list = el('runs-body');
+    list.replaceChildren();
+    for (const run of runs.slice(-8)) {
+      const row = document.createElement('div');
+      row.className = 'run';
+      const label = document.createElement('code');
+      label.textContent = String(run.id).slice(0, 16) + ' · ' + run.status;
+      const replay = document.createElement('button');
+      replay.textContent = 'Replay';
+      replay.addEventListener('click', () => guard(async () => {
+        const body = await concord('concord_replay', { runId: run.id });
+        adopt(body);
+        text(el('mode'), body && body.replay
+          ? (body.replay.verified ? 'replay verified' : 'replay did NOT verify')
+          : 'replayed');
+      }));
+      row.append(label, replay);
+      list.append(row);
+    }
+  }
+
+  async function guard(action) {
+    if (busy) return;
+    setBusy(true);
+    el('error').hidden = true;
+    try { await action(); }
+    catch (error) { fail(error); }
+    finally { setBusy(false); }
+  }
+
+  // ---- wiring --------------------------------------------------------------------------
+  el('composer').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const input = el('message');
+    const message = input.value.trim();
+    if (!message) return;
+    guard(async () => {
+      input.value = '';
+      adopt(await concord('concord_chat', { message }));
+    });
+  });
+
+  el('approve').addEventListener('click', () => guard(async () => {
+    const requestHash = el('approve').dataset.hash;
+    if (requestHash) adopt(await concord('concord_approve', { requestHash }));
+  }));
+
+  el('execute').addEventListener('click', () => guard(async () => {
+    adopt(await concord('concord_execute_plan', {}));
+  }));
+
+  // ---- handshake -----------------------------------------------------------------------
+  (async () => {
+    try {
+      await call('ui/initialize', {
+        protocolVersion: PROTOCOL,
+        capabilities: {},
+        clientInfo: { name: 'concord-app', version: '1.0.0' },
+      });
+      post({ jsonrpc: '2.0', method: 'ui/notifications/initialized', params: {} });
+      // Read the current state rather than assume an empty one: this session may already have a
+      // history, a pending grant, or runs on the ledger from another surface.
+      adopt(await concord('concord_chat_state', {}));
+      setBusy(false);
+    } catch (error) {
+      fail(error);
+      text(el('mode'), 'no host');
+    }
+  })();
+})();
+</script>

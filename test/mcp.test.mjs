@@ -8,13 +8,16 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parseJson, digest } from '../src/value.mjs';
 import { createMcpServer } from '../src/mcp.mjs';
+import { fileMessage } from '../src/peer.mjs';
 import { loadSourceLock } from '../src/sources.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const catalog = await loadSourceLock(path.join(root, 'sources.lock.json'));
 
 function startMcpServer(workspaceRoot) {
-  const child = spawn(process.execPath, [path.join(root, 'src', 'mcp.mjs'), '--workspace', workspaceRoot], { stdio: ['pipe', 'pipe', 'pipe'], cwd: root });
+  // Each session gets its own exchange directory. Sharing the live one would make the pushed
+  // tool description depend on whatever the operator happens to have asked.
+  const child = spawn(process.execPath, [path.join(root, 'src', 'mcp.mjs'), '--workspace', workspaceRoot, '--mailbox', path.join(workspaceRoot, 'exchange')], { stdio: ['pipe', 'pipe', 'pipe'], cwd: root });
   const stdoutLines = [];
   const pending = new Map();
   let buffered = '';
@@ -78,7 +81,12 @@ function assertStdoutIsPureJsonRpc(session) {
   for (const line of session.stdoutLines) {
     const message = parseJson(line);
     assert.equal(message.jsonrpc, '2.0');
-    assert.ok(Object.hasOwn(message, 'id'));
+    // A server-initiated notification is a well-formed envelope with a method and no id. The
+    // server emits one when the exchange changes, which is how it reaches an idle client at all.
+    if (!Object.hasOwn(message, 'id')) {
+      assert.equal(typeof message.method, 'string');
+      continue;
+    }
     assert.notEqual(Object.hasOwn(message, 'result'), Object.hasOwn(message, 'error'));
   }
 }
@@ -102,7 +110,9 @@ test('handshake negotiates the protocol version and never responds to a notifica
     assert.equal(init.result.serverInfo.name, 'concord');
     assert.ok(init.result.capabilities.tools);
     assert.ok(init.result.capabilities.resources);
-    assert.equal(init.result.capabilities.tools.listChanged, false);
+    // Declared true because it is true: the answering tool's description changes as questions
+    // arrive, and a client told the list never changes has no reason to re-read it.
+    assert.equal(init.result.capabilities.tools.listChanged, true);
 
     const before = session.stdoutLines.length;
     session.notify('notifications/initialized');
@@ -243,11 +253,25 @@ test('resources expose all reviewed instruction modules with digests matching th
   await withSession('concord-mcp-resources-', async (session) => {
     await handshake(session);
     const list = await session.request('resources/list');
-    assert.equal(list.result.resources.length, manifest.modules.length);
-    for (const resource of list.result.resources) {
+    // Filtered by kind rather than counted whole: the server also publishes its app surface as a
+    // ui:// resource, and a bare length check would make "a resource of another kind exists" look
+    // like "an instruction module is missing".
+    const instructions = list.result.resources.filter((resource) => resource.uri.startsWith('concord://instructions/'));
+    assert.equal(instructions.length, manifest.modules.length);
+    for (const resource of instructions) {
       assert.match(resource.uri, /^concord:\/\/instructions\/[a-z0-9-]+$/);
       assert.equal(resource.mimeType, 'text/markdown');
     }
+
+    // The app surface, at exactly the MIME type the MCP Apps extension requires.
+    const apps = list.result.resources.filter((resource) => resource.uri.startsWith('ui://'));
+    assert.deepEqual(apps.map((resource) => resource.uri), ['ui://concord/chat']);
+    assert.equal(apps[0].mimeType, 'text/html;profile=mcp-app');
+    const app = await session.request('resources/read', { uri: 'ui://concord/chat' });
+    assert.equal(app.result.contents[0].mimeType, 'text/html;profile=mcp-app');
+    // Self-contained: a host renders this in a sandbox, so a reference it would have to fetch is
+    // a reference that silently does not load.
+    assert.equal(/\bsrc=|\bhref=/.test(app.result.contents[0].text), false);
     const [first] = manifest.modules;
     const read = await session.request('resources/read', { uri: `concord://instructions/${first.sourceId}` });
     const text = read.result.contents[0].text;
@@ -287,4 +311,47 @@ test('createMcpServer rejects a dotted/underscored tool-name collision at constr
     () => createMcpServer({ registry, policy, sourceLock: catalog, workspaceRoot: root, harness: stubHarness, instructionModules: [] }),
     (error) => error.code === 'MCP_CONFIG',
   );
+});
+
+test('a question asked in Concord reaches an idle client, unprompted, in a tool description', async () => {
+  await withSession('concord-mcp-push-', async (session, temp) => {
+    await handshake(session);
+    const exchange = path.join(temp, 'exchange');
+
+    const before = (await session.request('tools/list')).result.tools.find((tool) => tool.name === 'concord_answer');
+    assert.ok(before, 'the answering tool is published whenever an exchange is configured');
+    assert.match(before.description, /Nothing is waiting/);
+
+    // The operator types in Concord's own chat box. This client asks for nothing.
+    const asked = fileMessage(exchange, { message: 'Does this reach you with nobody polling?', audience: 'agent' });
+
+    // MCP gives a server no way to put text in a client's model context unless that client
+    // declares sampling, and neither Anthropic client does. A tool description is model-visible
+    // text, and listChanged invites the client to re-read it: that is the push.
+    const deadline = Date.now() + 5000;
+    let notified = false;
+    while (!notified && Date.now() < deadline) {
+      notified = session.stdoutLines.some((line) => parseJson(line).method === 'notifications/tools/list_changed');
+      if (!notified) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(notified, true, 'the server speaks first when the exchange changes');
+
+    const after = (await session.request('tools/list')).result.tools.find((tool) => tool.name === 'concord_answer');
+    assert.notEqual(after.description, before.description);
+    // Carrying the question itself, not merely the fact that one exists: a notification without
+    // content is an alarm, not a message.
+    assert.match(after.description, /Does this reach you with nobody polling\?/);
+    assert.match(after.description, new RegExp('#' + asked.seq));
+
+    // And the same tool is how the agent answers, which closes the question.
+    const answered = await session.request('tools/call', { name: 'concord_answer', arguments: { seq: asked.seq, answer: 'It did.' } });
+    assert.equal(JSON.parse(answered.result.content[0].text).answered, asked.seq);
+    const cleared = (await session.request('tools/list')).result.tools.find((tool) => tool.name === 'concord_answer');
+    assert.match(cleared.description, /Nothing is waiting/);
+
+    for (const bad of [{ seq: 1 }, { answer: 'x' }, { seq: 99999, answer: 'x' }]) {
+      const refused = await session.request('tools/call', { name: 'concord_answer', arguments: bad });
+      assert.ok(refused.error || refused.result.isError, 'an answer to nothing is refused');
+    }
+  });
 });

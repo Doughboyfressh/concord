@@ -109,6 +109,14 @@ export function createServer({ harness, status = {}, host = '127.0.0.1', port = 
         if (request.method !== 'GET') throw new HttpError(405, 'METHOD', 'Use GET for chat state.');
         return json(response, 200, { state: publicState(await harness.snapshot()), status: publicStatus, token });
       }
+      if (request.url === '/api/exchange') {
+        // What Concord asked the connected provider, and what came back. Read-only, and inside
+        // the same host/origin checks as everything else. A harness with no mailbox wired reports
+        // an empty exchange rather than failing: not having a provider connected is a normal state.
+        if (request.method !== 'GET') throw new HttpError(405, 'METHOD', 'Use GET for the exchange.');
+        const messages = typeof harness.exchange === 'function' ? await harness.exchange() : [];
+        return json(response, 200, { messages, token });
+      }
       const asset = assets.get(request.url);
       if (asset) {
         if (!['GET', 'HEAD'].includes(request.method)) throw new HttpError(405, 'METHOD', 'Use GET or HEAD for app assets.');

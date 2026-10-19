@@ -409,6 +409,7 @@ const MAX_MESSAGE = 65_536;
 const MAX_SUBJECT = 200;
 const MAX_MESSAGES = 10_000;
 const MAX_FILE_BYTES = 1_048_576;
+const NEWLINE = String.fromCharCode(10);
 const FILE_PATTERN = /^(\d{6})-[0-9a-f]{12}\.json$/;
 
 function mailboxFiles(directory) {
@@ -422,6 +423,57 @@ function mailboxFiles(directory) {
   return entries.filter((name) => FILE_PATTERN.test(name)).sort();
 }
 
+/** Every letter currently in the mailbox, in order. A letter that cannot be read is skipped. */
+function loadRecords(directory) {
+  const out = [];
+  for (const name of mailboxFiles(directory)) {
+    const file = path.join(directory, name);
+    try {
+      if (fs.statSync(file).size > MAX_FILE_BYTES) continue;
+      out.push(parseJson(fs.readFileSync(file, 'utf8')));
+    } catch { /* unreadable or malformed: skipped rather than failing the whole collection */ }
+  }
+  return out;
+}
+
+/**
+ * File one message. Exported because Concord's own chat layer files the operator's prompt here
+ * on every turn, and a second implementation of the same record format is how two writers start
+ * disagreeing about what a letter looks like.
+ */
+export function fileMessage(directory, { message, subject, audience = 'agent', replyTo } = {}) {
+  if (typeof message !== 'string' || !message || message.length > MAX_MESSAGE) fail('PEER_MAILBOX', 'A message needs text within the bound');
+  // Counted and numbered from the file names, not from what parses. A letter nobody can read is
+  // still a letter taking up a slot, and a sequence that skipped it would collide with its name.
+  const names = mailboxFiles(directory);
+  if (names.length >= MAX_MESSAGES) fail('PEER_MAILBOX', 'The mailbox holds as many messages as the bound permits', { messages: names.length });
+  const records = loadRecords(directory);
+  if (replyTo !== undefined && !records.some((record) => record.seq === replyTo)) {
+    fail('PEER_MAILBOX', 'There is no message with that sequence to reply to', { replyTo });
+  }
+  const seq = (names.length ? Number(names[names.length - 1].slice(0, 6)) : 0) + 1;
+  const record = {
+    seq, for: audience,
+    ...(subject === undefined ? {} : { subject }),
+    ...(replyTo === undefined ? {} : { replyTo }),
+    message,
+  };
+  const id = String(seq).padStart(6, '0') + '-' + digest(record).slice(0, 12);
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, id + '.json'), canonical(record) + NEWLINE, { flag: 'wx' });
+  return { seq, id, record };
+}
+
+/** Every letter, each marked with whether anything replies to it. */
+export function readMailbox(directory) {
+  const records = loadRecords(directory);
+  const answered = new Set(records.map((record) => record.replyTo).filter((seq) => Number.isInteger(seq)));
+  return records.map((record) => ({
+    ...record,
+    open: record.replyTo === undefined && !answered.has(record.seq),
+  }));
+}
+
 export function makeMailboxTools({ directory } = {}) {
   if (typeof directory !== 'string' || !path.isAbsolute(directory)) fail('PEER_CONFIG', 'The mailbox needs an absolute directory');
 
@@ -432,79 +484,77 @@ export function makeMailboxTools({ directory } = {}) {
       // "for the agent" and "for the operator" are different audiences and a letter that does
       // not say which it is will be read by the wrong one.
       name: 'peer.post', version: '1.0.0', effect: 'write',
-      outputKeys: ['seq', 'id', 'for', 'bytes', 'limitations'],
+      outputKeys: ['seq', 'id', 'for', 'replyTo', 'bytes', 'limitations'],
       inputSchema: {
         type: 'object', additionalProperties: false, required: ['message'],
         properties: {
           message: { type: 'string', minLength: 1, maxLength: MAX_MESSAGE },
           subject: { type: 'string', maxLength: MAX_SUBJECT },
           for: { type: 'string', enum: ['agent', 'operator'] },
+          // Naming what this answers is what turns a pile of letters into an exchange. Without
+          // it a reply is just another message and nobody can tell which question is still open.
+          replyTo: { type: 'integer', minimum: 1, maximum: MAX_MESSAGES },
         },
       },
       execute(input) {
-        const existing = mailboxFiles(directory);
-        if (existing.length >= MAX_MESSAGES) fail('PEER_MAILBOX', 'The mailbox holds as many messages as the bound permits', { messages: existing.length });
-        // The sequence comes from what is already in the directory, not from a clock, so two
-        // readers of the same mailbox see the same order and a run stays reproducible.
-        const last = existing.length ? Number(existing[existing.length - 1].slice(0, 6)) : 0;
-        const seq = last + 1;
-        const record = {
-          seq,
-          for: input.for ?? 'agent',
-          ...(input.subject === undefined ? {} : { subject: input.subject }),
-          message: input.message,
-        };
-        const body = canonical(record);
-        const id = String(seq).padStart(6, '0') + '-' + digest(record).slice(0, 12);
-        fs.mkdirSync(directory, { recursive: true });
-        // `wx` rather than a plain write: an identical message posted twice is two letters, and
-        // a collision on the content digest at the same sequence would otherwise destroy one.
-        fs.writeFileSync(path.join(directory, id + '.json'), body + '\n', { flag: 'wx' });
+        const filed = fileMessage(directory, {
+          message: input.message, subject: input.subject,
+          audience: input.for ?? 'agent', replyTo: input.replyTo,
+        });
         return {
-          seq, id, for: record.for, bytes: Buffer.byteLength(input.message),
+          seq: filed.seq, id: filed.id, for: filed.record.for, replyTo: filed.record.replyTo ?? null,
+          bytes: Buffer.byteLength(input.message),
           limitations: ['A mailbox notifies nobody; this records that the message was filed, not that anyone has read it'],
         };
       },
     },
     {
       name: 'peer.inbox', version: '1.0.0', effect: 'read',
-      outputKeys: ['messages', 'returned', 'total', 'latestSeq', 'limitations'],
+      outputKeys: ['messages', 'returned', 'total', 'latestSeq', 'openQuestions', 'limitations'],
       inputSchema: {
         type: 'object', additionalProperties: false,
         properties: {
           after: { type: 'integer', minimum: 0, maximum: MAX_MESSAGES },
           limit: { type: 'integer', minimum: 1, maximum: 100 },
           for: { type: 'string', enum: ['agent', 'operator'] },
+          // The whole point of the exchange: show me only what is still waiting on me.
+          unanswered: { type: 'boolean' },
         },
       },
       execute(input) {
-        const files = mailboxFiles(directory);
+        const records = loadRecords(directory);
+        const answered = new Set(records.map((record) => record.replyTo).filter((seq) => Number.isInteger(seq)));
+        // total counts what is on disk; messages carry what could be read. A gap between them is
+        // itself the report that something in the mailbox is damaged.
+        const onDisk = mailboxFiles(directory).length;
         const after = input.after ?? 0;
         const limit = input.limit ?? 20;
         const messages = [];
         let latestSeq = 0;
-        for (const name of files) {
-          const seq = Number(name.slice(0, 6));
-          latestSeq = Math.max(latestSeq, seq);
-          if (seq <= after || messages.length >= limit) continue;
-          const file = path.join(directory, name);
-          let record;
-          try {
-            if (fs.statSync(file).size > MAX_FILE_BYTES) continue;
-            record = parseJson(fs.readFileSync(file, 'utf8'));
-          } catch { continue; }
+        let openQuestions = 0;
+
+        for (const record of records) {
+          latestSeq = Math.max(latestSeq, record.seq);
+          // A question is open when nothing replies to it. A reply is never itself a question.
+          const open = record.replyTo === undefined && !answered.has(record.seq);
+          if (open) openQuestions += 1;
+          if (record.seq <= after) continue;
           if (input.for !== undefined && record.for !== input.for) continue;
-          messages.push(record);
+          if (input.unanswered === true && !open) continue;
+          if (messages.length >= limit) continue;
+          messages.push({ ...record, answered: !open && record.replyTo === undefined });
         }
+
         return {
           messages,
           returned: messages.length,
-          total: files.length,
+          total: onDisk,
           latestSeq,
+          openQuestions,
           // Reading does not remove: the same letter is returned again unless the caller pages
           // past it, because a tool that quietly consumed evidence would make a lost message
           // indistinguishable from one that was never sent.
-          limitations: ['Reading leaves the mailbox unchanged; page with "after" using latestSeq rather than expecting messages to be consumed'],
+          limitations: ['Reading leaves the mailbox unchanged; page with "after" using latestSeq, or ask for unanswered only'],
         };
       },
     },
