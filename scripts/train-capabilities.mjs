@@ -16,6 +16,7 @@ import { makeForeignTools } from '../src/foreign.mjs';
 import { makeMailboxTools } from '../src/peer.mjs';
 import { makeSkillStoreTools } from '../src/skillstore.mjs';
 import { makeGovernanceTools } from '../src/governance.mjs';
+import { makeInstructionTools } from '../src/instructions.mjs';
 import { exercises } from './train-exercises.mjs';
 import { updateInstructions, verifyCorpus } from './train-consolidate.mjs';
 import { analyseGaps, renderGaps, observeAssertedKeys } from './train-gaps.mjs';
@@ -55,6 +56,7 @@ async function buildRegistry() {
     ...makeForeignTools({ schemaVersion: 1, sources: [] }, {}),
     ...makeMailboxTools({ directory: path.join(root, 'runs', 'peer-mailbox') }),
     ...makeSkillStoreTools(inventory),
+    ...makeInstructionTools({ directory: path.join(root, 'instructions') }),
   ];
   const registry = new Map(descriptors.map((tool) => [tool.name, tool]));
   const runtimeFiles = fs.readdirSync(path.join(root, 'src')).filter((f) => f.endsWith('.mjs')).map((f) => 'src/' + f).sort();

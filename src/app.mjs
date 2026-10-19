@@ -15,6 +15,7 @@ import { makeReaderTools } from './readers.mjs';
 import { makeForeignTools } from './foreign.mjs';
 import { makeMailboxTools, fileMessage, readMailbox } from './peer.mjs';
 import { makeSkillStoreTools } from './skillstore.mjs';
+import { makeInstructionTools } from './instructions.mjs';
 import { makeGovernanceTools } from './governance.mjs';
 import { buildChatContext } from './chat-context.mjs';
 import { createChatHarness } from './chat.mjs';
@@ -92,6 +93,7 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
     ...makeForeignTools(foreignManifest, flags.foreign ? readJson(flags.foreign) : {}),
     ...makeMailboxTools({ directory: mailboxDir }),
     ...makeSkillStoreTools(inventory),
+    ...makeInstructionTools({ directory: path.join(root, 'instructions') }),
   ];
   const registry = new Map(descriptors.map(d => [d.name, d]));
   if (registry.size !== descriptors.length) throw new HarnessError('CHAT_CONFIG', 'Duplicate tool name');

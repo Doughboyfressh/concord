@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { createClientChannel, makePeerTools } from '../src/peer.mjs';
 import { makeSourceTools, loadSourceLock } from '../src/sources.mjs';
 import { makeReverseTools } from '../src/reverse.mjs';
+import { makeInstructionTools, splitTrained } from '../src/instructions.mjs';
+import { buildChatContext } from '../src/chat-context.mjs';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -372,6 +374,91 @@ export function sessionExercises() {
         throw last ?? new Error('the capture never raced in twelve attempts');
       },
       lesson: 'A skill file whose timestamps change while it is being captured is refused SOURCE_CHANGED, and the check runs twice: once between stating the path and stating the open handle, and again after the bytes are read, comparing the handle against a fresh stat of the path. The handle stays pinned to the inode it opened while the path can be replaced underneath it, so those two views disagreeing is the only evidence that a file moved mid-capture. A snapshot is a claim that these exact bytes were on disk together, and a file that changed halfway through would make that claim false.',
+    },
+
+    /**
+     * Compaction and retrieval, checked as one thing rather than two.
+     *
+     * A declared omission is only honest if the omitted thing can still be reached. These two
+     * halves were written in separate commits and could drift apart silently — the selector could
+     * change how it builds an id and the store would simply stop finding anything, with both sides
+     * looking correct in isolation. So the property asserted is the round trip: every id a real
+     * turn declares as omitted resolves to a real lesson.
+     */
+    {
+      family: 'catalog', tool: 'instructions.lesson',
+      call: async () => {
+        const directory = path.join(root, 'instructions');
+        const catalog = await loadSourceLock(path.join(root, 'sources.lock.json'));
+        const inventory = parseJson(fs.readFileSync(path.join(root, 'capabilities.lock.json'), 'utf8'));
+        const registry = new Map(makeSourceTools(catalog).map((tool) => [tool.name, tool]));
+        const context = buildChatContext({
+          message: 'how do I compare two wasm interfaces where one side is partial',
+          history: [], sourceLock: catalog, inventory, registry, instructionRoot: directory,
+        });
+        const store = makeInstructionTools({ directory })[0];
+        const asked = context.trained.omittedIds.slice(0, 64);
+        const fetched = store.execute({ ids: asked }, { workspaceRoot: root, policy: toolPolicy });
+        // Derived independently, so the assertion below compares the fetched text against the
+        // module rather than against the store's own view of it.
+        const expected = new Map();
+        for (const file of fs.readdirSync(directory).filter((name) => name.endsWith('.md'))) {
+          for (const lesson of splitTrained(file.replace(/\.md$/, ''), fs.readFileSync(path.join(directory, file), 'utf8')).lessons) {
+            expected.set(lesson.id, lesson.text);
+          }
+        }
+        return { declared: context.trained, fetched, asked, expected: [...expected] };
+      },
+      expect: ({ declared, fetched, asked, expected }) => {
+        const texts = new Map(expected);
+        return declared.omittedCount > 0 && declared.omittedIds.length === declared.omittedCount
+          // Unique ids, which is the assertion that matters. The first version of this id was the
+          // source and tool name alone, so several lessons for one tool collided: the store kept
+          // whichever it parsed first and returned it for every id in the family. Nothing was ever
+          // reported missing, so only comparing the text exposes it.
+          && new Set(declared.omittedIds).size === declared.omittedIds.length
+          && fetched.missing.length === 0 && fetched.returned === asked.length
+          && fetched.lessons.every((lesson) => lesson.text === texts.get(lesson.id));
+      },
+      lesson: 'Every lesson a turn declares as omitted can be fetched back by the id it was declared under, and the text that comes back is the text that was dropped — not merely some lesson for the same tool. Ids are content-addressed for exactly that reason: a tool may have several lessons, so naming one by its tool alone collided, and the store answered every id in the family with whichever it parsed first while reporting nothing missing. The selecting half and the retrieving half share one parser, so they cannot disagree about what an id means.',
+    },
+    {
+      family: 'catalog', tool: 'instructions.lesson',
+      call: () => {
+        const directory = path.join(root, 'instructions');
+        // Derived, never pinned. An id carries a digest of its lesson's text, so writing one into
+        // an exercise would make it stale the next time that lesson is reworded — which is exactly
+        // what happened the first time this was written, and the round reported it.
+        const [real] = splitTrained('rea', fs.readFileSync(path.join(directory, 'rea.md'), 'utf8')).lessons;
+        return makeInstructionTools({ directory })[0]
+          .execute({ ids: [real.id, 'rea:not.a.real.tool@000000000000'] }, { workspaceRoot: root, policy: toolPolicy });
+      },
+      expect: (r) => r.requested === 2 && r.returned === 1 && r.missing.length === 1
+        && r.missing[0] === 'rea:not.a.real.tool@000000000000' && r.lessons[0].sourceId === 'rea'
+        && r.limitations.some((note) => /grants no capability/.test(note)),
+      lesson: 'An id that resolves to nothing is reported in `missing` rather than raised as a refusal, so a batch fetch returns the lessons it found and names the ones it did not. A caller is usually working from an omission record a turn or two old, and failing the whole request because one id went stale would be less useful than saying which. The result also states plainly that a lesson grants no capability: it is an observation about behaviour, not an approval.',
+    },
+    {
+      family: 'catalog', tool: 'instructions.factory', expectThrow: 'INSTRUCTION_CONFIG',
+      call: () => makeInstructionTools({ directory: 'instructions' }),
+      lesson: 'The instruction store refuses INSTRUCTION_CONFIG for a relative directory, the same rule the mailbox and the workspace root follow. A location that depends on the current working directory is not a location, and this store decides which text is served as reviewed instruction.',
+    },
+    {
+      family: 'catalog', tool: 'instructions.lesson', expectThrow: 'INSTRUCTION_STORE', workspace: 'temp',
+      call: ({ workspaceRoot }) => {
+        // A module whose bytes no longer match the digest the manifest recorded for it.
+        const directory = fs.mkdtempSync(path.join(workspaceRoot, 'tampered-instructions-'));
+        const body = '# rea\n\nReviewed text.\n\n<!-- trained:begin -->\n- `artifact.dex` — a proven lesson.\n<!-- trained:end -->\n';
+        fs.writeFileSync(path.join(directory, 'rea.md'), body);
+        const recorded = createHash('sha256').update(Buffer.from(body)).digest('hex');
+        fs.writeFileSync(path.join(directory, 'manifest.json'), JSON.stringify({
+          schemaVersion: 1, modules: [{ sourceId: 'rea', file: 'rea.md', sha256: recorded, bytes: Buffer.byteLength(body) }],
+        }));
+        // Edited after the digest was recorded, which is exactly the case the check exists for.
+        fs.writeFileSync(path.join(directory, 'rea.md'), body.replace('a proven lesson', 'something nobody reviewed'));
+        return makeInstructionTools({ directory })[0].execute({ ids: ['rea:artifact.dex'] }, { workspaceRoot, policy: toolPolicy });
+      },
+      lesson: 'The store verifies every module against its manifest digest before returning any text, and refuses INSTRUCTION_STORE when they disagree. This is the check that keeps retrieval from being the weaker of two routes to the same bytes: the turn context already verifies digests, so a retrieval path that did not would be a way to read instruction text no reviewer signed.',
     },
 
     // ---- the filesystem catch-all, where a read can actually be denied ------------------

@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { canonical, clone, HarnessError } from './value.mjs';
 import { normalizePolicy } from './engine.mjs';
 import { boundedRecords, boundedValue, boundedByRelevance } from './chat-data.mjs';
+import { splitTrained } from './instructions.mjs';
 
 const MAX_INSTRUCTION_BYTES = 65536;
 const MAX_MANIFEST_BYTES = 65536;
@@ -27,28 +28,9 @@ const TRAINED_BEGIN = '<!-- trained:begin -->';
 const TRAINED_END = '<!-- trained:end -->';
 const TRAINED_BUDGET_BYTES = 12288;
 
-/**
- * Split a module into its reviewed prose and its individually-addressable trained lessons.
- *
- * Each lesson keeps the tool name it opens with as its id, so an omitted lesson can be named in
- * the omission record rather than merely counted.
- */
-function splitTrained(sourceId, text) {
-  const begin = text.indexOf(TRAINED_BEGIN);
-  const end = text.indexOf(TRAINED_END);
-  if (begin < 0 || end < begin) return { prose: text, preamble: '', lessons: [] };
-  const section = text.slice(begin + TRAINED_BEGIN.length, end);
-  const prose = text.slice(0, begin) + text.slice(end + TRAINED_END.length);
-  const lines = section.split('\n');
-  const lessons = [];
-  const preamble = [];
-  for (const line of lines) {
-    const match = /^- `([^`]+)`/.exec(line);
-    if (match) lessons.push({ id: `${sourceId}:${match[1]}`, text: line });
-    else if (line.trim()) preamble.push(line);
-  }
-  return { prose, preamble: preamble.join('\n'), lessons };
-}
+// splitTrained lives in instructions.mjs, with the tool that fetches omitted lessons back. One
+// place knows the section's format, so the selecting half and the retrieving half cannot drift
+// into disagreeing about what a lesson id means.
 
 function sha256(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
 
@@ -137,9 +119,21 @@ export function buildChatContext({ message, history, observations = [], proposed
     const { prose, preamble, lessons } = split.get(module.sourceId);
     const kept = lessons.filter((lesson) => keptLessons.has(lesson.id));
     if (!lessons.length) return `## ${module.sourceId}\n${prose}`;
-    const dropped = lessons.length - kept.length;
-    const note = dropped
-      ? `\n(${dropped} further proven lesson${dropped === 1 ? '' : 's'} for this source were not selected for this turn.)`
+    /**
+     * An omission the model can act on, not just be told about.
+     *
+     * The ids are listed because they are the only actionable part: `instructions.lesson` takes
+     * exactly these, and without them the model would have to guess ids to ask for, which is how
+     * a retrieval path turns into a source of invented identifiers. Listing is bounded for the
+     * same reason the lessons are — a module with forty omissions must not spend the budget it
+     * just saved on naming them — and the count is always stated even when the list is cut.
+     */
+    const omittedHere = lessons.filter((lesson) => !keptLessons.has(lesson.id)).map((lesson) => lesson.id);
+    const shown = omittedHere.slice(0, 12);
+    const note = omittedHere.length
+      ? `\n(${omittedHere.length} further proven lesson${omittedHere.length === 1 ? '' : 's'} for this source were not`
+        + ` selected for this turn. Fetch any of them with the instructions.lesson tool, by id:`
+        + ` ${shown.join(', ')}${omittedHere.length > shown.length ? `, and ${omittedHere.length - shown.length} more` : ''}.)`
       : '';
     const section = kept.length
       ? `${TRAINED_BEGIN}\n${preamble}\n${kept.map((lesson) => lesson.text).join('\n')}${note}\n${TRAINED_END}`
