@@ -313,6 +313,67 @@ export function sessionExercises() {
       lesson: 'A value filling an argv template slot may not begin with a dash, and is refused REVERSE_INPUT naming the slot. Argv comes only from a reviewed template, and a slot value that looks like a flag is how a path turns into an option the reviewer never approved — so it is rejected while the command line is being built, before any process exists.',
     },
 
+    /**
+     * The race the capture checks exist to catch, induced rather than waited for.
+     *
+     * snapshotFile stats the path, opens it, stats the handle, reads, then stats both the handle
+     * and the path again. The handle's view is pinned to the inode it opened while the path can be
+     * rewritten underneath it, and sameFile compares mtime and ctime as well as identity and size —
+     * so touching a file during the capture is enough to be caught.
+     *
+     * Reliability came from the shape of the fixture rather than from luck. One 64 KiB file hit the
+     * race 17 times in 20, which is exactly the flakiness that makes an exercise worse than none.
+     * Twelve files hit it 25 times out of 25, because each file is its own capture window and the
+     * toucher only has to land inside one of them. A file large enough to lengthen the window does
+     * not help: anything over the bounded read size is refused OUTPUT_LIMIT before the race begins.
+     * The retry below is insurance on a machine faster or slower than this one, and in measurement
+     * every run succeeded on its first attempt.
+     */
+    {
+      family: 'catalog', tool: 'skills.snapshot', expectThrow: 'SOURCE_CHANGED', workspace: 'temp',
+      call: async ({ workspaceRoot }) => {
+        const skill = path.join(workspaceRoot, 'rewritten-skill');
+        const build = () => {
+          fs.rmSync(skill, { recursive: true, force: true });
+          fs.mkdirSync(skill, { recursive: true });
+          const files = [path.join(skill, 'SKILL.md')];
+          fs.writeFileSync(files[0],
+            '---\nname: rewritten-skill\ndescription: A skill rewritten while it is being captured.\n---\n\n# Rewritten\n\n'
+            + 'word '.repeat(3200));
+          for (let index = 1; index < 12; index += 1) {
+            const part = path.join(skill, 'part-' + index + '.md');
+            fs.writeFileSync(part, '# part ' + index + '\n' + 'word '.repeat(3200));
+            files.push(part);
+          }
+          return files;
+        };
+
+        const { tools, sourceId } = await sourceTools();
+        let last = null;
+        for (let attempt = 0; attempt < 12; attempt += 1) {
+          const files = build();
+          const touching = setInterval(() => {
+            const now = new Date();
+            for (const file of files) {
+              try { fs.utimesSync(file, now, now); } catch { /* momentarily unavailable mid-capture */ }
+            }
+          }, 1);
+          try {
+            await tools.get('skills.snapshot').execute({ path: 'rewritten-skill', sourceId }, { workspaceRoot, policy: toolPolicy });
+          } catch (error) {
+            last = error;
+            if (error?.code === 'SOURCE_CHANGED') throw error;
+          } finally {
+            clearInterval(touching);
+          }
+        }
+        // Twelve clean captures in a row would mean the race never happened, which is a finding
+        // about the fixture rather than a passing exercise — so say that instead of staying quiet.
+        throw last ?? new Error('the capture never raced in twelve attempts');
+      },
+      lesson: 'A skill file whose timestamps change while it is being captured is refused SOURCE_CHANGED, and the check runs twice: once between stating the path and stating the open handle, and again after the bytes are read, comparing the handle against a fresh stat of the path. The handle stays pinned to the inode it opened while the path can be replaced underneath it, so those two views disagreeing is the only evidence that a file moved mid-capture. A snapshot is a claim that these exact bytes were on disk together, and a file that changed halfway through would make that claim false.',
+    },
+
     // ---- the filesystem catch-all, where a read can actually be denied ------------------
     ...(CAN_DENY_READ ? [{
       family: 'catalog', tool: 'skills.snapshot', expectThrow: 'SOURCE_READ_FAILED', workspace: 'temp',
