@@ -44,7 +44,7 @@ export function writeExercises() {
   return [
     {
       family: 'memory', tool: 'memory.promote', expectCode: 'OUTPUT_LIMIT',
-      grant: true, workspace: 'temp', maxOutputBytes: PROMOTE_EXACT_BUDGET,
+      grant: true, workspace: 'temp', narrow: { maxOutputBytes: PROMOTE_EXACT_BUDGET },
       plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'memory.promote', input: PROMOTE_DRAFT }] },
       lesson: 'memory.promote refuses OUTPUT_LIMIT when writing the candidate would exceed the output budget, and this is reachable at exactly one budget: the value equal to the canonicalised input. A byte below it the engine rejects the input as INPUT_LIMIT before the tool runs, and a byte above it the write fits, so the two bounds meet without leaving a gap where an oversized write could slip through. The same guard inside files.write cannot be reached from any plan at all, because there the input carries the content plus a wrapper of key names and so always trips the input bound strictly earlier.',
     },

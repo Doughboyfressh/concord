@@ -72,6 +72,29 @@ async function buildRegistry() {
 }
 
 /**
+ * A policy an exercise may ask for, narrowed and never widened.
+ *
+ * Needed because some bounds are only observable at a particular budget, and some refusals only
+ * when an effect or a tool is absent from the allow lists. Every field is clamped against the
+ * round's own policy rather than taken on trust: an exercise that could raise its own limits would
+ * be granting itself authority, which is the single thing a policy must never permit its subject
+ * to do. Lists intersect, numbers take the minimum, and anything unrecognised is ignored.
+ */
+function narrowPolicy(policy, narrow) {
+  if (!narrow || typeof narrow !== 'object') return policy;
+  const next = { ...policy };
+  for (const key of ['allowedEffects', 'allowedTools', 'allowedOrigins']) {
+    if (!Array.isArray(narrow[key])) continue;
+    const allowed = new Set(policy[key]);
+    next[key] = narrow[key].filter((value) => allowed.has(value));
+  }
+  for (const key of ['maxOutputBytes', 'maxTasks', 'maxJournalBytes', 'timeoutMs']) {
+    if (Number.isInteger(narrow[key])) next[key] = Math.min(narrow[key], policy[key]);
+  }
+  return next;
+}
+
+/**
  * Run one plan, granting exactly the effects this exercise expects.
  *
  * A blocked run is re-attempted with that precise request hash, which is the approval loop the
@@ -159,9 +182,36 @@ async function main() {
      * memory.promote's OUTPUT_LIMIT fires on precisely one value, where the budget equals the
      * resolved input size, and no fixed round-wide budget can sit on every tool's boundary at once.
      */
-    const taskPolicy = Number.isInteger(exercise.maxOutputBytes)
-      ? { ...policy, maxOutputBytes: Math.min(exercise.maxOutputBytes, policy.maxOutputBytes) }
-      : policy;
+    const taskPolicy = narrowPolicy(policy, exercise.narrow);
+
+    /**
+     * An exercise that is a function call rather than a plan.
+     *
+     * Some of the kernel's own guarantees are not reachable through a plan at all: attenuatePolicy
+     * refusing to widen, replayPlan rejecting a tampered journal, a factory refusing malformed
+     * configuration. Those are the guarantees the rest of the system rests on, so leaving them
+     * unexercised because they do not fit the plan shape was the wrong trade. The reproducibility
+     * rule is unchanged and paid the same way as a compile refusal: invoke it twice, require the
+     * same code both times, and record that it was proven by repetition rather than by replay.
+     */
+    if (typeof exercise.call === 'function') {
+      const invoke = async () => {
+        try { await exercise.call({ registry, policy: taskPolicy, sourceLock, workspaceRoot }); return null; }
+        catch (error) { return error instanceof HarnessError ? error.code : null; }
+      };
+      const first = await invoke();
+      if (first) observedCodes.add(first);
+      const second = await invoke();
+      if (first && first === exercise.expectThrow && second === first) {
+        credit(exercise, { tool: exercise.tool, call: exercise.tool, outcome: 'refused', code: first, provenBy: 'direct-call-twice' });
+      } else {
+        findings.push({
+          family: exercise.family, tool: exercise.tool,
+          note: `expected ${exercise.expectThrow} from a direct call, got ${first ?? 'no refusal'}${second === first ? '' : ` then ${second ?? 'no refusal'}`}`,
+        });
+      }
+      continue;
+    }
 
     let outcome;
     try {

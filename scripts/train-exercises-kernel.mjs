@@ -1,0 +1,262 @@
+import { runPlan, replayPlan, attenuatePolicy } from '../src/engine.mjs';
+import { canonical, parseJson, validateSchema } from '../src/value.mjs';
+import { makeCapabilityTools } from '../src/capabilities.mjs';
+import { makeReverseTools } from '../src/reverse.mjs';
+import { makeForeignTools } from '../src/foreign.mjs';
+import { makeMailboxTools } from '../src/peer.mjs';
+import { makeSourceTools } from '../src/sources.mjs';
+import { makeSkillStoreTools, skillSlug } from '../src/skillstore.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
+
+/**
+ * The kernel's own guarantees, and the refusals a plan cannot reach.
+ *
+ * Everything else in this suite is a plan. That shape cannot express the promises the rest of the
+ * system rests on: that a policy can only ever be narrowed, that a journal which has been edited
+ * will not replay, that a factory refuses configuration it cannot vouch for. Those were left
+ * unexercised because they did not fit, which is the worst reason to leave the load-bearing parts
+ * untested, so there is now a second shape — an exercise that is a function call.
+ *
+ * It is held to the same standard. There is no journal to replay, so reproducibility is paid by
+ * invoking twice and requiring the same refusal both times, and the evidence says it was proven by
+ * repetition rather than by replay.
+ *
+ * Every code below was raised for real before being written down here. That matters more than
+ * usual on this file, because reading the source and guessing produced two wrong names: the refusal
+ * for a tampered output receipt is REPLAY_CHAIN rather than REPLAY_OUTPUT, and the one for a moved
+ * workspace is REPLAY_CONTEXT rather than REPLAY_ROOT. Both guesses were plausible and both were
+ * wrong, which is the argument for probing.
+ *
+ * Two replay codes are deliberately absent. REPLAY_LIMIT needs a journal larger than a legal budget
+ * and REPLAY_TRANSITION needs a journal whose hash chain has been recomputed around an illegal
+ * transition — that is, a forgery rather than a corruption. Neither is written as a half-exercise
+ * that would pass for the wrong reason; they stay on the frontier where they can still be seen.
+ */
+
+const PLAN = { version: 1, name: 't', tasks: [{ id: 'a', tool: 'json.hash', input: { value: { a: 1 } } }] };
+
+/** A clean journal to corrupt, produced by the same kernel the replay checks defend. */
+const journalFor = ({ registry, policy, sourceLock, workspaceRoot }) =>
+  runPlan({ plan: PLAN, policy, registry, sourceLock, approvals: [], workspaceRoot });
+
+/** Clone a journal so a tamper never mutates the original. */
+const copy = (journal) => JSON.parse(JSON.stringify(journal));
+
+export function kernelExercises() {
+  return [
+    // ---- policy: the allow lists, and attenuation that can only narrow ------------------
+    {
+      family: 'kernel', tool: 'engine.compile', expectThrow: 'UNKNOWN_TOOL', workspace: 'temp',
+      plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'nobody.here', input: {} }] },
+      lesson: 'A plan naming a tool the registry does not hold is refused UNKNOWN_TOOL while compiling, before any task runs. The registry is the whole of what exists, so an unknown name is a defect in the plan rather than a capability to be looked for elsewhere.',
+    },
+    {
+      family: 'kernel', tool: 'engine.compile', expectThrow: 'POLICY_DENIED', workspace: 'temp',
+      narrow: { allowedEffects: ['pure', 'read'] },
+      plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'files.write', input: { path: 'x.json', content: { a: 1 } } }] },
+      lesson: 'A task whose effect is outside allowedEffects is refused POLICY_DENIED at compile time, not blocked for an approval. This is the distinction the whole authority model turns on: a write that is merely ungranted can be approved, while a write the policy does not permit at all can never be, so it must fail before it becomes something a person could be asked to allow.',
+    },
+    {
+      family: 'kernel', tool: 'engine.compile', expectThrow: 'POLICY_DENIED', workspace: 'temp',
+      narrow: { allowedTools: ['files.read'] },
+      plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'json.hash', input: { value: 1 } }] },
+      lesson: 'A tool absent from allowedTools is refused POLICY_DENIED even when it is registered and even when its effect is pure. Being harmless is not the same as being permitted, and a policy that let pure tools through unlisted would not be an allow list at all.',
+    },
+    {
+      // The round's own policy grants every effect, so there is nothing left to add to it. Narrowed
+      // first, deliberately: asking for an effect the caller already holds is a duplicate rather
+      // than a widening, and it is refused by a different check. Round 037 learned that by
+      // predicting POLICY_NOT_ATTENUATED here and getting INVALID_POLICY.
+      family: 'kernel', tool: 'engine.attenuatePolicy', expectThrow: 'POLICY_NOT_ATTENUATED',
+      narrow: { allowedEffects: ['pure', 'read'] },
+      call: ({ policy }) => attenuatePolicy(policy, { allowedEffects: ['pure', 'read', 'write'] }),
+      lesson: 'attenuatePolicy refuses POLICY_NOT_ATTENUATED when asked for an effect the caller does not hold. Delegation can only ever hand down less authority than it was given, so the function refuses rather than returning a quietly widened policy that would look like the real thing.',
+    },
+    {
+      family: 'kernel', tool: 'engine.attenuatePolicy', expectThrow: 'INVALID_POLICY',
+      call: ({ policy }) => attenuatePolicy(policy, { allowedEffects: [...policy.allowedEffects, policy.allowedEffects[0]] }),
+      lesson: 'A policy listing the same effect twice is refused INVALID_POLICY for the duplicate, and that check runs before the narrowing check. So re-requesting an effect already held is reported as a malformed policy rather than as an attempted widening — the two mistakes are different, and the order means the shape of a policy is settled before anything is concluded about its authority.',
+    },
+    {
+      family: 'kernel', tool: 'engine.attenuatePolicy', expectThrow: 'POLICY_NOT_ATTENUATED',
+      call: ({ policy }) => attenuatePolicy(policy, { maxTasks: policy.maxTasks + 1 }),
+      lesson: 'attenuatePolicy refuses a numeric bound raised by even one, so narrowing is checked field by field rather than judged overall. A policy that was stricter about effects and looser about task count would otherwise pass as an attenuation of the one it came from.',
+    },
+
+    // ---- approvals and workspace: the arguments runPlan will not take ------------------
+    {
+      family: 'kernel', tool: 'engine.runPlan', expectThrow: 'INVALID_APPROVAL',
+      call: ({ registry, policy, sourceLock, workspaceRoot }) =>
+        runPlan({ plan: PLAN, policy, registry, sourceLock, approvals: ['not-a-request-hash'], workspaceRoot }),
+      lesson: 'An approvals list holding anything that is not a SHA-256 request hash is refused INVALID_APPROVAL before the plan runs. An approval is only meaningful as an exact hash, so a malformed entry is rejected rather than ignored — ignoring it would let a caller submit noise and have the run proceed as though nothing had been asked for.',
+    },
+    {
+      family: 'kernel', tool: 'engine.runPlan', expectThrow: 'INVALID_APPROVAL',
+      call: ({ registry, policy, sourceLock, workspaceRoot }) =>
+        runPlan({ plan: PLAN, policy, registry, sourceLock, approvals: ['a'.repeat(64), 'a'.repeat(64)], workspaceRoot }),
+      lesson: 'The same request hash listed twice is refused INVALID_APPROVAL: approvals must be unique. One grant authorises one request, so a duplicate is either a mistake or an attempt to make a single approval count more than once.',
+    },
+    {
+      family: 'kernel', tool: 'engine.runPlan', expectThrow: 'INVALID_WORKSPACE',
+      call: ({ registry, policy, sourceLock }) =>
+        runPlan({ plan: PLAN, policy, registry, sourceLock, approvals: [], workspaceRoot: 'a/relative/path' }),
+      lesson: 'A workspace root that is not absolute is refused INVALID_WORKSPACE. Every path a tool accepts is resolved against this root, so a relative root would make the workspace boundary depend on the current directory of whatever process happened to start the run.',
+    },
+
+    // ---- replay: a journal that was edited does not verify ------------------------------
+    {
+      family: 'kernel', tool: 'engine.replayPlan', expectThrow: 'REPLAY_CHAIN',
+      call: async (context) => {
+        const journal = copy(await journalFor(context));
+        const completed = journal.events.find((event) => event.type === 'completed');
+        completed.data.output = { digest: 'a value nobody computed' };
+        return replayPlan({ journal, plan: PLAN, policy: context.policy, registry: context.registry, sourceLock: context.sourceLock, approvals: [], workspaceRoot: context.workspaceRoot });
+      },
+      lesson: 'Editing a recorded output breaks replay with REPLAY_CHAIN, not with a mismatched-output error: every event carries the hash of the one before it, so changing any payload invalidates the chain from that point on. The chain is what makes the journal evidence — a receipt that could be edited afterwards would only be a claim about what happened.',
+    },
+    {
+      family: 'kernel', tool: 'engine.replayPlan', expectThrow: 'REPLAY_CHAIN',
+      call: async (context) => {
+        const journal = copy(await journalFor(context));
+        journal.events.splice(1, 0, { ...journal.events[1] });
+        return replayPlan({ journal, plan: PLAN, policy: context.policy, registry: context.registry, sourceLock: context.sourceLock, approvals: [], workspaceRoot: context.workspaceRoot });
+      },
+      lesson: 'Duplicating an event breaks replay with REPLAY_CHAIN as well, because each event commits to its own sequence number as well as to its predecessor. Inserting or reordering is caught by the same check that catches editing, so there is one guarantee to reason about rather than three.',
+    },
+    {
+      family: 'kernel', tool: 'engine.replayPlan', expectThrow: 'REPLAY_CONTEXT',
+      call: async (context) => {
+        const journal = await journalFor(context);
+        return replayPlan({ journal, plan: PLAN, policy: context.policy, registry: context.registry, sourceLock: context.sourceLock, approvals: [], workspaceRoot: context.workspaceRoot + '-elsewhere' });
+      },
+      lesson: 'An untouched journal replayed against a different workspace root is refused REPLAY_CONTEXT. The header commits to the plan, the policy, the source lock, the tool registry and the workspace together, so a run is only reproducible in the setting it actually happened in; verifying it somewhere else would be answering a different question.',
+    },
+    {
+      family: 'kernel', tool: 'engine.replayPlan', expectThrow: 'REPLAY_ROOT',
+      call: async (context) => {
+        const journal = copy(await journalFor(context));
+        journal.root = 'b'.repeat(64);
+        return replayPlan({ journal, plan: PLAN, policy: context.policy, registry: context.registry, sourceLock: context.sourceLock, approvals: [], workspaceRoot: context.workspaceRoot });
+      },
+      lesson: 'Replacing the journal root while leaving every event intact is refused REPLAY_ROOT: the root must equal the hash the event chain actually ends on. The chain proves the events agree with each other and the root is the single value committing to all of them, so both are checked rather than one standing in for the other.',
+    },
+
+    // ---- value: the JSON domain the kernel can record ----------------------------------
+    {
+      family: 'kernel', tool: 'value.canonical', expectThrow: 'INVALID_JSON',
+      call: () => canonical({ present: undefined }),
+      lesson: 'canonical refuses INVALID_JSON for a key holding undefined, because undefined is outside the JSON domain and has no canonical form. This is the refusal that turns an overlooked optional field into a visible failure: JSON.stringify would silently drop the key and the value would travel on as though it had never been there.',
+    },
+    {
+      family: 'kernel', tool: 'value.canonical', expectThrow: 'INVALID_JSON',
+      call: () => canonical({ fn: () => 1 }),
+      lesson: 'canonical refuses a function for the same reason it refuses undefined: the domain is data that can be hashed and replayed, and anything that cannot be written down cannot be committed to by a receipt.',
+    },
+    {
+      family: 'kernel', tool: 'value.parseJson', expectThrow: 'INVALID_JSON',
+      call: () => parseJson('{ not actually json'),
+      lesson: 'parseJson raises INVALID_JSON rather than returning null or undefined for malformed text, so a configuration file that was corrupted on disk fails where it is read instead of becoming an empty object several layers further in.',
+    },
+    {
+      family: 'kernel', tool: 'value.validateSchema', expectThrow: 'INVALID_SCHEMA',
+      call: () => validateSchema({}, { type: 'a-type-that-does-not-exist' }),
+      lesson: 'validateSchema separates a bad schema from bad data: an unrecognised type raises INVALID_SCHEMA, not a validation failure about the value. A schema nobody can evaluate would otherwise read as a value that failed to satisfy it, which is the error report most likely to send someone looking in the wrong place.',
+    },
+
+    // ---- factories: configuration a registry will not be built from --------------------
+    {
+      family: 'kernel', tool: 'capabilities.factory', expectThrow: 'INVALID_CAPABILITIES',
+      call: () => makeCapabilityTools({ capabilities: 'not an array' }),
+      lesson: 'makeCapabilityTools refuses INVALID_CAPABILITIES rather than building a registry over an inventory it cannot read. Configuration is checked when the registry is assembled, not when a tool is first called, so a malformed lock file fails at startup instead of halfway through somebody using it.',
+    },
+    {
+      family: 'kernel', tool: 'reverse.factory', expectThrow: 'REVERSE_TABLE_INVALID',
+      call: () => makeReverseTools({ tools: 'not an array' }, {}),
+      lesson: 'makeReverseTools refuses REVERSE_TABLE_INVALID for a malformed tool table. The table decides which external commands exist at all, so accepting a shape it could only partly understand would mean a registry whose contents nobody had reviewed.',
+    },
+    {
+      family: 'kernel', tool: 'foreign.factory', expectThrow: 'FOREIGN_MANIFEST_INVALID',
+      call: () => makeForeignTools({ schemaVersion: 'not a number', sources: [] }, {}),
+      lesson: 'makeForeignTools refuses FOREIGN_MANIFEST_INVALID for a manifest whose schema version is not a number, before any foreign server is contacted. A manifest describes executables that will run on this machine, so it is validated at build time where a person can still read the error.',
+    },
+    {
+      family: 'kernel', tool: 'peer.factory', expectThrow: 'PEER_CONFIG',
+      call: () => makeMailboxTools({ directory: 'a/relative/mailbox' }),
+      lesson: 'makeMailboxTools refuses PEER_CONFIG for a relative mailbox directory, the same reason runPlan refuses a relative workspace root: a location that depends on the current directory is not a location. The mailbox holds messages between agents, so where it lives has to be settled before anything is written to it.',
+    },
+    {
+      family: 'kernel', tool: 'sources.factory', expectThrow: 'SOURCE_LOCK_INVALID',
+      call: () => makeSourceTools({ sources: 'not an array' }),
+      lesson: 'makeSourceTools refuses SOURCE_LOCK_INVALID for a malformed source lock. The lock is the record of which upstream sources were reviewed and at which digests, so a registry built over an unreadable one would claim a provenance nobody had established.',
+    },
+
+    /**
+     * Tool refusals that need an inventory this round's registry does not carry.
+     *
+     * The registry is built from the committed capabilities lock, so a corpus that disagrees with
+     * its recorded digest cannot be staged through a plan — the lock would have to be edited first.
+     * These build a small store over a fixture instead, which is the same thing the skillstore
+     * tests do, and is the only way to see the digest check actually refuse.
+     */
+    {
+      family: 'skills', tool: 'skills.install', expectThrow: 'SKILL_DIGEST',
+      call: ({ workspaceRoot }) => {
+        const body = '# Greeting\n\nSay hello.\n';
+        const relative = 'upstream/example/skills/greeting/SKILL.md';
+        const file = path.join(workspaceRoot, relative);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, body);
+        const inventory = { capabilities: [{
+          id: 'example:skills/greeting/SKILL.md', kind: 'skill', path: relative, sourceId: 'example',
+          title: 'Greeting', status: 'source-available-unreviewed',
+          sourceSha256: createHash('sha256').update(Buffer.from(body)).digest('hex'),
+        }] };
+        const store = makeSkillStoreTools(inventory);
+        // Somebody edited the corpus after it was indexed, which is exactly what the digest is for.
+        fs.writeFileSync(file, '# Greeting\n\nSomething else entirely.\n');
+        return store.find((tool) => tool.name === 'skills.install')
+          .execute({ id: 'example:skills/greeting/SKILL.md' }, { workspaceRoot, policy: { maxOutputBytes: 1048576, timeoutMs: 10000 } });
+      },
+      lesson: 'skills.install refuses SKILL_DIGEST when the corpus file no longer hashes to what the inventory recorded, and refuses before copying anything. An import that skipped this would be a copy rather than an adoption, and a lock over unchecked copies locks nothing at all.',
+    },
+    {
+      family: 'skills', tool: 'skills.install', expectThrow: 'SKILL_SOURCE',
+      call: ({ workspaceRoot }) => {
+        const inventory = { capabilities: [{
+          id: 'example:skills/absent/SKILL.md', kind: 'skill', path: 'upstream/example/skills/absent/SKILL.md',
+          sourceId: 'example', title: 'Absent', status: 'source-available-unreviewed', sourceSha256: 'c'.repeat(64),
+        }] };
+        return makeSkillStoreTools(inventory).find((tool) => tool.name === 'skills.install')
+          .execute({ id: 'example:skills/absent/SKILL.md' }, { workspaceRoot, policy: { maxOutputBytes: 1048576, timeoutMs: 10000 } });
+      },
+      lesson: 'skills.install separates SKILL_SOURCE from SKILL_UNKNOWN: an id the inventory never listed is unknown, while an id it did list whose file is not on disk means the index has outlived the tree it indexed. Collapsing the two into one error would leave an operator unable to tell a typo from a missing checkout.',
+    },
+    {
+      family: 'skills', tool: 'skills.slug', expectThrow: 'SKILL_ID',
+      call: () => skillSlug('///'),
+      lesson: 'An inventory id that reduces to no usable filename characters is refused SKILL_ID rather than turned into an empty or punctuation-only name. The slug becomes a real path on disk, so a name that cannot be written is caught where it is derived.',
+    },
+
+    // ---- tool refusals a plan does reach, once the write is granted ---------------------
+    {
+      family: 'scheduling', tool: 'schedule.declare', expectCode: 'SCHEDULE_ID', grant: true, workspace: 'temp',
+      plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'schedule.declare', input: { id: 'Not A Slug', dueAt: '2027-01-01T00:00:00Z', plan: { version: 1, tasks: [] } } }] },
+      lesson: 'schedule.declare refuses SCHEDULE_ID for an identifier that is not a lower-case slug, and the refusal arrives only after the write is granted because the approval gate sits in front of the tool. The id names a stored record that will be matched exactly later, so a loose spelling now is a schedule nobody can reliably replace.',
+    },
+    {
+      family: 'exchange', tool: 'peer.post', expectCode: 'PEER_MAILBOX', grant: true,
+      plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'peer.post', input: { message: 'A reply to a message that was never posted.', replyTo: 9999 } }] },
+      lesson: 'peer.post refuses PEER_MAILBOX when replyTo names a sequence number the mailbox does not hold, rather than filing an orphan reply. The reply link is what lets peer.inbox tell an answered question from an open one, so a link to nothing would quietly corrupt that distinction.',
+    },
+    {
+      family: 'skills', tool: 'skills.rank', expectCode: 'INVALID_SKILLS', workspace: 'temp',
+      plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'skills.rank', input: { query: 'greeting', skills: [
+        { id: 'same', text: 'first entry' },
+        { id: 'same', text: 'second entry under the same id' },
+      ] } }] },
+      lesson: 'skills.rank refuses INVALID_SKILLS when two entries share an id, because a ranking keyed by id cannot report two different texts under one name. Its schema requires both id and text on every entry and forbids unknown fields, so a malformed entry is refused as SCHEMA_MISMATCH at compile and never reaches the tool — a direct call to execute would crash instead, which is a fact about bypassing the engine rather than about the tool.',
+    },
+  ];
+}

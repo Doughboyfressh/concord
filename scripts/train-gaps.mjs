@@ -35,10 +35,18 @@ import path from 'node:path';
  * sat on the frontier forever, and the denominator they inflated made coverage look worse than it
  * was. Only the thrown forms belong in a refusal count.
  */
+/**
+ * Matched on the shape a raised code always has: the code, then its message.
+ *
+ * The first version matched the call instead — `assert\([^,]+,\s*'CODE'` — and a negated character
+ * class cannot cross a comma, so every assert whose *condition* contained one was skipped in
+ * silence. REPLAY_CONTEXT and REPLAY_CHAIN were invisible that way, which means the denominator was
+ * wrong in both directions at once: codes that do not exist sat on the frontier while codes that
+ * do were never counted. Anchoring on the code-and-message pair instead is indifferent to whatever
+ * the condition looks like, and it covers fail(), HarnessError() and assert() with one rule.
+ */
 const THROWN_PATTERNS = [
-  /fail\('([A-Z_]+)'/g,
-  /HarnessError\('([A-Z_]+)'/g,
-  /assert\([^,]+,\s*'([A-Z_]+)'/g,
+  /'([A-Z][A-Z0-9_]{2,})'\s*,\s*'/g,
 ];
 
 /**
