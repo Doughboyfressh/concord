@@ -8,6 +8,7 @@ import { runPlan } from './engine.mjs';
 import { makeBuiltinTools } from './builtins.mjs';
 import { loadSourceLock, makeSourceTools } from './sources.mjs';
 import { makeCapabilityTools } from './capabilities.mjs';
+import { createClientChannel, makePeerTools } from './peer.mjs';
 import { makeArtifactTools } from './artifacts.mjs';
 import { makeIntegrationTools } from './integrations.mjs';
 import { makeReverseTools } from './reverse.mjs';
@@ -108,6 +109,23 @@ function blockedDetail(result) {
   return event ? { effect: event.data.effect, tool: event.data.tool, input: event.data.input } : {};
 }
 
+/**
+ * The tool's own code for a failure, which the outcome does not carry but the journal does.
+ *
+ * Without this a caller sees only the kernel's wrapper — EFFECT_INDETERMINATE for anything that
+ * threw out of a granted effect — and cannot tell a tool that refused before acting from one that
+ * may have acted and then failed. The kernel is right not to decide that; it cannot know. The
+ * tool said which it was, and this stops that answer being thrown away at the surface.
+ */
+function failureDetail(result) {
+  const event = result.events.find(e => e.type === 'failed');
+  if (!event) return {};
+  return {
+    ...(event.data.toolCode ? { toolCode: event.data.toolCode } : {}),
+    ...(event.data.reason ? { reason: event.data.reason } : {}),
+  };
+}
+
 function publicChatState(snapshot) {
   // Mirror server.mjs's publicState allowlist; never expose provider config or credentials.
   const result = {};
@@ -124,7 +142,7 @@ function publicChatState(snapshot) {
  * the chat harness as five `concord_*` tools. Collisions in the dotted-to-underscored name
  * map are asserted here, at construction, rather than at first call.
  */
-export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, harness, instructionModules }) {
+export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, harness, instructionModules, channel = null }) {
   const visibleRegistry = new Map([...registry].filter(([name, tool]) => policy.allowedTools.includes(name) && policy.allowedEffects.includes(tool.effect)));
   const nameMap = new Map();
   const wrapped = new Set();
@@ -174,7 +192,7 @@ export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, h
       };
     }
     if (result.outcome.status === 'failed') {
-      return { content: [{ type: 'text', text: canonical({ status: 'failed', code: result.outcome.code, taskId: result.outcome.taskId }) }], isError: true };
+      return { content: [{ type: 'text', text: canonical({ status: 'failed', code: result.outcome.code, taskId: result.outcome.taskId, ...failureDetail(result) }) }], isError: true };
     }
     return { content: [{ type: 'text', text: canonical(result.results[RAW_TASK_ID]) }] };
   }
@@ -277,9 +295,15 @@ export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, h
   async function dispatch(method, params) {
     switch (method) {
       case 'initialize':
+        // What the client says it can do decides what Concord may ask it. Recorded here, and
+        // reported by peer.capabilities, so an unanswerable question refuses instead of hanging.
+        channel?.rememberClient(params);
         return {
           protocolVersion: PROTOCOL_VERSION,
-          capabilities: { tools: { listChanged: false }, resources: { listChanged: false, subscribe: false } },
+          // `logging` is declared because peer.tell sends notifications/message. A server that
+          // emits log notifications without declaring it is sending something the client never
+          // agreed to receive.
+          capabilities: { tools: { listChanged: false }, resources: { listChanged: false, subscribe: false }, logging: {} },
           serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
           instructions: 'Concord is a deterministic AI chat harness: every write, network, or process effect requires an exact content-derived approval hash before it runs. A raw tool call that needs a grant returns a "blocked" result with a requestHash; call the same tool again with "_confirm" set to that hash to execute it. The concord_* tools drive a stateful, instruction-grounded chat session over the same kernel; resources/* exposes the 12 reviewed source instruction modules.',
         };
@@ -308,6 +332,10 @@ export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, h
     if (!message || typeof message !== 'object' || Array.isArray(message)) {
       return canonical({ jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid Request' } });
     }
+    // A reply to something Concord asked carries an id and no method. It has to be claimed before
+    // the request dispatcher sees it: that dispatcher would read a method-less message as a
+    // malformed request and answer the client's perfectly good reply with a protocol error.
+    if (channel?.deliver(message)) return null;
     if (!Object.hasOwn(message, 'id')) return null; // A notification: never respond, even if further malformed.
     const id = message.id;
     if (message.jsonrpc !== '2.0' || typeof message.method !== 'string') {
@@ -329,6 +357,13 @@ export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, h
 export async function main(argv = process.argv.slice(2)) {
   const flags = parseArgs(argv);
   const { registry, catalog, inventory, integrations } = await buildRegistry(flags);
+  // The other direction of this session. It exists only on this transport: a browser is not an
+  // agent that can be asked anything, so the desktop and terminal launchers register none of it.
+  const channel = createClientChannel({ send: (line) => process.stdout.write(line + '\n') });
+  for (const tool of makePeerTools({ channel })) {
+    if (registry.has(tool.name)) throw new HarnessError('MCP_CONFIG', 'Peer tool name collision', { tool: tool.name });
+    registry.set(tool.name, tool);
+  }
   const policy = buildPolicy(flags, registry, integrations);
   const workspaceRoot = fs.realpathSync(path.resolve(flags.workspace ?? root));
   const runtimeFiles = fs.readdirSync(path.join(root, 'src')).filter(f => f.endsWith('.mjs')).map(f => 'src/' + f).sort();
@@ -342,7 +377,7 @@ export async function main(argv = process.argv.slice(2)) {
   const resourceContext = buildContext({ message: 'Concord MCP server startup', history: [] });
   const harness = createChatHarness({ registry, policy, sourceLock, workspaceRoot, buildContext });
 
-  const server = createMcpServer({ registry, policy, sourceLock, workspaceRoot, harness, instructionModules: resourceContext.instructions });
+  const server = createMcpServer({ registry, policy, sourceLock, workspaceRoot, harness, instructionModules: resourceContext.instructions, channel });
 
   let decoder = new TextDecoder('utf-8', { fatal: true });
   let buffered = '';

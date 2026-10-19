@@ -31,7 +31,8 @@ const manifest = () => ({
           properties: { values: { type: 'array', minItems: 1, maxItems: 1000, items: { type: 'string', maxLength: 65536 } },
             separator: { type: 'string', maxLength: 65536 } } },
         schemaUsable: true },
-      // A schema Concord cannot enforce: the pattern is not a valid expression.
+      // A schema Concord cannot enforce: `pattern` is not in its schema vocabulary at all, so a
+      // contract using it can be published by a server and still not be checkable here.
       { name: 'unenforceable', description: 'A tool whose published schema cannot be enforced.',
         inputSchema: { type: 'object', properties: { bad: { pattern: '[' } } }, schemaUsable: false },
     ],

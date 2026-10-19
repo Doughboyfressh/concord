@@ -106,8 +106,16 @@ node src/mcp.mjs --workspace C:/path/to/your/project
 
 Any MCP client (Claude Code, Claude Desktop, or another MCP-speaking provider) can connect over stdio to
 call Concord's tools directly, read its 12 reviewed source instructions as resources, and hold a chat
-session through five `concord_*` tools backed by the same `createChatHarness` the HTTP interface uses. See
-[the MCP server](docs/mcp.md) for the exact client configuration and how write/network/process approval
+session through five `concord_*` tools backed by the same `createChatHarness` the HTTP interface uses.
+
+MCP is symmetric, and so is this: Concord can also speak first. `peer_ask` puts a question to the client's
+model through `sampling/createMessage`; `peer_request` asks the client to obtain an answer, usually from a
+person, through `elicitation/create`; `peer_tell` sends one line that gets no reply; `peer_capabilities`
+reports what the connected client actually declared it could do. Which half works depends on that client and
+the two are not interchangeable — Claude Code 2.1.221, measured at its own `initialize`, declares
+`elicitation` and `roots` but not `sampling`, so there `peer_request` is the channel and `peer_ask` refuses
+with `PEER_UNSUPPORTED` before a line is written rather than waiting for a reply that cannot come. Like every
+other non-reproducible effect, asking costs an exact grant, and the answer comes back labelled untrusted. See [the MCP server](docs/mcp.md) for the exact client configuration and how write/network/process approval
 surfaces through a protocol with no native "pending" primitive.
 
 ## Verify the execution kernel

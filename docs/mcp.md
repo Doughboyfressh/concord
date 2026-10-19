@@ -32,7 +32,7 @@ here too. Without `--policy`, the default is permissive — every registered too
 policy allow-list and the exact request-hash grant (below) are independent gates; a permissive policy never
 lets a write, network, or process effect skip its hash.
 
-## Three kinds of MCP primitives
+## Four kinds of MCP primitives
 
 **Raw tool access.** Every policy-visible registered tool becomes one MCP tool. Dots in Concord's tool names
 become underscores (`files.write` → `files_write`) because dotted names aren't safe across every client's
@@ -50,6 +50,79 @@ one-for-one, over MCP instead of HTTP — the same `createChatHarness` instance,
 evidence-recording, for the server's whole process lifetime. All five are serialized against each other (an
 MCP client can legitimately fire concurrent calls from one model turn; the raw per-tool path has no shared
 mutable state and isn't serialized).
+
+**The other direction: Concord asking the client.** MCP is symmetric — a server may send requests to
+its client — and until now Concord only ever answered. `src/peer.mjs` is that other half: three tools
+that let Concord put a question to the agent on the other end of the session, or tell it something,
+over the stdio connection that client already opened.
+
+| Tool | Effect | What it does |
+| --- | --- | --- |
+| `peer_capabilities` | `read` | What the client said it was and could do, from its own `initialize` |
+| `peer_ask` | `network` | `sampling/createMessage`: asks the client's **model**, returns its answer |
+| `peer_request` | `network` | `elicitation/create`: asks the client to **obtain** an answer, usually from a person |
+| `peer_tell` | `network` | `notifications/message`: one line, no reply |
+
+**Which one works depends on the client, and the two are not interchangeable.** Sampling asks the
+client's model; elicitation asks the client to go and get input. A client declares what it supports
+at `initialize`, and Concord asks only what was declared.
+
+Measured against Claude Code 2.1.221, from its own `initialize`:
+
+```json
+{ "protocolVersion": "2025-11-25",
+  "capabilities": { "roots": { "listChanged": true }, "elicitation": {} },
+  "clientInfo": { "name": "claude-code", "version": "2.1.221" } }
+```
+
+It declares `elicitation` and `roots`, and **not** `sampling`. So on Claude Code, `peer_request` is
+the channel that works and `peer_ask` is the one that refuses — with `PEER_UNSUPPORTED`, before a
+line is written. That is not a limitation worked around; it is the capability gate doing its job on
+a real client, and the reason the gate exists.
+
+`peer_request` sends a message and a `requestedSchema` built from a declared field list. MCP keeps
+that schema to a flat object of primitives because the client has to render it, and building it
+here rather than taking a caller's schema whole is what keeps it that way. A reply may be `accept`,
+`decline` or `cancel`; declining is reported as an answer with `answered: false`, never as an error,
+because treating "no" as a failure would make a refusal look like a broken channel and invite
+retrying something a person already turned down. An accepted reply is still checked field by field:
+a missing required value, a wrong type, or a value outside the offered choices is refused rather
+than passed on.
+
+Nothing here opens a socket, spawns a process, or reaches any party the client did not already connect.
+The peer is whoever is on the other end of stdin and stdout, and that is the only thing reachable. These
+tools exist **only on this transport** — the desktop and terminal launchers serve a browser, which is
+not an agent that can be asked anything, so they register none of it rather than offering a tool that
+could only ever refuse.
+
+`peer_ask` is a `network` effect for the same reasons `model.propose` is: the answer is written by an
+agent Concord does not control, it is not reproducible, so it requires its own exact grant through the
+same `_confirm` round trip and is taken from the journal on replay. There is no origin to allowlist
+because no socket is opened. The answer comes back labelled `untrusted` with its own limitations: it is
+evidence of what that agent said, not that what it said is true, and whether the client showed the
+question to a person or answered it with a model of its choosing is not visible from here.
+
+Three things the channel refuses to do. It never asks a client that did not declare `sampling` at
+`initialize` — the call fails with `PEER_UNSUPPORTED` before a line is written, because waiting for a
+reply that cannot come is the worst of the available failures. It sends `includeContext: "none"`, so the
+client is asked to include none of its own context: Concord states its question in full or not at all,
+since inheriting whatever else that agent is working on would put text Concord never saw into a request
+it is accountable for. And it accepts only a text reply; image and audio sampling results are legal MCP
+and are refused here rather than silently dropped, which would misreport what the peer said.
+
+A reply from the client carries an id and no method. That has to be claimed before the request
+dispatcher sees it, or the dispatcher reads it as a malformed request and answers the client's perfectly
+good reply with a protocol error. `test/peer.test.mjs` asserts exactly that, along with the timeout,
+cancellation, transport-failure and in-flight bounds.
+
+A note on what has been verified, and how. Both halves have been driven end to end against clients
+written for the purpose: Concord sent `sampling/createMessage` to one that declared sampling and got
+its answer back through `peer_ask`, and sent `elicitation/create` to one declaring exactly what Claude
+Code declares and got `{"action": "accept", "content": {"answer": "..."}}` back through
+`peer_request`. The capability set used in those tests was not guessed — it was captured from Claude
+Code's real `initialize`. What remains unverified is the live round trip through Claude Code itself,
+which needs a session where Concord is a connected server; `peer_capabilities` reports what the
+client in front of it actually declared, which is the only trustworthy answer to that question.
 
 ## The `_confirm` round trip — how approval surfaces through MCP
 

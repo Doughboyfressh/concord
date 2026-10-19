@@ -21,7 +21,7 @@ export function makeBuiltinTools() {
       execute(input) { return input; } },
     { name: 'json.hash', version: '1.0.0', outputKeys: ['algorithm', 'digest'], effect: 'pure', inputSchema: true,
       execute(input) { return { algorithm: 'sha256/concord-json-v1', digest: digest(input) }; } },
-    { name: 'json.assert', version: '1.0.0', outputKeys: ['evidenceHash', 'passed', 'value'], effect: 'pure', inputSchema: object({ value: true, schema: true }),
+    { name: 'json.assert', version: '1.0.0', outputKeys: ['evidenceHash', 'passed', 'value'], effect: 'pure', inputSchema: object({ value: {}, schema: {} }),
       execute({ value, schema }) { validateSchema(value, schema); return { passed: true, value, evidenceHash: digest(value) }; } },
     { name: 'text.concat', version: '1.0.0', outputKeys: ['value'], effect: 'pure', inputSchema: object({ values: { type: 'array', items: string, minItems: 1, maxItems: 1000 }, separator: string }),
       // A fixed, explicit join over caller-ordered values — no format sniffing, no implicit separator.
@@ -133,7 +133,7 @@ export function makeBuiltinTools() {
         return { hypothesis, verdicts, confirmed: count('confirmed'), refuted: count('refuted'),
           untestable: count('untestable'), warnings, discriminating };
       } },
-    { name: 'judgment.gate', version: '1.0.0', effect: 'pure', inputSchema: object({ score: { type: 'number', minimum: 0, maximum: 1 }, threshold: { type: 'number', minimum: 0, maximum: 1 }, evidence: true }),
+    { name: 'judgment.gate', version: '1.0.0', effect: 'pure', inputSchema: object({ score: { type: 'number', minimum: 0, maximum: 1 }, threshold: { type: 'number', minimum: 0, maximum: 1 }, evidence: {} }),
       execute({ score, threshold, evidence }) {
         if (score < threshold) throw new HarnessError('JUDGMENT_REJECTED', 'Evidence does not meet the declared threshold');
         return { accepted: true, score, threshold, evidenceHash: digest(evidence), grantsCapabilities: false };
@@ -150,7 +150,7 @@ export function makeBuiltinTools() {
         const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
         return { path: relative, text, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), untrusted: true };
       } },
-    { name: 'files.write', version: '1.0.0', outputKeys: ['contentHash', 'created', 'path'], effect: 'write', inputSchema: object({ path: string, content: true }),
+    { name: 'files.write', version: '1.0.0', outputKeys: ['contentHash', 'created', 'path'], effect: 'write', inputSchema: object({ path: string, content: {} }),
       execute({ path: relative, content }, context) {
         const filename = workspaceFile(context.workspaceRoot, relative);
         const text = canonical(content) + '\n';

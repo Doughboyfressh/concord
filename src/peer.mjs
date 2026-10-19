@@ -1,0 +1,379 @@
+import { HarnessError, canonical } from './value.mjs';
+
+/**
+ * The other direction of the MCP session.
+ *
+ * A client connects to Concord and calls its tools. That is one direction, and until now it was
+ * the only one: `src/mcp.mjs` read a line, answered it, and had no way to say anything first.
+ * MCP itself is symmetric — a server may send requests to its client — and this is that half:
+ * Concord asking the agent on the other end a question, or telling it something, over the same
+ * stdio session the client already opened.
+ *
+ * Nothing here opens a socket, spawns a process, or reaches any party the client did not already
+ * connect. The peer is whoever is on the other end of stdin and stdout, and the only thing that
+ * can be reached is them.
+ *
+ * Two rules shape the whole module. The client's answer is data from an agent Concord does not
+ * control, so it is validated and labeled untrusted exactly like any other foreign output. And a
+ * client that never declared it can answer is never asked: the request refuses rather than hangs,
+ * because a silent wait for a reply that cannot come is the worst of the available failures.
+ */
+
+const fail = (code, message, detail) => { throw new HarnessError(code, message, detail); };
+const isObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+const DEFAULT_TIMEOUT_MS = 120_000;
+const MAX_PENDING = 8;
+const MAX_TEXT = 65_536;
+const MAX_TOKENS = 8192;
+
+/**
+ * The outbound half of a JSON-RPC session: issue a request, match the response that comes back.
+ *
+ * `send` is injected rather than taken from `process.stdout`, so the whole protocol can be driven
+ * in a test without a transport, and so this module never decides where a line goes.
+ */
+export function createClientChannel({ send, timeoutMs = DEFAULT_TIMEOUT_MS, maxPending = MAX_PENDING } = {}) {
+  if (typeof send !== 'function') fail('PEER_CHANNEL', 'A client channel needs a way to send a line');
+  const pending = new Map();
+  let counter = 0;
+  let client = null;
+
+  /** What the client said it was and could do, from its own initialize parameters. */
+  function rememberClient(params) {
+    const capabilities = isObject(params?.capabilities) ? Object.keys(params.capabilities).sort() : [];
+    client = {
+      name: typeof params?.clientInfo?.name === 'string' ? params.clientInfo.name : null,
+      version: typeof params?.clientInfo?.version === 'string' ? params.clientInfo.version : null,
+      protocolVersion: typeof params?.protocolVersion === 'string' ? params.protocolVersion : null,
+      capabilities,
+    };
+    return client;
+  }
+
+  const describeClient = () => (client ? { ...client, capabilities: [...client.capabilities] } : null);
+  const supports = (capability) => Boolean(client && client.capabilities.includes(capability));
+
+  function request(method, params, { timeoutMs: deadline = timeoutMs, signal } = {}) {
+    // An id the client cannot collide with: its own ids are its business, and a prefix keeps the
+    // two numbering schemes from ever meeting.
+    const id = 'concord-' + (counter += 1);
+    let line;
+    // canonical() rejects anything that is not strict JSON, so a malformed outbound request fails
+    // here rather than as an unparseable line on the wire.
+    try { line = canonical({ jsonrpc: '2.0', id, method, params }); }
+    catch { return Promise.reject(new HarnessError('PEER_REQUEST', 'The request to the client is not representable as JSON')); }
+
+    if (pending.size >= maxPending) return Promise.reject(new HarnessError('PEER_BUSY', 'Too many requests to the client are already in flight', { pending: pending.size }));
+
+    return new Promise((resolve, reject) => {
+      const settle = (fn, value) => {
+        const entry = pending.get(id);
+        if (!entry) return;
+        clearTimeout(entry.timer);
+        pending.delete(id);
+        fn(value);
+      };
+      const timer = setTimeout(() => settle(reject, new HarnessError('PEER_TIMEOUT', 'The client did not answer within the deadline', { method })), deadline);
+      // A pending question must never be the reason a process stays alive.
+      timer.unref?.();
+      pending.set(id, { resolve, reject, timer });
+
+      if (signal) {
+        if (signal.aborted) { settle(reject, new HarnessError('PEER_ABORTED', 'The request to the client was cancelled')); return; }
+        signal.addEventListener('abort', () => settle(reject, new HarnessError('PEER_ABORTED', 'The request to the client was cancelled')), { once: true });
+      }
+
+      try { send(line); }
+      catch { settle(reject, new HarnessError('PEER_TRANSPORT', 'The client channel could not be written')); }
+    });
+  }
+
+  /** One-way: notifications carry no id and are never answered. */
+  function notify(method, params) {
+    let line;
+    try { line = canonical({ jsonrpc: '2.0', method, params }); }
+    catch { fail('PEER_REQUEST', 'The notification is not representable as JSON'); }
+    try { send(line); }
+    catch { fail('PEER_TRANSPORT', 'The client channel could not be written'); }
+  }
+
+  /**
+   * Route one incoming message if it answers a question Concord asked.
+   *
+   * Returns false for anything else, so the caller's own dispatch is untouched. This matters more
+   * than it looks: a response carries an id and no method, which the request dispatcher would
+   * otherwise reject as a malformed request and answer with an error — turning the client's
+   * perfectly good reply into protocol noise.
+   */
+  function deliver(message) {
+    if (!isObject(message)) return false;
+    if (Object.hasOwn(message, 'method')) return false;
+    if (!Object.hasOwn(message, 'id')) return false;
+    const entry = pending.get(message.id);
+    if (!entry) return false;
+    clearTimeout(entry.timer);
+    pending.delete(message.id);
+    if (isObject(message.error)) {
+      const detail = { code: message.error.code };
+      entry.reject(new HarnessError('PEER_REFUSED', typeof message.error.message === 'string' ? message.error.message : 'The client refused the request', detail));
+    } else {
+      entry.resolve(message.result);
+    }
+    return true;
+  }
+
+  return { request, notify, deliver, rememberClient, describeClient, supports, pendingCount: () => pending.size };
+}
+
+/**
+ * The schema an elicitation may request.
+ *
+ * MCP restricts this to a flat object of primitives on purpose: the client has to render it, and
+ * a nested schema is not something a person can be shown a form for. Building it here from a
+ * declared field list, rather than taking a caller's schema whole, is what keeps that true.
+ */
+function requestedSchema(fields) {
+  const properties = {};
+  const required = [];
+  for (const field of fields) {
+    const property = { type: field.type };
+    if (field.description !== undefined) property.description = field.description;
+    if (field.enum !== undefined) {
+      if (field.type !== 'string') fail('PEER_REQUEST', 'Only a string field may offer a fixed set of choices', { field: field.name });
+      property.enum = [...field.enum];
+    }
+    properties[field.name] = property;
+    if (field.required !== false) required.push(field.name);
+  }
+  return { type: 'object', properties, ...(required.length ? { required } : {}) };
+}
+
+/** The client's reply to an elicitation, which may legitimately be a refusal. */
+function checkElicitation(result, fields) {
+  if (!isObject(result)) fail('PEER_RESPONSE', 'The client returned no elicitation result');
+  const action = result.action;
+  if (!['accept', 'decline', 'cancel'].includes(action)) fail('PEER_RESPONSE', 'The client returned an unknown elicitation action', { action: typeof action === 'string' ? action : null });
+  // Declining is an answer, not a failure. Treating "no" as an error would make a refusal look
+  // like a broken channel and invite a retry of something a person already turned down.
+  if (action !== 'accept') return { action, content: null };
+
+  const content = isObject(result.content) ? result.content : {};
+  const answer = {};
+  for (const field of fields) {
+    const value = content[field.name];
+    if (value === undefined) {
+      if (field.required === false) continue;
+      fail('PEER_RESPONSE', 'The client accepted but left a required field out', { field: field.name });
+    }
+    const actual = typeof value;
+    if (actual !== field.type) fail('PEER_RESPONSE', 'The client returned the wrong type for a field', { field: field.name, expected: field.type, actual });
+    if (actual === 'string' && value.length > MAX_TEXT) fail('PEER_RESPONSE', 'The client returned more text than the bound permits', { field: field.name });
+    if (field.enum !== undefined && !field.enum.includes(value)) fail('PEER_RESPONSE', 'The client returned a value outside the offered choices', { field: field.name });
+    answer[field.name] = value;
+  }
+  return { action, content: answer };
+}
+
+/** The client's reply to a sampling request, checked before any of it is believed. */
+function checkSampling(result) {
+  if (!isObject(result)) fail('PEER_RESPONSE', 'The client returned no sampling result');
+  const content = result.content;
+  if (!isObject(content) || content.type !== 'text' || typeof content.text !== 'string') {
+    // Image and audio content are legal MCP sampling results and are deliberately not accepted
+    // here: this channel carries a question and an answer in text, and silently dropping a
+    // non-text part would misreport what the peer said.
+    fail('PEER_RESPONSE', 'The client returned a sampling result that is not text', { type: isObject(content) ? content.type : null });
+  }
+  if (content.text.length > MAX_TEXT) fail('PEER_RESPONSE', 'The client returned more text than the bound permits');
+  return {
+    text: content.text,
+    role: typeof result.role === 'string' ? result.role : 'assistant',
+    model: typeof result.model === 'string' ? result.model : null,
+    stopReason: typeof result.stopReason === 'string' ? result.stopReason : null,
+  };
+}
+
+/**
+ * The tools that use the channel.
+ *
+ * Registered only where a client actually exists — the MCP transport. The desktop and terminal
+ * launchers serve a browser, which is not an agent that can be asked anything, so they register
+ * none of this rather than offering a tool that could only ever refuse.
+ */
+export function makePeerTools({ channel } = {}) {
+  if (!channel) fail('PEER_CONFIG', 'Peer tools need a client channel');
+
+  const askSchema = {
+    type: 'object', additionalProperties: false, required: ['question'],
+    properties: {
+      question: { type: 'string', minLength: 1, maxLength: MAX_TEXT },
+      systemPrompt: { type: 'string', maxLength: MAX_TEXT },
+      maxTokens: { type: 'integer', minimum: 1, maximum: MAX_TOKENS },
+      intent: { type: 'string', maxLength: 256 },
+    },
+  };
+
+  const tellSchema = {
+    type: 'object', additionalProperties: false, required: ['message'],
+    properties: {
+      message: { type: 'string', minLength: 1, maxLength: MAX_TEXT },
+      level: { type: 'string', enum: ['debug', 'info', 'notice', 'warning', 'error'] },
+    },
+  };
+
+  return [
+    {
+      name: 'peer.capabilities', version: '1.0.0', effect: 'read',
+      outputKeys: ['connected', 'client', 'supports', 'pending', 'limitations'],
+      inputSchema: { type: 'object', additionalProperties: false, properties: {} },
+      execute() {
+        const client = channel.describeClient();
+        return {
+          connected: client !== null,
+          client,
+          // Named one by one rather than echoed, so this reports what Concord can actually use
+          // rather than whatever the client happened to list.
+          supports: {
+            sampling: channel.supports('sampling'),
+            elicitation: channel.supports('elicitation'),
+            roots: channel.supports('roots'),
+          },
+          pending: channel.pendingCount(),
+          limitations: client === null
+            ? ['No client has completed initialize on this session, so nothing can be asked yet']
+            : [],
+        };
+      },
+    },
+    {
+      // A network effect: the answer is produced by an agent Concord does not control, it is not
+      // reproducible, and it must therefore require its own exact grant and be taken from the
+      // journal on replay. There is no origin to allowlist because no socket is opened; the only
+      // reachable party is the client already on the other end of this session.
+      name: 'peer.ask', version: '1.0.0', effect: 'network',
+      outputKeys: ['text', 'role', 'model', 'stopReason', 'source', 'untrusted', 'limitations'],
+      inputSchema: askSchema,
+      async execute(input, context) {
+        if (!channel.describeClient()) fail('PEER_NO_CLIENT', 'No client has completed initialize on this session');
+        if (!channel.supports('sampling')) {
+          fail('PEER_UNSUPPORTED', 'The connected client did not declare the sampling capability, so it cannot be asked', {
+            capabilities: channel.describeClient().capabilities,
+          });
+        }
+        const deadline = Math.min(DEFAULT_TIMEOUT_MS, context?.policy?.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+        const params = {
+          messages: [{ role: 'user', content: { type: 'text', text: input.question } }],
+          maxTokens: input.maxTokens ?? 1024,
+          // The client is asked to include none of its own context. Concord states its question in
+          // full or not at all; inheriting whatever else that agent is working on would put text
+          // Concord never saw into a request it is accountable for.
+          includeContext: 'none',
+          ...(input.systemPrompt === undefined ? {} : { systemPrompt: input.systemPrompt }),
+        };
+        const result = await channel.request('sampling/createMessage', params, { timeoutMs: deadline, signal: context?.signal });
+        const answer = checkSampling(result);
+        return {
+          ...answer,
+          source: channel.describeClient().name,
+          untrusted: true,
+          limitations: [
+            'This text was written by an agent Concord does not control and is evidence of what that agent said, not that it is true',
+            'The client may have shown this question to a person, or answered it with any model it chose; neither is visible from here',
+          ],
+        };
+      },
+    },
+    {
+      /**
+       * Ask the client for an answer it has to go and get.
+       *
+       * Where sampling asks the client's model, elicitation asks the client to obtain input —
+       * typically from the person operating it. Both are the server speaking first; which one a
+       * given client supports is up to that client, and the two are not interchangeable. Claude
+       * Code, measured at its own initialize, declares elicitation and not sampling, so on that
+       * client this is the channel that works and peer.ask is the one that refuses.
+       */
+      name: 'peer.request', version: '1.0.0', effect: 'network',
+      outputKeys: ['action', 'answered', 'content', 'source', 'untrusted', 'limitations'],
+      inputSchema: {
+        type: 'object', additionalProperties: false, required: ['message'],
+        properties: {
+          message: { type: 'string', minLength: 1, maxLength: 4096 },
+          fields: {
+            type: 'array', minItems: 1, maxItems: 16,
+            items: {
+              type: 'object', additionalProperties: false, required: ['name', 'type'],
+              properties: {
+                // Concord's schema vocabulary has no `pattern`, so the shape of a name is
+                // checked in execute() rather than declared here as a keyword the validator
+                // would reject outright.
+                name: { type: 'string', minLength: 1, maxLength: 64 },
+                type: { type: 'string', enum: ['string', 'number', 'boolean'] },
+                description: { type: 'string', maxLength: 1024 },
+                required: { type: 'boolean' },
+                enum: { type: 'array', minItems: 1, maxItems: 32, items: { type: 'string', maxLength: 256 } },
+              },
+            },
+          },
+        },
+      },
+      async execute(input, context) {
+        if (!channel.describeClient()) fail('PEER_NO_CLIENT', 'No client has completed initialize on this session');
+        if (!channel.supports('elicitation')) {
+          fail('PEER_UNSUPPORTED', 'The connected client did not declare the elicitation capability, so it cannot be asked', {
+            capabilities: channel.describeClient().capabilities,
+          });
+        }
+        // The default shape is the plain case: a question, and room for an answer in words.
+        const fields = input.fields ?? [{ name: 'answer', type: 'string', description: 'Your answer to Concord' }];
+        const names = fields.map((field) => field.name);
+        if (new Set(names).size !== names.length) fail('PEER_REQUEST', 'Each requested field needs a distinct name');
+        // A field name becomes a property key in a schema the client has to render, so it is held
+        // to a portable identifier rather than whatever a plan happened to send.
+        for (const name of names) {
+          if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name)) fail('PEER_REQUEST', 'A requested field name must be a portable identifier', { field: name });
+        }
+
+        const deadline = Math.min(DEFAULT_TIMEOUT_MS, context?.policy?.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+        const result = await channel.request('elicitation/create', {
+          message: input.message,
+          requestedSchema: requestedSchema(fields),
+        }, { timeoutMs: deadline, signal: context?.signal });
+
+        const reply = checkElicitation(result, fields);
+        return {
+          action: reply.action,
+          // Stated plainly, because "declined" and "answered with nothing" must not read alike.
+          answered: reply.action === 'accept',
+          content: reply.content,
+          source: channel.describeClient().name,
+          untrusted: true,
+          limitations: reply.action === 'accept'
+            ? ['This answer came from the client and whoever operates it; Concord cannot see whether a person typed it or the agent answered on their behalf']
+            : ['The client did not answer, and that is a decision it was entitled to make rather than a failure of the channel'],
+        };
+      },
+    },
+    {
+      // Also a network effect, for the same reason and one more: it is the only tool here that
+      // leaves a mark on someone else. A notification cannot be taken back.
+      name: 'peer.tell', version: '1.0.0', effect: 'network',
+      outputKeys: ['delivered', 'level', 'bytes', 'limitations'],
+      inputSchema: tellSchema,
+      execute(input) {
+        if (!channel.describeClient()) fail('PEER_NO_CLIENT', 'No client has completed initialize on this session');
+        const level = input.level ?? 'info';
+        channel.notify('notifications/message', { level, logger: 'concord', data: input.message });
+        return {
+          delivered: true,
+          level,
+          bytes: Buffer.byteLength(input.message),
+          limitations: [
+            'A notification has no reply, so this records that the line was written to the session and not that the client read, showed or understood it',
+          ],
+        };
+      },
+    },
+  ];
+}
