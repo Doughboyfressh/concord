@@ -1,0 +1,1 @@
+{"candidateHash":"3b7b8c4aafb90701319c0cf69ec2c1af54f7183e2d44488748ab2316cfa9ecdd","evidenceHashes":["08b230e403963d9a55a0bdd6ae1195fef40042acf758fdcf090f2263cb82fabd"],"executable":false,"lesson":"A failing json.assert fails the task rather than returning passed:false, so a plan cannot continue past a violated invariant by ignoring a boolean.","status":"proposed","version":1}

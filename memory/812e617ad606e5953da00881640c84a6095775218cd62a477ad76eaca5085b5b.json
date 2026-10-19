@@ -1,0 +1,1 @@
+{"candidateHash":"812e617ad606e5953da00881640c84a6095775218cd62a477ad76eaca5085b5b","evidenceHashes":["e82fd17037f2a696082d582b33a8d495988e530c46a20dade7e6f52da1cee10c"],"executable":false,"lesson":"text.concat is bounded at 1000 values of 65536 characters each, so building a string inside a plan cannot become an unbounded allocation.","status":"proposed","version":1}

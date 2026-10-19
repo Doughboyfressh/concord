@@ -1,0 +1,1 @@
+{"candidateHash":"c8474e17357779dd93cbc24eac7174636447f7803585b7b116888d33cbdc5a19","evidenceHashes":["cb210e568dd50a5b12b9fbdc0c50d2a73bf16f7478d6af8148a15ec55e1eeeed"],"executable":false,"lesson":"artifact.inspect identifies png from magic bytes alone, never from the file extension, and reports the SHA-256 of exactly the bytes it read.","status":"proposed","version":1}

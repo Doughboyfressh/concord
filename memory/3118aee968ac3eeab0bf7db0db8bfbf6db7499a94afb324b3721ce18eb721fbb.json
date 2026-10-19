@@ -1,0 +1,1 @@
+{"candidateHash":"3118aee968ac3eeab0bf7db0db8bfbf6db7499a94afb324b3721ce18eb721fbb","evidenceHashes":["9f94ec2e72422c481fdf4240092cecb6ca8944d27427c849645376edc3f3251b"],"executable":false,"lesson":"json.assert returns a verdict carrying an evidence hash rather than a bare boolean, so a validation result can be cited later by that hash.","status":"proposed","version":1}

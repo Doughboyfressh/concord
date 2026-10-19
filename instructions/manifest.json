@@ -19,9 +19,9 @@
       "sourceId": "deepseek-harness"
     },
     {
-      "bytes": 1095,
+      "bytes": 1581,
       "file": "ecc.md",
-      "sha256": "65224cd0aec3cde3886d9f422938e798514c40714c14aae5650b73cebfa2576e",
+      "sha256": "365d4eadf088a9e68f30c3a7e3e490671641e66eb6c79086c1810808f81410ae",
       "sourceId": "ecc"
     },
     {
@@ -31,9 +31,9 @@
       "sourceId": "ego-lite"
     },
     {
-      "bytes": 1173,
+      "bytes": 2653,
       "file": "hermes-agent.md",
-      "sha256": "55933df252ef9e12466b00eca028df7a90467b104540a5afd093e67bc3f02c7a",
+      "sha256": "76b3372b39e33792f942e0dea46a544fba6d921ffd3d3ba80fd4acf5c2362df1",
       "sourceId": "hermes-agent"
     },
     {
@@ -49,9 +49,9 @@
       "sourceId": "orca"
     },
     {
-      "bytes": 2252,
+      "bytes": 4089,
       "file": "rea.md",
-      "sha256": "5cbf4be65a9b27e8fab1262f36dbf08aa68423e23fcfc0670365c9adbf213405",
+      "sha256": "c00d5b53a1e92768f9f0150ac76e8daf70fe3a7b98d4ba7defb969875e1ad03b",
       "sourceId": "rea"
     },
     {
@@ -73,9 +73,9 @@
       "sourceId": "typesafe-docs"
     },
     {
-      "bytes": 1077,
+      "bytes": 2023,
       "file": "vercel-skills.md",
-      "sha256": "2d32d9d9977f4579bb566e0572089c25c9c2ecb1b23c0e14f19321f43a5d1bee",
+      "sha256": "f52331ad270e6099d3fc91118613556d059190a9fcf5070efe633b8fa7f7fd85",
       "sourceId": "vercel-skills"
     }
   ],

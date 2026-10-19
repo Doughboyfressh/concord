@@ -1,0 +1,1 @@
+{"candidateHash":"9418f32891d45bdd9d8c8cc546c1825cf2a382ab0d626e2b9742e75dfa956483","evidenceHashes":["458a930fddb00494b3da8b732857d3ed32813f677ff1e2cb35d8f357da259f0e"],"executable":false,"lesson":"artifact.inspect identifies wasm from magic bytes alone, never from the file extension, and reports the SHA-256 of exactly the bytes it read.","status":"proposed","version":1}

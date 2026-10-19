@@ -26,6 +26,7 @@
     "desktop": "node scripts/desktop.mjs",
     "mcp": "node src/mcp.mjs",
     "train": "node scripts/train.mjs",
+    "train:capabilities": "node scripts/train-capabilities.mjs",
     "validate": "node scripts/validate.mjs",
     "icon": "node scripts/make-icon.mjs"
   }

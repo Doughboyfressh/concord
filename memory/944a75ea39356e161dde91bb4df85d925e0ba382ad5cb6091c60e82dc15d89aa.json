@@ -1,0 +1,1 @@
+{"candidateHash":"944a75ea39356e161dde91bb4df85d925e0ba382ad5cb6091c60e82dc15d89aa","evidenceHashes":["ed270b1a370711fdd17681b9a1701fb4a7df7fbc5135a1db6ab3700e5a4e1f8e"],"executable":false,"lesson":"artifact.inspect identifies zip from magic bytes alone, never from the file extension, and reports the SHA-256 of exactly the bytes it read.","status":"proposed","version":1}
