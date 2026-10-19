@@ -6,3 +6,5 @@ runs/
 upstream/
 coverage/
 foreign-capabilities.json
+schedules/
+skills/
