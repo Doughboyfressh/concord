@@ -195,19 +195,34 @@ async function main() {
      * same code both times, and record that it was proven by repetition rather than by replay.
      */
     if (typeof exercise.call === 'function') {
+      /**
+       * Either the call throws the code, or it returns a journal that records it.
+       *
+       * The second form exists for bounds only a tool the registry does not hold can reach: the
+       * engine's own TIMEOUT needs something reliably slower than the deadline, and giving a real
+       * tool a one-millisecond budget was measured as flaky — TIMEOUT twice, then a different
+       * refusal on the third attempt. A flaky exercise is worse than none, so the exercise supplies
+       * its own slow tool and the code is still read out of the real journal rather than asserted
+       * by the exercise, which would prove nothing.
+       */
+      const wanted = exercise.expectThrow ?? exercise.expectCode;
       const invoke = async () => {
-        try { await exercise.call({ registry, policy: taskPolicy, sourceLock, workspaceRoot }); return null; }
-        catch (error) { return error instanceof HarnessError ? error.code : null; }
+        try {
+          const result = await exercise.call({ registry, policy: taskPolicy, sourceLock, workspaceRoot });
+          if (!exercise.expectCode) return null;
+          const failed = result?.events?.find?.((event) => event.type === 'failed');
+          return failed?.data?.toolCode ?? failed?.data?.code ?? result?.outcome?.code ?? null;
+        } catch (error) { return error instanceof HarnessError ? error.code : null; }
       };
       const first = await invoke();
       if (first) observedCodes.add(first);
       const second = await invoke();
-      if (first && first === exercise.expectThrow && second === first) {
+      if (first && first === wanted && second === first) {
         credit(exercise, { tool: exercise.tool, call: exercise.tool, outcome: 'refused', code: first, provenBy: 'direct-call-twice' });
       } else {
         findings.push({
           family: exercise.family, tool: exercise.tool,
-          note: `expected ${exercise.expectThrow} from a direct call, got ${first ?? 'no refusal'}${second === first ? '' : ` then ${second ?? 'no refusal'}`}`,
+          note: `expected ${wanted} from a direct call, got ${first ?? 'no refusal'}${second === first ? '' : ` then ${second ?? 'no refusal'}`}`,
         });
       }
       continue;

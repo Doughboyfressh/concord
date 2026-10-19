@@ -44,9 +44,14 @@ import path from 'node:path';
  * wrong in both directions at once: codes that do not exist sat on the frontier while codes that
  * do were never counted. Anchoring on the code-and-message pair instead is indifferent to whatever
  * the condition looks like, and it covers fail(), HarnessError() and assert() with one rule.
+ *
+ * The second string has to look like a message — containing a space or a lower-case letter —
+ * because a bare pair of shouted strings is usually a list rather than a refusal. Without that,
+ * `['ELOOP', 'EMLINK'].includes(code)` contributed ELOOP as a refusal code that nothing can raise,
+ * and it would have sat on the frontier forever inflating the denominator.
  */
 const THROWN_PATTERNS = [
-  /'([A-Z][A-Z0-9_]{2,})'\s*,\s*'/g,
+  /'([A-Z][A-Z0-9_]{2,})'\s*,\s*'[^']*[a-z ][^']*'/g,
 ];
 
 /**

@@ -8,6 +8,7 @@ import { composeExercises } from './train-exercises-compose.mjs';
 
 import { derivedExercises } from './train-exercises-derived.mjs';
 import { kernelExercises } from './train-exercises-kernel.mjs';
+import { sessionExercises } from './train-exercises-session.mjs';
 
 /**
  * What Concord is trained on: one entry per thing worth proving.
@@ -38,6 +39,7 @@ export function exercises(inventory, registry) {
     ...composeExercises(),
     ...derivedExercises(registry),
     ...kernelExercises(),
+    ...sessionExercises(),
 
     // ---- determinism -----------------------------------------------------------------
     {

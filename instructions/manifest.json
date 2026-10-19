@@ -31,9 +31,9 @@
       "sourceId": "ego-lite"
     },
     {
-      "bytes": 5025,
+      "bytes": 5194,
       "file": "hermes-agent.md",
-      "sha256": "a536c9d4d520cbc1fab3ad1804daac631295fcba921274ba2333263227eb7a74",
+      "sha256": "693765fb2e12e3be67cc6e99bf8b3a9a87e74116e56951b332708cdb310e9d05",
       "sourceId": "hermes-agent"
     },
     {
@@ -73,9 +73,9 @@
       "sourceId": "typesafe-docs"
     },
     {
-      "bytes": 3680,
+      "bytes": 4170,
       "file": "vercel-skills.md",
-      "sha256": "e403f106d7e54ddad7e2e5c193ce2afdcda7554a069f74347ab96f4ebffca952",
+      "sha256": "0f9bd3db8f9342a8064a26f86fa43cd279eecd74f715d9bc5072d8f90f44b1b3",
       "sourceId": "vercel-skills"
     }
   ],

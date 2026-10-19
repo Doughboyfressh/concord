@@ -250,6 +250,93 @@ export function kernelExercises() {
       plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'peer.post', input: { message: 'A reply to a message that was never posted.', replyTo: 9999 } }] },
       lesson: 'peer.post refuses PEER_MAILBOX when replyTo names a sequence number the mailbox does not hold, rather than filing an orphan reply. The reply link is what lets peer.inbox tell an answered question from an open one, so a link to nothing would quietly corrupt that distinction.',
     },
+    // ---- bounds that need a workspace already at its limit, or a tool of our own --------
+    {
+      family: 'kernel', tool: 'engine.runPlan', expectThrow: 'JOURNAL_LIMIT',
+      narrow: { maxJournalBytes: 1024 },
+      call: ({ registry, policy, sourceLock, workspaceRoot }) =>
+        runPlan({ plan: PLAN, policy, registry, sourceLock, approvals: [], workspaceRoot }),
+      lesson: 'A journal budget too small for the receipts a plan must write is refused JOURNAL_LIMIT as the budget is exhausted, and the message says to inspect any pending intent before retrying. The journal is written as the run proceeds, so the bound is enforced event by event rather than estimated in advance — which is why the refusal names a partial journal rather than rejecting the plan outright.',
+    },
+    {
+      family: 'kernel', tool: 'engine.runPlan', expectCode: 'TIMEOUT',
+      narrow: { timeoutMs: 1 },
+      call: ({ registry, policy, sourceLock, workspaceRoot }) => {
+        // A tool of our own, because the deadline needs something reliably slower than it is.
+        // Giving a real tool a one-millisecond budget was measured as flaky: TIMEOUT twice and a
+        // different refusal on the third run, which would make this exercise report phantom
+        // findings. The code still comes out of the real journal.
+        const slow = new Map(registry);
+        slow.set('kernel.slow', {
+          name: 'kernel.slow', version: '1.0.0', effect: 'pure', outputKeys: ['done'],
+          inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+          execute: () => new Promise((resolve) => setTimeout(() => resolve({ done: true }), 250)),
+        });
+        return runPlan({
+          plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'kernel.slow', input: {} }] },
+          policy: { ...policy, allowedTools: [...slow.keys()].sort() },
+          registry: slow, sourceLock, approvals: [], workspaceRoot,
+        });
+      },
+      lesson: 'A tool that outruns the policy deadline is recorded as a failed task whose engine code is TOOL_FAILED and whose tool code is TIMEOUT, and the signal it was handed is aborted at the same moment. The deadline is enforced by the kernel racing the tool rather than by the tool checking a clock, so a tool that ignores its signal entirely still cannot overrun the budget.',
+    },
+    {
+      family: 'scheduling', tool: 'schedule.declare', expectThrow: 'SCHEDULE_LIMIT', workspace: 'temp',
+      call: ({ registry, workspaceRoot }) => {
+        // Its own directory, because `workspace: 'temp'` is one directory shared by the whole
+        // round. Round 041 filled the shared one with five hundred and twelve schedules and broke
+        // three later exercises that had every right to expect an empty store.
+        const own = fs.mkdtempSync(path.join(workspaceRoot, 'schedule-limit-'));
+        // Written straight to disk rather than declared one at a time: five hundred and twelve
+        // granted writes would take the round far longer than the bound is worth proving.
+        const directory = path.join(own, 'schedules');
+        fs.mkdirSync(directory, { recursive: true });
+        for (let index = 0; index < 512; index += 1) {
+          const id = 'filler-' + String(index).padStart(4, '0');
+          fs.writeFileSync(path.join(directory, id + '.json'), JSON.stringify({ id, dueAt: '2027-01-01T00:00:00Z', plan: { version: 1, tasks: [] }, planHash: 'f'.repeat(64) }) + '\n');
+        }
+        return registry.get('schedule.declare').execute(
+          { id: 'one-too-many', dueAt: '2027-01-01T00:00:00Z', plan: { version: 1, tasks: [] } },
+          { workspaceRoot: own, policy: { maxOutputBytes: 1048576, timeoutMs: 10000 } },
+        );
+      },
+      lesson: 'Declaring a schedule when the bound is already full is refused SCHEDULE_LIMIT, reporting how many exist. Re-declaring an id that is already present is still allowed at the limit, because replacing a schedule is how a finished one is advanced and refusing that would wedge a full store permanently.',
+    },
+    {
+      family: 'skills', tool: 'skills.install', expectThrow: 'SKILL_LIMIT', workspace: 'temp',
+      call: ({ workspaceRoot: shared }) => {
+        // Its own directory: the shared temp workspace is reused by every exercise in the round,
+        // and a lock holding five hundred and twelve rows is not something the next one should
+        // inherit.
+        const workspaceRoot = fs.mkdtempSync(path.join(shared, 'skill-limit-'));
+        // A real, matching corpus file is required to get this far: round 041 predicted the limit
+        // would be reported first and got SKILL_UNKNOWN, because the id is resolved and its digest
+        // verified before the lock is even read. So the fixture has to be genuinely installable.
+        const body = '# Filler\n\nA real file whose digest matches what the inventory records.\n';
+        const relative = 'upstream/example/skills/filler/SKILL.md';
+        const file = path.join(workspaceRoot, relative);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, body);
+        const id = 'example:skills/filler/SKILL.md';
+        const inventory = { capabilities: [{
+          id, kind: 'skill', path: relative, sourceId: 'example', title: 'Filler',
+          status: 'source-available-unreviewed', sourceSha256: createHash('sha256').update(Buffer.from(body)).digest('hex'),
+        }] };
+
+        const directory = path.join(workspaceRoot, 'skills');
+        fs.mkdirSync(directory, { recursive: true });
+        const installed = Array.from({ length: 512 }, (unused, index) => ({
+          id: 'filler:skills/' + index + '/SKILL.md', sourcePath: 'upstream/filler/' + index + '/SKILL.md',
+          installedAs: 'skills/filler-' + index + '.md', sha256: 'e'.repeat(64), sourceId: 'filler',
+        }));
+        fs.writeFileSync(path.join(directory, 'installed.json'), JSON.stringify({ version: 1, installed }) + '\n');
+
+        return makeSkillStoreTools(inventory).find((tool) => tool.name === 'skills.install')
+          .execute({ id }, { workspaceRoot, policy: { maxOutputBytes: 1048576, timeoutMs: 10000 } });
+      },
+      lesson: 'skills.install refuses SKILL_LIMIT once the installed lock holds as many skills as the bound permits, but only after the id has been resolved and its file verified against the recorded digest. So a full store reached with a bad id reports the id, not the limit: the checks run in order of what the operator most needs to hear. Re-installing something already present stays allowed at the limit, by the same reasoning that lets a full schedule store replace an entry.',
+    },
+
     {
       family: 'skills', tool: 'skills.rank', expectCode: 'INVALID_SKILLS', workspace: 'temp',
       plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'skills.rank', input: { query: 'greeting', skills: [
