@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import http from 'node:http';
 import { createHash } from 'node:crypto';
 import { spawnBounded, limits, resolveExecutable, makeIntegrationTools } from '../src/integrations.mjs';
 import { makeAgentTools } from '../src/workers.mjs';
@@ -61,8 +62,157 @@ const foreignFor = (args, over = {}) => makeForeignTools(FOREIGN_MANIFEST, {
   servers: [{ id: 'training', executable: NODE, executableSha256: nodeDigest(), args, cwd: '.', allow: ['training_call'], timeoutMs: 400, maxOutputBytes: 65536, ...over }],
 });
 
+/**
+ * The HTTP connector half, driven by a server started for the length of one call.
+ *
+ * A loopback server on an ephemeral port is enough to reach every refusal on the response path,
+ * and it is honest about what it is testing: these codes are about how Concord treats an answer it
+ * did not compute, so the answer has to come over a socket rather than from a stub.
+ */
+const TOKEN_ENV = 'CONCORD_TRAINING_TOKEN';
+const TOKEN = 'tok-training-credential';
+
+/** Start a loopback server, run one call against it, and always shut it down. */
+async function againstServer(handler, run, { token = TOKEN } = {}) {
+  const server = http.createServer(handler);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const origin = 'http://127.0.0.1:' + server.address().port;
+  const previous = process.env[TOKEN_ENV];
+  if (token === null) delete process.env[TOKEN_ENV]; else process.env[TOKEN_ENV] = token;
+  try {
+    return await run(origin);
+  } finally {
+    server.close();
+    if (previous === undefined) delete process.env[TOKEN_ENV]; else process.env[TOKEN_ENV] = previous;
+  }
+}
+
+/** A TypeSafe connector pointed at a given origin. Its question shape is strict, so it is fixed. */
+const typeSafeFor = (origin, over = {}) => makeIntegrationTools({ typesafe: {
+  origin, apiKeyEnv: TOKEN_ENV, model: 'jev-1.0.0', timeoutMs: 1500, maxOutputBytes: 65536, ...over,
+} })[0];
+const TYPESAFE_INPUT = {
+  state: 'a state the evaluator is asked about',
+  questions: { q1: { type: 'choice', instructions: 'pick one', criteria: { yes: 'it holds', no: 'it does not' } } },
+};
+const askTypeSafe = (tool, origin, over = {}) => tool.execute(TYPESAFE_INPUT, {
+  workspaceRoot: process.cwd(),
+  policy: policyFor({ allowedTools: ['typesafe.evaluate'], allowedOrigins: [origin], ...over }),
+});
+
+/** A worker that reads JSON-RPC and answers every request with a protocol error. */
+const ERRORING_WORKER = [
+  'let buf = "";',
+  'process.stdin.on("data", (chunk) => {',
+  '  buf += chunk.toString();',
+  '  let i;',
+  '  while ((i = buf.indexOf("\\n")) >= 0) {',
+  '    const line = buf.slice(0, i); buf = buf.slice(i + 1);',
+  '    if (!line.trim()) continue;',
+  '    const msg = JSON.parse(line);',
+  '    if (msg.id !== undefined) process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: "refused" } }) + "\\n");',
+  '  }',
+  '});',
+  SLEEP,
+].join('\n');
+
+/** A foreign server that handshakes correctly and then refuses the tool call. */
+const CALL_ERRORING_SERVER = [
+  'let buf = "";',
+  'process.stdin.on("data", (chunk) => {',
+  '  buf += chunk.toString();',
+  '  let i;',
+  '  while ((i = buf.indexOf("\\n")) >= 0) {',
+  '    const line = buf.slice(0, i); buf = buf.slice(i + 1);',
+  '    if (!line.trim()) continue;',
+  '    const msg = JSON.parse(line);',
+  '    if (msg.id === undefined) continue;',
+  '    if (msg.method === "initialize") {',
+  '      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "training", version: "1" } } }) + "\\n");',
+  '    } else {',
+  '      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: { code: -32001, message: "the server declined" } }) + "\\n");',
+  '    }',
+  '  }',
+  '});',
+  SLEEP,
+].join('\n');
+
 export function processExercises() {
   return [
+    // ---- the HTTP connector: refusing an answer it did not compute ----------------------
+    {
+      family: 'process', tool: 'typesafe.evaluate', expectThrow: 'INTEGRATION_ORIGIN',
+      call: () => askTypeSafe(typeSafeFor('http://127.0.0.1:9'), 'http://127.0.0.1:9', { allowedOrigins: [] }),
+      lesson: 'A configured origin absent from the policy allowedOrigins is refused INTEGRATION_ORIGIN before any connection is attempted. Configuring an endpoint and permitting it are separate decisions: the configuration says what exists, the policy says what this run may reach.',
+    },
+    {
+      family: 'process', tool: 'typesafe.evaluate', expectThrow: 'INTEGRATION_INPUT',
+      call: () => typeSafeFor('http://127.0.0.1:9').execute({ state: 's', questions: {} }, {
+        workspaceRoot: process.cwd(),
+        policy: policyFor({ allowedTools: ['typesafe.evaluate'], allowedOrigins: ['http://127.0.0.1:9'] }),
+      }),
+      lesson: 'TypeSafe refuses INTEGRATION_INPUT for a request carrying no questions, and refuses a question whose type is not choice, score or noul or which omits its instructions. The rubric is entirely caller-supplied, so its shape is the one thing that must be checked here rather than discovered by the far end.',
+    },
+    {
+      family: 'process', tool: 'typesafe.evaluate', expectThrow: 'INTEGRATION_CREDENTIAL',
+      call: () => againstServer(
+        (request, response) => { response.writeHead(200, { 'content-type': 'application/json' }); response.end('{}'); },
+        (origin) => askTypeSafe(typeSafeFor(origin), origin),
+        { token: null },
+      ),
+      lesson: 'A credential environment variable that is unset, or holding anything outside printable ASCII, is refused INTEGRATION_CREDENTIAL before the request is built. The token is read from the environment at call time rather than stored in the configuration, so a missing credential is a runtime condition and is reported as one.',
+    },
+    {
+      family: 'process', tool: 'typesafe.evaluate', expectThrow: 'INTEGRATION_HTTP',
+      // Port 9 is the discard port: reserved, and reliably not listening.
+      call: () => againstServer(
+        (request, response) => response.end('{}'),
+        () => askTypeSafe(typeSafeFor('http://127.0.0.1:9'), 'http://127.0.0.1:9'),
+      ),
+      lesson: 'A request that cannot reach its endpoint is refused INTEGRATION_HTTP, separately from a response that arrived with a failing status. One means the far end was never spoken to and the other means it answered unhelpfully, and only the second says anything about the service.',
+    },
+    {
+      family: 'process', tool: 'typesafe.evaluate', expectThrow: 'INTEGRATION_HTTP_STATUS',
+      call: () => againstServer(
+        (request, response) => { response.writeHead(503); response.end('busy'); },
+        (origin) => askTypeSafe(typeSafeFor(origin), origin),
+      ),
+      lesson: 'A non-2xx response is refused INTEGRATION_HTTP_STATUS with the status included, and the body is discarded rather than parsed. An error page is not a result, and attempting to read one as the answer is how an outage becomes a confident wrong answer.',
+    },
+    {
+      family: 'process', tool: 'typesafe.evaluate', expectThrow: 'INTEGRATION_OUTPUT',
+      call: () => againstServer(
+        (request, response) => { response.writeHead(200, { 'content-type': 'application/json' }); response.end(Buffer.from([0xff, 0xfe, 0x00])); },
+        (origin) => askTypeSafe(typeSafeFor(origin), origin),
+      ),
+      lesson: 'A response that is not valid UTF-8 JSON is refused INTEGRATION_OUTPUT. Decoding is strict rather than lossy, because a replacement character silently substituted into an answer would be recorded in a journal as though the service had sent it.',
+    },
+
+    // ---- worker protocol: a child that speaks, and speaks badly -------------------------
+    {
+      family: 'process', tool: 'dsh.run', expectThrow: 'WORKER_POLICY', workspace: 'temp',
+      call: ({ workspaceRoot }) => runWorker(workerFor(workspaceRoot, ['-e', '0']), workspaceRoot, { policy: policyFor({ allowedTools: ['dsh.run'], timeoutMs: 0 }) }),
+      lesson: 'A worker refuses WORKER_POLICY when the policy deadline or output budget is not a positive bounded integer, and checks both before spawning. A zero budget permits nothing, so treating it as absent and substituting a default would run the child under a bound nobody chose.',
+    },
+    {
+      family: 'process', tool: 'dsh.run', expectThrow: 'WORKER_RPC', workspace: 'temp',
+      fixture: (dir) => script(dir, 'worker-errors.cjs', ERRORING_WORKER),
+      call: ({ workspaceRoot }) => runWorker(workerFor(workspaceRoot, [path.join(workspaceRoot, 'worker-errors.cjs')]), workspaceRoot, { policy: policyFor({ allowedTools: ['dsh.run'], timeoutMs: 2500 }) }),
+      lesson: 'A worker that answers a request with a JSON-RPC error is refused WORKER_RPC, and only the numeric code is carried out — not the message. A runtime diagnostic may contain credentials or paths, so the code travels and the prose does not.',
+    },
+
+    // ---- foreign protocol: a server that handshakes and then declines -------------------
+    {
+      family: 'process', tool: 'foreign.call', expectThrow: 'FOREIGN_CALL_FAILED', workspace: 'temp',
+      fixture: (dir) => script(dir, 'server-declines.cjs', CALL_ERRORING_SERVER),
+      call: ({ workspaceRoot }) => {
+        const tools = foreignFor([path.join(workspaceRoot, 'server-declines.cjs')], { timeoutMs: 2500 });
+        const call = tools.find((tool) => tool.effect === 'process');
+        return call.execute({}, { workspaceRoot, policy: policyFor({ allowedTools: tools.map((tool) => tool.name) }) });
+      },
+      lesson: 'A foreign server that completes the handshake and then returns an error for the call is refused FOREIGN_CALL_FAILED, which is distinct from a handshake that never finished and from a deadline that expired. Each says something different about where the exchange broke, and a server answering an error is one that is working as designed.',
+    },
+
     // ---- spawnBounded: the lifecycle of a child -----------------------------------------
     {
       family: 'process', tool: 'integrations.spawnBounded', expectThrow: 'INTEGRATION_EXIT', workspace: 'temp',
