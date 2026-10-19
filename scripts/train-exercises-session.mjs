@@ -3,6 +3,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createClientChannel, makePeerTools } from '../src/peer.mjs';
 import { makeSourceTools, loadSourceLock } from '../src/sources.mjs';
+import { makeReverseTools } from '../src/reverse.mjs';
+import { createHash } from 'node:crypto';
+import { parseJson } from '../src/value.mjs';
 
 /**
  * The session half of the system: a live client channel, and reading a reviewed source.
@@ -17,14 +20,19 @@ import { makeSourceTools, loadSourceLock } from '../src/sources.mjs';
  * output budget, an already-aborted signal. A plan cannot supply those, because the engine builds
  * the context and would reject each of them before any tool saw it.
  *
- * Every code below was raised for real first, and three attempts along the way were wrong in ways
+ * Every code below was raised for real first, and several attempts along the way were wrong in ways
  * worth recording. A pending question's deadline timer is unref'd — deliberately, so a question
  * never keeps the process alive — which means awaiting PEER_TIMEOUT in a bare script lets the
  * process exit before it fires; it needs a ref'd keepalive, and the exercises below carry one.
  * Calling peer.request with `prompt` instead of `message` produced PEER_REQUEST rather than a
  * schema error, because a direct call bypasses the engine's validation — the same trap that made
- * skills.rank look broken. And a wrong expectedDigest answered SKILL_INVALID rather than
- * DIGEST_MISMATCH, so that one is deliberately absent rather than guessed at.
+ * skills.rank look broken.
+ *
+ * DIGEST_MISMATCH took four wrong attempts and is worth the detail. A plain markdown file, a
+ * README, a bare SKILL.md and a SKILL.md without YAML frontmatter all answer SKILL_INVALID, and
+ * the digest is never compared at all. It was briefly written off here as unreachable on that
+ * evidence, which was the wrong conclusion from a real observation: the snapshot has to succeed
+ * before the digest check is the thing being tested.
  */
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -58,6 +66,9 @@ async function answered(pending, reply, made) {
   made.deliver({ jsonrpc: '2.0', id: 'concord-1', result: reply });
   return awaiting(pending);
 }
+
+/** The committed reverse table, for the config refusals that need a valid one. */
+const reverseTable = () => parseJson(fs.readFileSync(path.join(root, 'reverse-tools.json'), 'utf8'));
 
 const sourceTools = () => loadSourceLock(path.join(root, 'sources.lock.json'))
   .then((catalog) => ({ tools: byName(makeSourceTools(catalog)), sourceId: catalog.sources[0].id }));
@@ -204,6 +215,62 @@ export function sessionExercises() {
         return tools.get('skills.snapshot').execute({ path: 'binary.md', sourceId }, { workspaceRoot, policy: toolPolicy });
       },
       lesson: 'A file containing a NUL byte is refused SKILL_INVALID: a skill snapshot holds UTF-8 text, and binary content is rejected rather than captured as mojibake. A snapshot is meant to be read by a person and by a model, and neither can read bytes that are not text.',
+    },
+    {
+      family: 'catalog', tool: 'skills.snapshot', expectThrow: 'DIGEST_MISMATCH', workspace: 'temp',
+      // A valid skill is the precondition, and finding that out took four failed attempts: a plain
+      // markdown file, a README, a bare SKILL.md and a SKILL.md with no frontmatter all answer
+      // SKILL_INVALID long before any digest is compared. The snapshot has to succeed for the
+      // digest check to be the thing under test.
+      fixture: (dir) => {
+        fs.mkdirSync(path.join(dir, 'digest-skill'), { recursive: true });
+        fs.writeFileSync(path.join(dir, 'digest-skill', 'SKILL.md'),
+          '---\nname: digest-skill\ndescription: A valid skill a training exercise snapshots.\n---\n\n# Digest Skill\n\nDo the thing.\n');
+      },
+      call: async ({ workspaceRoot }) => {
+        const { tools, sourceId } = await sourceTools();
+        return tools.get('skills.snapshot').execute(
+          { path: 'digest-skill', sourceId, expectedDigest: 'd'.repeat(64) },
+          { workspaceRoot, policy: toolPolicy },
+        );
+      },
+      lesson: 'skills.snapshot refuses DIGEST_MISMATCH when the snapshot it captured does not hash to the expectedDigest the caller named, and only reaches that comparison for a snapshot that otherwise succeeded. Passing the digest you already believe is the point: it turns a read into a verification, so a corpus that moved under you is reported rather than returned as though it were what you asked for.',
+    },
+
+    /**
+     * The reverse family, which needs a provider the operator reviewed.
+     *
+     * No provider is configured in this deployment, so these build their own table and a dummy
+     * executable rather than depending on one being installed. Two things were learned the hard
+     * way: providers are declared in the *config* and not in the table, and the resulting tool has
+     * to be in allowedTools or limits() refuses it as INTEGRATION_POLICY before any of this is
+     * reached. Neither spawns anything — both refusals land before the process would start.
+     */
+    {
+      family: 'catalog', tool: 'reverse.factory', expectThrow: 'REVERSE_CONFIG',
+      call: () => makeReverseTools(reverseTable(), { nonsense: true }),
+      lesson: 'makeReverseTools refuses REVERSE_CONFIG for a configuration field it does not recognise, naming the field. The configuration decides which executables may run, so an unrecognised key is treated as a reviewer having meant something the code cannot honour rather than as noise to skip.',
+    },
+    {
+      family: 'catalog', tool: 'rea.provider', expectThrow: 'REVERSE_INPUT', workspace: 'temp',
+      call: ({ workspaceRoot }) => {
+        // workspace: 'temp' is load-bearing. Without it this writes its stand-in executable into
+        // the repository root, which is how 512 filler schedules got committed two rounds ago.
+        const executable = path.join(workspaceRoot, 'reviewed-tool.bin');
+        fs.writeFileSync(executable, 'a stand-in for a reviewed executable');
+        const executableSha256 = createHash('sha256').update(fs.readFileSync(executable)).digest('hex');
+        const table = {
+          schemaVersion: 1, revision: 'a'.repeat(40), sourceId: 'training',
+          tools: [{ name: 'training_tool', provider: 'training', effect: 'process', basis: 'runs a reviewed executable', implementedBy: null, internalizable: false, module: 'training' }],
+        };
+        const tools = makeReverseTools(table, { providers: [{ name: 'training', executable, executableSha256, commands: { training_tool: ['--path', '{path}'] } }] });
+        const tool = tools.find((candidate) => candidate.name === 'rea.training_tool');
+        return tool.execute({ path: '-not-a-path' }, {
+          workspaceRoot,
+          policy: { ...toolPolicy, allowedTools: tools.map((candidate) => candidate.name).sort(), allowedEffects: ['pure', 'read', 'write', 'network', 'process'] },
+        });
+      },
+      lesson: 'A value filling an argv template slot may not begin with a dash, and is refused REVERSE_INPUT naming the slot. Argv comes only from a reviewed template, and a slot value that looks like a flag is how a path turns into an option the reviewer never approved — so it is rejected while the command line is being built, before any process exists.',
     },
   ];
 }

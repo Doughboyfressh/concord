@@ -1,5 +1,5 @@
 import { runPlan, replayPlan, attenuatePolicy } from '../src/engine.mjs';
-import { canonical, parseJson, validateSchema } from '../src/value.mjs';
+import { canonical, digest, parseJson, validateSchema } from '../src/value.mjs';
 import { makeCapabilityTools } from '../src/capabilities.mjs';
 import { makeReverseTools } from '../src/reverse.mjs';
 import { makeForeignTools } from '../src/foreign.mjs';
@@ -29,10 +29,11 @@ import { createHash } from 'node:crypto';
  * workspace is REPLAY_CONTEXT rather than REPLAY_ROOT. Both guesses were plausible and both were
  * wrong, which is the argument for probing.
  *
- * Two replay codes are deliberately absent. REPLAY_LIMIT needs a journal larger than a legal budget
- * and REPLAY_TRANSITION needs a journal whose hash chain has been recomputed around an illegal
- * transition — that is, a forgery rather than a corruption. Neither is written as a half-exercise
- * that would pass for the wrong reason; they stay on the frontier where they can still be seen.
+ * The replay checks are exercised against a re-signed journal rather than a corrupted one, which
+ * is a stronger claim. An earlier version of this file said REPLAY_LIMIT, REPLAY_OUTPUT and
+ * REPLAY_TRANSITION were out of reach because getting to them needed "a forgery rather than a
+ * corruption". That was a description of the work, not a reason to skip it — the forgery is the
+ * adversary the checks exist for, and building it took one function.
  */
 
 const PLAN = { version: 1, name: 't', tasks: [{ id: 'a', tool: 'json.hash', input: { value: { a: 1 } } }] };
@@ -43,6 +44,30 @@ const journalFor = ({ registry, policy, sourceLock, workspaceRoot }) =>
 
 /** Clone a journal so a tamper never mutates the original. */
 const copy = (journal) => JSON.parse(JSON.stringify(journal));
+
+/**
+ * Rebuild a journal's hash chain after editing it: the adversary these checks actually face.
+ *
+ * eventHash is digest({previous, seq, type, data}) and digest is exported, so anyone holding the
+ * source can re-sign a journal they have altered. Corrupting one byte and watching REPLAY_CHAIN
+ * fire therefore proves less than it appears to — it only shows the chain detects damage, not that
+ * the semantic checks behind it hold against a forgery. Re-signing is what reaches those, and the
+ * checks that fire afterwards are the ones carrying the real weight.
+ *
+ * Re-signing an otherwise untouched journal reproduces the original hashes exactly and still
+ * replays, which is the expected result rather than a hole: identical input, identical chain.
+ */
+function resign(journal) {
+  let previous = digest(journal.header);
+  journal.events.forEach((event, seq) => {
+    event.seq = seq;
+    event.previous = previous;
+    event.hash = digest({ previous, seq, type: event.type, data: event.data });
+    previous = event.hash;
+  });
+  journal.root = previous;
+  return journal;
+}
 
 export function kernelExercises() {
   return [
@@ -141,6 +166,56 @@ export function kernelExercises() {
         return replayPlan({ journal, plan: PLAN, policy: context.policy, registry: context.registry, sourceLock: context.sourceLock, approvals: [], workspaceRoot: context.workspaceRoot });
       },
       lesson: 'Replacing the journal root while leaving every event intact is refused REPLAY_ROOT: the root must equal the hash the event chain actually ends on. The chain proves the events agree with each other and the root is the single value committing to all of them, so both are checked rather than one standing in for the other.',
+    },
+
+    /**
+     * The same three checks again, this time against a journal whose chain was rebuilt.
+     *
+     * These are the ones that matter. REPLAY_CHAIN catches damage; everything below catches someone
+     * who knew the format and fixed the hashes afterwards, which is the only attacker worth
+     * modelling for a record that is meant to be evidence.
+     */
+    {
+      family: 'kernel', tool: 'engine.replayPlan', expectThrow: 'REPLAY_OUTPUT',
+      call: async (context) => {
+        const journal = copy(await journalFor(context));
+        const completed = journal.events.find((event) => event.type === 'completed');
+        completed.data.unexpected = true;
+        return replayPlan({ journal: resign(journal), plan: PLAN, policy: context.policy, registry: context.registry, sourceLock: context.sourceLock, approvals: [], workspaceRoot: context.workspaceRoot });
+      },
+      lesson: 'A re-signed journal whose output receipt carries an extra field is refused REPLAY_OUTPUT. The receipt must have exactly taskId, output and outputHash, so the shape is asserted rather than merely read — an unrecognised field is the shape of someone having added something, and a checker that ignored unknown keys would accept it.',
+    },
+    {
+      family: 'kernel', tool: 'engine.replayPlan', expectThrow: 'REPLAY_OUTPUT',
+      call: async (context) => {
+        const journal = copy(await journalFor(context));
+        const completed = journal.events.find((event) => event.type === 'completed');
+        completed.data.output = { digest: 'a value nobody computed' };
+        return replayPlan({ journal: resign(journal), plan: PLAN, policy: context.policy, registry: context.registry, sourceLock: context.sourceLock, approvals: [], workspaceRoot: context.workspaceRoot });
+      },
+      lesson: 'Rewriting a recorded output and re-signing the chain is still refused, now as REPLAY_OUTPUT, because the receipt commits to the digest of its own output. So the chain is not the only thing binding a result: even with every hash rebuilt, the output has to be the one its own receipt claims. Replay never re-executes the tool, which is exactly why this inner check has to exist.',
+    },
+    {
+      family: 'kernel', tool: 'engine.replayPlan', expectThrow: 'REPLAY_TRANSITION',
+      call: async (context) => {
+        const journal = copy(await journalFor(context));
+        journal.events[1].type = 'blocked';
+        return replayPlan({ journal: resign(journal), plan: PLAN, policy: context.policy, registry: context.registry, sourceLock: context.sourceLock, approvals: [], workspaceRoot: context.workspaceRoot });
+      },
+      lesson: 'A re-signed journal claiming a task was blocked where an intent belongs is refused REPLAY_TRANSITION, naming the event type it expected. The order of events is part of the contract, not an accident of how they were written, so a sequence that is internally consistent but describes an impossible run is still rejected.',
+    },
+    {
+      family: 'kernel', tool: 'engine.replayPlan', expectThrow: 'REPLAY_LIMIT',
+      // Large enough to run and then be inflated past the same bound: the header commits to the
+      // policy, so replaying under a smaller budget would fail REPLAY_CONTEXT first and prove
+      // nothing about the journal's size.
+      narrow: { maxJournalBytes: 8192 },
+      call: async (context) => {
+        const journal = copy(await journalFor(context));
+        journal.events.splice(1, 0, { ...journal.events[1], type: 'note', data: { filler: 'z'.repeat(16384) } });
+        return replayPlan({ journal: resign(journal), plan: PLAN, policy: context.policy, registry: context.registry, sourceLock: context.sourceLock, approvals: [], workspaceRoot: context.workspaceRoot });
+      },
+      lesson: 'A journal padded past the replay budget is refused REPLAY_LIMIT before any event is verified, so verification cannot be used to make a reader do unbounded work. The budget is checked against the header and events together, and the header is unchanged by padding, which is why the size check has to be separate from the context check.',
     },
 
     // ---- value: the JSON domain the kernel can record ----------------------------------

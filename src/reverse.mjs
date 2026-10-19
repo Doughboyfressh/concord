@@ -224,6 +224,11 @@ export function makeReverseTools(table, config = {}) {
           const bound = limits(processShape, context, 'rea.' + tool, 'process');
           const args = renderArgv(entry, input, context.workspaceRoot);
           const { executable, cwd } = await resolveExecutable(processShape, context.workspaceRoot);
+          // Narrower than it looks: limits() above already refuses an aborted signal as
+          // INTEGRATION_ABORTED, so this only fires when cancellation lands in the window while
+          // renderArgv and resolveExecutable are running. Measured — an already-aborted signal
+          // raises INTEGRATION_ABORTED and never reaches here. Kept because that window is real
+          // and resolveExecutable awaits, so the check is not redundant, only hard to reach.
           if (context?.signal?.aborted) fail('REVERSE_ABORTED', 'Provider call was cancelled');
           const { env, secrets } = processEnv(processShape);
           const result = await spawnBounded({
