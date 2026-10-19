@@ -27,7 +27,10 @@ import { parseJson } from '../src/value.mjs';
 
 const BEGIN = '<!-- trained:begin -->';
 const END = '<!-- trained:end -->';
-const MAX_LESSONS_PER_MODULE = 12;
+// Raised from 12 once the chat context began selecting lessons per turn rather than taking the
+// whole section. The module is the durable store and the context layer decides what a given turn
+// needs, so this bounds what training may accumulate per source rather than what a model sees.
+const MAX_LESSONS_PER_MODULE = 40;
 
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
@@ -79,11 +82,32 @@ export function updateInstructions({ root, learned }) {
     const file = path.join(instructionRoot, `${sourceId}.md`);
     if (!module || !fs.existsSync(file)) continue;
 
-    // Sorted and capped so the same lessons always produce the same bytes: an instruction module
-    // that churned on every round would make its digest meaningless as a record of review.
-    const lessons = [...new Map(entries.map((entry) => [entry.lesson, entry])).values()]
-      .sort((a, b) => (a.tool < b.tool ? -1 : a.tool > b.tool ? 1 : (a.lesson < b.lesson ? -1 : 1)))
-      .slice(0, MAX_LESSONS_PER_MODULE);
+    /**
+     * One slot per lesson, not one per tool that happens to share it.
+     *
+     * Deduplicating on the exact text was not enough. Reader lessons are generated from a template
+     * and differ only by the tool name they open with, so twenty-six of them are the same sentence
+     * twenty-six times over — and three of rea.md's twelve slots were holding it. These modules are
+     * loaded into every live chat turn, so a quarter of that module's training payload was one
+     * fact repeated, crowding out lessons that say something else.
+     *
+     * Collapsing on the text with the tool's own name removed fixes it, and the representative says
+     * how many tools it speaks for. Dropping the count would be worse than keeping the duplicates:
+     * a reader would have no way to tell a fact about one tool from a fact about twenty-six.
+     *
+     * Still sorted and capped, so the same lesson set always produces the same bytes — a module
+     * that churned every round would make its digest worthless as a record of review. The count
+     * only moves when the lessons themselves do, which is exactly when the digest should change.
+     */
+    const familyOf = (entry) => entry.lesson.split(entry.tool).join('').replace(/\s+/g, ' ').trim();
+    const ordered = [...entries].sort((a, b) => (a.tool < b.tool ? -1 : a.tool > b.tool ? 1 : (a.lesson < b.lesson ? -1 : 1)));
+    const families = new Map();
+    for (const entry of ordered) {
+      const key = familyOf(entry);
+      if (!families.has(key)) families.set(key, { entry, shared: 0 });
+      else families.get(key).shared += 1;
+    }
+    const lessons = [...families.values()].slice(0, MAX_LESSONS_PER_MODULE);
 
     const body = [
       '## Proven by training',
@@ -92,7 +116,9 @@ export function updateInstructions({ root, learned }) {
       'and replayed. These are observations about behaviour, not permissions: nothing here grants',
       'anything, and an unreviewed source stays unreviewed.',
       '',
-      ...lessons.map((entry) => `- \`${entry.tool}\` — ${entry.lesson}`),
+      ...lessons.map(({ entry, shared }) => shared
+        ? `- \`${entry.tool}\`, and ${shared} other tool${shared === 1 ? '' : 's'} alike — ${entry.lesson}`
+        : `- \`${entry.tool}\` — ${entry.lesson}`),
     ].join('\n');
 
     const next = rewriteSection(fs.readFileSync(file, 'utf8'), body);

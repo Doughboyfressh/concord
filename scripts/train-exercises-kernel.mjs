@@ -6,6 +6,7 @@ import { makeForeignTools } from '../src/foreign.mjs';
 import { makeMailboxTools } from '../src/peer.mjs';
 import { makeSourceTools } from '../src/sources.mjs';
 import { makeSkillStoreTools, skillSlug } from '../src/skillstore.mjs';
+import { boundedByRelevance } from '../src/chat-data.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -216,6 +217,34 @@ export function kernelExercises() {
         return replayPlan({ journal: resign(journal), plan: PLAN, policy: context.policy, registry: context.registry, sourceLock: context.sourceLock, approvals: [], workspaceRoot: context.workspaceRoot });
       },
       lesson: 'A journal padded past the replay budget is refused REPLAY_LIMIT before any event is verified, so verification cannot be used to make a reader do unbounded work. The budget is checked against the header and events together, and the header is unchanged by padding, which is why the size check has to be separate from the context check.',
+    },
+
+    /**
+     * Compaction, which is the one place determinism is load-bearing and invisible.
+     *
+     * A context that varied between runs would make a recorded turn unreplayable with nothing
+     * looking wrong — the journal would verify and the prompt it was produced from would be gone.
+     * So this asserts the bound, the declared omission, and that two calls agree exactly, with an
+     * input far larger than any real instruction set.
+     */
+    {
+      family: 'kernel', tool: 'chat-data.boundedByRelevance',
+      call: () => boundedByRelevance(
+        Array.from({ length: 20000 }, (unused, index) => ({
+          id: 'lesson-' + String(index).padStart(6, '0'),
+          text: index % 7 === 0
+            ? 'reconstruction coverage inferred observation ' + index + ' ' + 'filler '.repeat(20)
+            : 'unrelated matter ' + index + ' ' + 'filler '.repeat(20),
+        })),
+        { query: 'reconstruction coverage inferred observation', maxBytes: 12288 },
+      ),
+      expect: (r) => Buffer.byteLength(canonical(r.items)) <= 12288
+        && r.items.length > 0 && r.omittedCount === r.totalCount - r.items.length
+        && r.totalCount === 20000 && r.omittedIds.length === r.omittedCount
+        && /^[0-9a-f]{64}$/.test(r.fullDigest) && r.strategy === 'lexical-overlap-v1'
+        // Everything kept is relevant: the budget is spent on the query, not on the first items.
+        && r.items.every((item) => /reconstruction coverage/.test(item.text)),
+      lesson: 'Context compaction selects by lexical relevance to the current message and fits a declared byte budget, so twenty thousand candidate lessons still produce a payload under twelve kilobytes — and every one kept matches the query rather than merely coming first. What is dropped is declared, not hidden: the count, the digest of the whole set, and the id of each omitted item, so an omission is auditable and the omitted material can be fetched back by id. Two calls with the same inputs return byte-identical results, which is what lets a turn whose context was compacted still replay. Compaction by asking a model to summarise cannot offer that, because summarising is a fresh inference each time and replay would verify a run against a context that no longer exists.',
     },
 
     // ---- value: the JSON domain the kernel can record ----------------------------------

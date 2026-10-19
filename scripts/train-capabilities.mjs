@@ -205,6 +205,39 @@ async function main() {
        * its own slow tool and the code is still read out of the real journal rather than asserted
        * by the exercise, which would prove nothing.
        */
+      /**
+       * A call that is supposed to succeed, asserted on its return value.
+       *
+       * Invoked twice like every other call exercise, and the two results must canonicalise
+       * identically — so a pure function is checked for determinism structurally rather than being
+       * assumed to have it. That matters most for the one place determinism is load-bearing and
+       * invisible: context compaction, where a selection that varied between runs would make a
+       * recorded turn unreplayable without anything looking wrong.
+       */
+      if (exercise.expect && !exercise.expectThrow && !exercise.expectCode) {
+        const context = { registry, policy: taskPolicy, sourceLock, workspaceRoot };
+        let first;
+        let second;
+        try {
+          first = await exercise.call(context);
+          second = await exercise.call(context);
+        } catch (error) {
+          findings.push({ family: exercise.family, tool: exercise.tool, note: 'expected a value from a direct call, but it threw ' + (error instanceof HarnessError ? error.code : error.message) });
+          continue;
+        }
+        const held = (() => { try { return Boolean(exercise.expect(first)); } catch { return false; } })();
+        const stable = canonical(first) === canonical(second);
+        if (held && stable) {
+          credit(exercise, { tool: exercise.tool, call: exercise.tool, outcome: 'returned', provenBy: 'direct-call-twice-identical' });
+        } else {
+          findings.push({
+            family: exercise.family, tool: exercise.tool,
+            note: held ? 'returned as predicted but the two calls differed, so it is not deterministic' : 'prediction did not hold for the returned value',
+          });
+        }
+        continue;
+      }
+
       const wanted = exercise.expectThrow ?? exercise.expectCode;
       const invoke = async () => {
         try {

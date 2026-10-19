@@ -31,9 +31,9 @@
       "sourceId": "ego-lite"
     },
     {
-      "bytes": 5194,
+      "bytes": 9239,
       "file": "hermes-agent.md",
-      "sha256": "693765fb2e12e3be67cc6e99bf8b3a9a87e74116e56951b332708cdb310e9d05",
+      "sha256": "a4d95142a34e2bfb172abf58520b1320deaa5a50844b984ad5f8b87113a230e3",
       "sourceId": "hermes-agent"
     },
     {
@@ -49,9 +49,9 @@
       "sourceId": "orca"
     },
     {
-      "bytes": 7000,
+      "bytes": 15281,
       "file": "rea.md",
-      "sha256": "3ef11ec12e0a9f35580fa5b524fe8c5fe76c4de5edc353f093d5b164541fdb39",
+      "sha256": "23e7f072ae664d519edbf010683b044cfb7764e22cacf2713fa3f8d1e66b5d4b",
       "sourceId": "rea"
     },
     {

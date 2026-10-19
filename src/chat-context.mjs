@@ -3,11 +3,52 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { canonical, clone, HarnessError } from './value.mjs';
 import { normalizePolicy } from './engine.mjs';
-import { boundedRecords, boundedValue } from './chat-data.mjs';
+import { boundedRecords, boundedValue, boundedByRelevance } from './chat-data.mjs';
 
 const MAX_INSTRUCTION_BYTES = 65536;
 const MAX_MANIFEST_BYTES = 65536;
 const decoder = new TextDecoder('utf-8', { fatal: true });
+
+/**
+ * The section training writes into a module, and the budget its lessons get in one turn.
+ *
+ * A module has two halves with different standing. The reviewed prose is the vetted contract for
+ * a source and is included entire, every turn — that is what makes sourceCoverage always the whole
+ * pinned set. The trained section is machine-generated and grows without limit as training earns
+ * more, so it is the half that has to be chosen rather than concatenated.
+ *
+ * Before this, every lesson in every module went into every prompt, and the only thing keeping the
+ * prompt finite was a cap of twelve lessons per module applied when the file was written. That cap
+ * bounded the wrong thing: it limited what training was allowed to remember, not what a given turn
+ * needed to be told. Measured at the time, 34 of 228 earned lessons reached the model — and which
+ * 34 was decided alphabetically, which is unrelated to the question being asked.
+ */
+const TRAINED_BEGIN = '<!-- trained:begin -->';
+const TRAINED_END = '<!-- trained:end -->';
+const TRAINED_BUDGET_BYTES = 12288;
+
+/**
+ * Split a module into its reviewed prose and its individually-addressable trained lessons.
+ *
+ * Each lesson keeps the tool name it opens with as its id, so an omitted lesson can be named in
+ * the omission record rather than merely counted.
+ */
+function splitTrained(sourceId, text) {
+  const begin = text.indexOf(TRAINED_BEGIN);
+  const end = text.indexOf(TRAINED_END);
+  if (begin < 0 || end < begin) return { prose: text, preamble: '', lessons: [] };
+  const section = text.slice(begin + TRAINED_BEGIN.length, end);
+  const prose = text.slice(0, begin) + text.slice(end + TRAINED_END.length);
+  const lines = section.split('\n');
+  const lessons = [];
+  const preamble = [];
+  for (const line of lines) {
+    const match = /^- `([^`]+)`/.exec(line);
+    if (match) lessons.push({ id: `${sourceId}:${match[1]}`, text: line });
+    else if (line.trim()) preamble.push(line);
+  }
+  return { prose, preamble: preamble.join('\n'), lessons };
+}
 
 function sha256(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
 
@@ -75,6 +116,36 @@ export function buildChatContext({ message, history, observations = [], proposed
     if (digestHex !== entry.sha256) throw new HarnessError('CHAT_CONTEXT', 'Instruction module does not match its recorded digest', { sourceId: id });
     return { sourceId: id, file: entry.file, sha256: digestHex, text: decoder.decode(bytes) };
   });
+
+  /**
+   * Choose which earned lessons this turn is told, and declare the rest.
+   *
+   * Ranked across every module at once rather than per module, because a budget divided evenly
+   * would give an unrelated source as much room as the one the question is about. The reviewed
+   * prose is untouched — only the trained bullets compete for the budget.
+   *
+   * Compaction here is a pure function of the message, the modules and the budget, so the same
+   * turn assembles the same prompt byte for byte and a run that was compacted still replays. That
+   * is the part no model-summarised compaction can do: summarising is a fresh inference each time,
+   * so replaying a run would verify it against a context that no longer exists.
+   */
+  const split = new Map(instructions.map((module) => [module.sourceId, splitTrained(module.sourceId, module.text)]));
+  const allLessons = instructions.flatMap((module) => split.get(module.sourceId).lessons);
+  const trained = boundedByRelevance(allLessons, { query: message, maxBytes: TRAINED_BUDGET_BYTES });
+  const keptLessons = new Set(trained.items.map((lesson) => lesson.id));
+  const instructionText = instructions.map((module) => {
+    const { prose, preamble, lessons } = split.get(module.sourceId);
+    const kept = lessons.filter((lesson) => keptLessons.has(lesson.id));
+    if (!lessons.length) return `## ${module.sourceId}\n${prose}`;
+    const dropped = lessons.length - kept.length;
+    const note = dropped
+      ? `\n(${dropped} further proven lesson${dropped === 1 ? '' : 's'} for this source were not selected for this turn.)`
+      : '';
+    const section = kept.length
+      ? `${TRAINED_BEGIN}\n${preamble}\n${kept.map((lesson) => lesson.text).join('\n')}${note}\n${TRAINED_END}`
+      : `${TRAINED_BEGIN}\n${preamble}${note}\n${TRAINED_END}`;
+    return `## ${module.sourceId}\n${prose.trimEnd()}\n\n${section}`;
+  }).join('\n\n');
 
   // capabilities.search is a registered 'pure' tool: calling it directly to preview
   // relevant corpus references carries no side effects and grants no capability.
@@ -233,8 +304,8 @@ export function buildChatContext({ message, history, observations = [], proposed
     'plan as data; you cannot grant yourself a capability, effect, or approval the supervisor has not recorded.' +
     '\n\n' + outputContract + '\n\n' + behavior + '\n\nRegistered tool contracts:\n' + contractText +
     '\n\nEffective policy (null means not supplied, never an approval):\n' + canonical(effectivePolicy) +
-    '\n\n' + instructions.map(m => `## ${m.sourceId}\n${m.text}`).join('\n\n');
+    '\n\n' + instructionText;
 
   void inventory;
-  return { sourceCoverage: sourceIds, instructions, selected, reply, systemPrompt, toolContracts, conversation, observations: evidence, proposal };
+  return { sourceCoverage: sourceIds, instructions, selected, reply, systemPrompt, toolContracts, conversation, observations: evidence, proposal, trained };
 }

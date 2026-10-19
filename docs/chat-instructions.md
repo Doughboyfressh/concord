@@ -16,10 +16,38 @@ bytes}`). Every turn, `buildChatContext`:
 3. Concatenates all thirteen into the `systemPrompt` passed to a live model, and returns their source ids as
    `sourceCoverage` for display.
 
-This is why `sourceCoverage.length` is always `13`: the instruction set is not retrieved or ranked per turn, it
-is the complete reviewed corpus, every time. Changing an instruction module's text without updating its
+This is why `sourceCoverage.length` is always `13`: the reviewed instruction set is not retrieved or ranked per
+turn, it is the complete reviewed corpus, every time. Changing an instruction module's text without updating its
 manifest digest — or changing which sources are pinned without updating the manifest to match — breaks every
 subsequent chat turn until the manifest is regenerated, by design.
+
+### The one part of a module that is selected per turn
+
+A module has two halves with different standing, and only one of them is always included entire.
+
+The reviewed prose is the vetted contract for a source. It is included whole, every turn, which is what the
+paragraph above is about. The `<!-- trained:begin -->` section is different: it is written by
+`scripts/train-consolidate.mjs` from lessons training has proven, it grows as training earns more, and no
+reviewer wrote it. Those bullets are selected per turn by `boundedByRelevance`, ranked by lexical overlap with
+the current message and fitted to a byte budget.
+
+This replaced a cap of twelve lessons per module applied when the file was written, which bounded the wrong
+thing — what training was allowed to remember rather than what a turn needed to be told. Measured before the
+change: 34 of 228 earned lessons reached the model, and which 34 was decided alphabetically. The cap is now 40
+per module and the selection is per question.
+
+Three properties are load-bearing:
+
+- **Bounded.** The payload fits a declared budget regardless of how much training has accumulated. Measured at
+  200,000 candidate lessons: the selection still came to 12,204 bytes against a 12,288-byte budget.
+- **Deterministic.** Selection is a pure function of the message, the modules and the budget. Scores come from
+  lexical overlap, ties break on the lesson's own id, and the kept set is emitted in the modules' own order, so
+  the same turn assembles the same prompt byte for byte. This is why compaction here is not a model
+  summarisation: a summary is a fresh inference each time, so a replayed run would be verifying itself against
+  a context that no longer exists.
+- **Declared.** What was dropped is reported, never hidden — the count, the digest of the whole set, and the id
+  of each omitted lesson, returned as `trained` alongside the prompt and noted in the module text the model
+  sees. An omission is auditable, and because each one is named by id it can be fetched back rather than lost.
 
 ## What does vary per turn: capability preview
 
