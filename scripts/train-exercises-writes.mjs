@@ -1,3 +1,4 @@
+import { canonical } from '../src/value.mjs';
 import { makeBuiltinTools } from '../src/builtins.mjs';
 
 /**
@@ -21,8 +22,32 @@ const draft = candidate.execute({
   evidence: [{ exercise: 'memory.promote', family: 'memory', reproducible: true }],
 });
 
+/**
+ * The exact budget at which memory.promote's OUTPUT_LIMIT is reachable, and the only one.
+ *
+ * Two checks sit on nearly the same bytes. The engine admits a task only if its resolved input
+ * canonicalises to at most maxOutputBytes, and memory.promote then writes canonical(candidate)
+ * plus a newline — one byte more than the input it was handed, because for this tool the candidate
+ * *is* the input. So the write exceeds the budget only when the input exactly equals it: one byte
+ * less and the engine refuses the input first, one byte more and the write fits.
+ *
+ * Computed rather than written down, so it stays on the boundary if the candidate shape ever
+ * changes. A hardcoded number here would silently stop testing anything.
+ */
+const PROMOTE_DRAFT = candidate.execute({
+  lesson: 'A lesson sized so that writing it costs exactly one byte more than the budget that admitted it.',
+  evidence: [{ exercise: 'memory.promote', boundary: 'output-limit' }],
+});
+const PROMOTE_EXACT_BUDGET = Buffer.byteLength(canonical(PROMOTE_DRAFT));
+
 export function writeExercises() {
   return [
+    {
+      family: 'memory', tool: 'memory.promote', expectCode: 'OUTPUT_LIMIT',
+      grant: true, workspace: 'temp', maxOutputBytes: PROMOTE_EXACT_BUDGET,
+      plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'memory.promote', input: PROMOTE_DRAFT }] },
+      lesson: 'memory.promote refuses OUTPUT_LIMIT when writing the candidate would exceed the output budget, and this is reachable at exactly one budget: the value equal to the canonicalised input. A byte below it the engine rejects the input as INPUT_LIMIT before the tool runs, and a byte above it the write fits, so the two bounds meet without leaving a gap where an oversized write could slip through. The same guard inside files.write cannot be reached from any plan at all, because there the input carries the content plus a wrapper of key names and so always trips the input bound strictly earlier.',
+    },
     {
       family: 'memory', tool: 'memory.promote', grant: true, workspace: 'temp', expectApprovals: 1,
       plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'memory.promote', input: draft }] },

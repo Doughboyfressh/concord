@@ -150,9 +150,22 @@ async function main() {
       fs.copyFileSync(path.join(root, exercise.needsCorpus), target);
     }
 
+    /**
+     * A tighter output budget, for the exercises that exist to hit a budget.
+     *
+     * Narrowing only, and clamped rather than trusted: an exercise asking for a larger budget than
+     * the round was given would be granting itself authority, which is the one thing a policy must
+     * never let its subject do. Needed because some limits are only reachable at an exact budget —
+     * memory.promote's OUTPUT_LIMIT fires on precisely one value, where the budget equals the
+     * resolved input size, and no fixed round-wide budget can sit on every tool's boundary at once.
+     */
+    const taskPolicy = Number.isInteger(exercise.maxOutputBytes)
+      ? { ...policy, maxOutputBytes: Math.min(exercise.maxOutputBytes, policy.maxOutputBytes) }
+      : policy;
+
     let outcome;
     try {
-      outcome = await attempt({ plan: exercise.plan, registry, policy, sourceLock, workspaceRoot, grant: exercise.grant });
+      outcome = await attempt({ plan: exercise.plan, registry, policy: taskPolicy, sourceLock, workspaceRoot, grant: exercise.grant });
     } catch (error) {
       const code = error instanceof HarnessError ? error.code : null;
       if (code) observedCodes.add(code);
@@ -166,7 +179,7 @@ async function main() {
        */
       if (exercise.expectThrow && code === exercise.expectThrow) {
         let again = null;
-        try { await attempt({ plan: exercise.plan, registry, policy, sourceLock, workspaceRoot, grant: exercise.grant }); }
+        try { await attempt({ plan: exercise.plan, registry, policy: taskPolicy, sourceLock, workspaceRoot, grant: exercise.grant }); }
         catch (second) { again = second instanceof HarnessError ? second.code : null; }
         if (again === code) {
           credit(exercise, { tool: exercise.tool, planHash: digest(exercise.plan), outcome: 'refused-at-compile', code, provenBy: 'compile-refusal-twice' });
@@ -264,7 +277,7 @@ async function main() {
     // reproduces, so one that cannot be replayed is not promoted.
     let replayed = false;
     try {
-      const check = replayPlan({ journal: result, plan: exercise.plan, policy, registry, sourceLock, approvals, workspaceRoot });
+      const check = replayPlan({ journal: result, plan: exercise.plan, policy: taskPolicy, registry, sourceLock, approvals, workspaceRoot });
       replayed = check?.replayed === true;
     } catch { replayed = false; }
     if (!replayed) {

@@ -154,6 +154,12 @@ export function makeBuiltinTools() {
       execute({ path: relative, content }, context) {
         const filename = workspaceFile(context.workspaceRoot, relative);
         const text = canonical(content) + '\n';
+        // Unreachable from a plan, and kept anyway. The engine admits a task only if its whole
+        // resolved input fits the same budget, and here that input is the content plus a wrapper of
+        // key names, so it always exceeds the bound strictly earlier and the task fails INPUT_LIMIT
+        // instead. A boundary sweep confirmed it: no content size produces this refusal. It stays
+        // because the tool should not depend on a caller having checked, and because the identical
+        // guard in memory.promote is reachable, at exactly the budget equal to its input.
         if (Buffer.byteLength(text) > context.policy.maxOutputBytes) throw new HarnessError('OUTPUT_LIMIT', 'Write exceeds byte budget');
         // Exclusive creation: an approval cannot silently replace existing user data.
         writeFileSync(filename, text, { flag: 'wx', encoding: 'utf8' });
