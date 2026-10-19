@@ -90,14 +90,16 @@ test('the local server enforces loopback host, origin, and token checks and send
 
 test('the offline demonstration completes and replays over real HTTP', async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-server-offline-'));
-  const { url, close } = await startServer(harnessFixture(temp), { sourceCount: 12, files: 0, capabilities: 0, skillFiles: 0, tools: [] });
+  const { url, close } = await startServer(harnessFixture(temp), { sourceCount: catalog.sources.length, files: 0, capabilities: 0, skillFiles: 0, tools: [] });
   try {
     const { token } = await readState(url);
     const chat = await postJson(url, '/api/chat', token, { message: 'Inspect the source knowledge and explain what is connected.' });
     assert.equal(chat.status, 200);
     const chatBody = await chat.json();
     assert.equal(chatBody.state.mode, 'offline-demo');
-    assert.equal(chatBody.state.sourceCoverage.length, 12);
+    // Every pinned source is covered. Asserted against the lock rather than a literal, which went
+    // stale the moment a thirteenth source was pinned.
+    assert.equal(chatBody.state.sourceCoverage.length, catalog.sources.length);
     assert.ok(chatBody.state.runs.some((r) => r.status === 'completed'));
 
     const runId = chatBody.state.runs.at(-1).id;

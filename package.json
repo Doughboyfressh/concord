@@ -3,12 +3,19 @@
   "version": "0.2.0",
   "private": false,
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/Doughboyfressh/concord.git" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Doughboyfressh/concord.git"
+  },
   "homepage": "https://github.com/Doughboyfressh/concord",
   "type": "module",
   "description": "Policy-bound AI orchestration with recorded effects and deterministic replay",
-  "engines": { "node": ">=22" },
-  "bin": { "concord": "./src/cli.mjs" },
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "concord": "./src/cli.mjs"
+  },
   "scripts": {
     "test": "node scripts/test.mjs",
     "check": "node scripts/check.mjs",
@@ -16,8 +23,10 @@
     "replay": "node src/cli.mjs replay runs/demo.json --plan examples/offline.plan.json --policy examples/offline.policy.json",
     "e2e": "node scripts/e2e.mjs",
     "chat": "node scripts/chat.mjs",
+    "desktop": "node scripts/desktop.mjs",
     "mcp": "node src/mcp.mjs",
     "train": "node scripts/train.mjs",
-    "validate": "node scripts/validate.mjs"
+    "validate": "node scripts/validate.mjs",
+    "icon": "node scripts/make-icon.mjs"
   }
 }

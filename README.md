@@ -13,8 +13,11 @@ Requires Node.js 22 or newer; tested with Node.js 24.20.0 on Windows. No npm dep
 From this directory in PowerShell:
 
 ```powershell
-node scripts/chat.mjs
+node scripts/desktop.mjs   # a desktop window; close it to stop Concord
+node scripts/chat.mjs      # or just the server, and open the URL yourself
 ```
+
+`scripts/desktop.mjs` opens Concord in its own window with no tab strip or address bar, using a Chromium you already have — there is no Electron here, because there are no dependencies here. Double-click `Concord.lnk` (committed, and wired to the live model in `config/concord-live.json`) or `Concord.cmd`, or run `pwsh scripts/install-shortcut.ps1` once to launch it from the Start Menu. Without a Chromium installed it still runs and opens a browser tab instead, and says so. See [the desktop application](docs/desktop.md).
 
 Open the printed localhost URL. The interface provides chat, selected source instructions/skills, available tools, proposed plans, exact effect approvals and run replay. It starts in a clearly labeled **offline deterministic demonstration** with actual source context and executable pure tool plans.
 

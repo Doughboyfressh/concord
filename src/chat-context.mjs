@@ -121,6 +121,11 @@ export function buildChatContext({ message, history, observations = [], proposed
     'every citation against the recorded ledger and rejects the entire response if one does not match ' +
     'a completed task, so a guessed or remembered hash fails. Omit "citations" when the turn reports ' +
     'no tool result. Citing does not replace reporting accurately — it makes the claim checkable. ' +
+    // Observed against a live local model: told to "omit" an optional property, it sent null
+    // instead, and the declared schema rejected the whole proposal. Omission and null are the
+    // same intent to a model and different values to a validator, so say which one is meant.
+    'Omitting a property means leaving it out of the object entirely: send no "citations" key and ' +
+    'no "plan" key rather than setting either to null, which is not an accepted value. ' +
     'Omit "plan" entirely unless a registered tool should actually run. When present, "plan" must be ' +
     '{"version": 1, "tasks": [{"id": "<short id>", "tool": "<one of the names below>", "input": {...}, ' +
     '"dependsOn": ["<other task id>"]}]} — "dependsOn" and task-to-task references are optional, used only ' +
