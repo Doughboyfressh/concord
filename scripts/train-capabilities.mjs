@@ -432,7 +432,19 @@ async function main() {
     findings.push({ family: 'corpus', tool: bad.sourceId, note: 'indexed digest does not match the file on disk: ' + bad.id });
   }
 
-  fs.rmSync(temp, { recursive: true, force: true });
+  /**
+   * Cleanup must not be able to discard the round.
+   *
+   * Everything above is already computed by this point, so a scratch directory that cannot be
+   * removed is worth reporting and nothing more. It threw once and took the whole report with it:
+   * an exercise that deliberately leaves a descendant holding the inherited pipes — the one
+   * proving WORKER_TERMINATION_UNCONFIRMED — also left that descendant holding the directory, and
+   * Windows refuses to unlink a directory a live process has open. Losing a clean round's findings
+   * to its own tidying up is the wrong trade.
+   */
+  let scratchRetained = null;
+  try { fs.rmSync(temp, { recursive: true, force: true }); }
+  catch (error) { scratchRetained = error?.code ?? 'unknown'; }
   const seconds = ((Date.now() - started) / 1000).toFixed(1);
   const stored = fs.readdirSync(path.join(root, 'memory')).filter((name) => name.endsWith('.json')).length;
   const coverage = `${exercisedTools.size}/${registry.size}`;
@@ -471,6 +483,7 @@ async function main() {
   if (outPath) fs.writeFileSync(outPath, report + '\n');
   console.log(canonical({
     exercises: attempted, promoted, findings: findings.length, coverage,
+    ...(scratchRetained ? { scratchRetained } : {}),
     contractChecks, contracts: contracts.size, contractsHeld,
     instructionsUpdated: instructionsUpdated.length, corpusVerified: corpus.verified,
     codesNamed: gaps.codes.named, codesObserved: gaps.codes.observed, codesUnproven: gaps.codes.unproven,

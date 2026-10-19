@@ -3,6 +3,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
 import { spawnBounded, limits, resolveExecutable, makeIntegrationTools } from '../src/integrations.mjs';
+import { makeReverseTools } from '../src/reverse.mjs';
 import { makeAgentTools } from '../src/workers.mjs';
 import { makeBrowserTools, discoverPageTarget } from '../src/browser.mjs';
 import { findAppBrowser } from '../src/desktop.mjs';
@@ -25,10 +26,18 @@ import { makeForeignTools } from '../src/foreign.mjs';
  * rmSync, which is how this was noticed. And every digest is computed rather than written down,
  * because a hardcoded hash of node would stop matching on the next upgrade.
  *
- * What is shadowed rather than reachable, measured not assumed: FOREIGN_ABORTED and
- * FOREIGN_SPAWN_FAILED raise INTEGRATION_ABORTED and INTEGRATION_PATH instead, because the shared
- * integration layer checks the signal and resolves the executable first. That is the same pattern
- * as REVERSE_ABORTED. The checks behind them are not dead, only unreachable by the obvious route.
+ * One earlier conclusion here was wrong and is worth leaving on the record. FOREIGN_ABORTED and
+ * REVERSE_ABORTED were written off as shadowed by INTEGRATION_ABORTED, on the evidence that an
+ * already-aborted signal raises the integration code instead. True, and the wrong inference: the
+ * integration layer only checks the signal once, on entry, so a signal that aborts *during* the
+ * call reaches the layer-specific listener registered inside it. Pre-aborting tested the entry
+ * check over and over and said nothing about the rest. Both are exercised below by aborting a few
+ * milliseconds after the call starts.
+ *
+ * FOREIGN_SPAWN_FAILED does stay unreachable, and for a different reason: it needs an asynchronous
+ * spawn failure, and on Windows resolveExecutable refuses a missing file first while a
+ * non-executable one throws EFTYPE synchronously. BROWSER_PROCESS is unreachable by exactly the
+ * same mechanism.
  */
 
 const NODE = process.execPath;
@@ -562,6 +571,123 @@ export function processExercises() {
         return call.execute({}, { workspaceRoot, policy: policyFor({ allowedTools: tools.map((tool) => tool.name) }) });
       },
       lesson: 'A foreign server producing more than its budget is refused FOREIGN_OUTPUT_LIMIT as it writes. A foreign server is the least trusted thing Concord talks to, so its output is bounded while being read rather than after it has all arrived.',
+    },
+
+    /**
+     * Cancellation that arrives while the call is already running.
+     *
+     * The integration layer checks the signal once, on entry, so an already-aborted signal always
+     * raises INTEGRATION_ABORTED and never anything more specific. Aborting a few milliseconds in
+     * gets past that check and reaches the listener each layer registers for itself — which is the
+     * realistic case anyway, since a cancellation that arrives before the work starts is the one
+     * that matters least.
+     */
+    {
+      family: 'process', tool: 'foreign.call', expectThrow: 'FOREIGN_ABORTED', workspace: 'temp',
+      fixture: (dir) => script(dir, 'server-quiet.cjs', SLEEP),
+      call: ({ workspaceRoot }) => {
+        const tools = foreignFor([path.join(workspaceRoot, 'server-quiet.cjs')], { timeoutMs: 3000 });
+        const call = tools.find((tool) => tool.effect === 'process');
+        const controller = new AbortController();
+        setTimeout(() => controller.abort(), 80);
+        return call.execute({}, { workspaceRoot, policy: policyFor({ allowedTools: tools.map((tool) => tool.name) }), signal: controller.signal });
+      },
+      lesson: 'A foreign call cancelled while it is waiting on the server is refused FOREIGN_ABORTED, and the server process is killed on the way out. The listener for this is registered inside the call rather than only checked on entry, which is what makes cancelling a call already in flight actually work.',
+    },
+    {
+      family: 'process', tool: 'rea.provider', expectThrow: 'REVERSE_ABORTED', workspace: 'temp',
+      call: ({ workspaceRoot }) => {
+        const executable = path.join(workspaceRoot, 'reviewed-provider.bin');
+        fs.writeFileSync(executable, 'a stand-in for a reviewed executable');
+        const executableSha256 = createHash('sha256').update(fs.readFileSync(executable)).digest('hex');
+        const table = {
+          schemaVersion: 1, revision: 'a'.repeat(40), sourceId: 'training',
+          tools: [{ name: 'training_tool', provider: 'training', effect: 'process', basis: 'runs a reviewed executable', implementedBy: null, internalizable: false, module: 'training' }],
+        };
+        const tools = makeReverseTools(table, { providers: [{ name: 'training', executable, executableSha256, commands: { training_tool: ['--path', '{path}'] } }] });
+        const tool = tools.find((candidate) => candidate.effect === 'process');
+        /**
+         * A signal that is live when first asked and aborted afterwards.
+         *
+         * The window here is between rendering the argv and the spawn, spanning one filesystem
+         * resolution, and a timer cannot be aimed into it: round 047 aborted after zero
+         * milliseconds, hit the window on the first run and missed it on the second once the
+         * directory entries were cached. A flaky exercise is worse than none. This models the
+         * same event exactly — cancellation arriving between the layer's entry check and the
+         * provider's own — and it does so every time rather than when the disk cooperates.
+         */
+        let asked = false;
+        const signal = {
+          get aborted() { const was = asked; asked = true; return was; },
+          addEventListener() {}, removeEventListener() {},
+        };
+        return tool.execute({ path: 'ok.txt' }, {
+          workspaceRoot,
+          policy: policyFor({ allowedTools: tools.map((candidate) => candidate.name) }),
+          signal,
+        });
+      },
+      lesson: 'A reverse provider call cancelled while its executable is being resolved is refused REVERSE_ABORTED rather than spawning the process and killing it afterwards. The window is narrow — between rendering the argv and the spawn — and it exists because resolving an executable is real filesystem work a caller may change their mind during. The shared integration layer checks the signal only on entry, so this later check is the only thing that catches a cancellation arriving mid-call.',
+    },
+
+    // ---- byte limits on the way in ------------------------------------------------------
+    {
+      family: 'process', tool: 'foreign.call', expectThrow: 'FOREIGN_INPUT_LIMIT', workspace: 'temp',
+      fixture: (dir) => script(dir, 'server-idle.cjs', SLEEP),
+      call: ({ workspaceRoot }) => {
+        const tools = foreignFor([path.join(workspaceRoot, 'server-idle.cjs')], { timeoutMs: 3000 });
+        const call = tools.find((tool) => tool.effect === 'process');
+        return call.execute({ blob: 'z'.repeat(300 * 1024) }, { workspaceRoot, policy: policyFor({ allowedTools: tools.map((tool) => tool.name) }) });
+      },
+      lesson: 'A foreign call whose input exceeds 256 KiB is refused FOREIGN_INPUT_LIMIT before it is sent. The foreign bound is far tighter than the integration one, deliberately: an integration is a reviewed endpoint, while a foreign server is somebody else\'s program, and the amount of data handed to it is kept small enough to read.',
+    },
+    {
+      family: 'process', tool: 'typesafe.evaluate', expectThrow: 'INTEGRATION_INPUT_LIMIT',
+      call: () => typeSafeFor('http://127.0.0.1:9').execute(
+        { state: 'z'.repeat(33 * 1024 * 1024), questions: TYPESAFE_INPUT.questions },
+        { workspaceRoot: process.cwd(), policy: policyFor({ allowedTools: ['typesafe.evaluate'], allowedOrigins: ['http://127.0.0.1:9'] }) },
+      ),
+      lesson: 'An integration request canonicalising to more than 32 MiB is refused INTEGRATION_INPUT_LIMIT before any connection is made. The check is on the encoded bytes rather than on the shape, so it bounds what can be put on the wire regardless of how the input was assembled — and it costs about a tenth of a second to reach, because refusing early is cheap.',
+    },
+
+    // ---- a child that dies mid-write, and one that will not let go ----------------------
+    {
+      family: 'process', tool: 'worker.run', expectThrow: 'INTEGRATION_IO', workspace: 'temp',
+      fixture: (dir) => script(dir, 'exits-at-once.cjs', 'process.exit(0);\n'),
+      call: ({ workspaceRoot }) => {
+        const tools = makeIntegrationTools({ workers: [{
+          name: 'worker.run', version: '1.0.0', executable: NODE, args: [path.join(workspaceRoot, 'exits-at-once.cjs')],
+          cwd: '.', timeoutMs: 2000, maxOutputBytes: 65536,
+        }] });
+        // Large enough that the write is still in progress when the child is already gone.
+        return tools[0].execute({ big: 'z'.repeat(2 * 1024 * 1024) }, {
+          workspaceRoot, policy: policyFor({ allowedTools: tools.map((tool) => tool.name) }),
+        });
+      },
+      lesson: 'A worker that exits while Concord is still writing its input fails INTEGRATION_IO, reported as an input failure rather than as the worker having answered nothing. The distinction is the whole point: a broken pipe means the request never fully arrived, so whatever the child did or did not do says nothing about the request.',
+    },
+    {
+      family: 'process', tool: 'dsh.run', expectThrow: 'WORKER_TERMINATION_UNCONFIRMED', workspace: 'temp',
+      // The grandchild must be detached and must inherit stdio: it then holds the pipes Concord
+      // gave the direct child, so killing the child does not close the transport. A non-detached
+      // grandchild went down with its parent and the run simply timed out instead.
+      // Two details are load-bearing and were both learned by getting them wrong. The grandchild
+      // runs from the system temp directory rather than inheriting the scratch workspace as its
+      // cwd: a live process holding that directory open makes Windows refuse to unlink it, and the
+      // round crashed trying to tidy up after itself. And it lives just over the one-second
+      // confirmation window rather than nine seconds, so it is gone well before the round ends.
+      fixture: (dir) => script(dir, 'worker-leaks-pipes.cjs', [
+        'const { spawn } = require("child_process");',
+        'const os = require("os");',
+        'spawn(process.execPath, ["-e", "setTimeout(()=>{}, 1600)"], { stdio: "inherit", detached: true, cwd: os.tmpdir() }).unref();',
+        SLEEP,
+      ].join('\n')),
+      call: ({ workspaceRoot }) => runWorker(
+        workerFor(workspaceRoot, [path.join(workspaceRoot, 'worker-leaks-pipes.cjs')]),
+        workspaceRoot,
+        { policy: policyFor({ allowedTools: ['dsh.run'], timeoutMs: 500 }) },
+      ),
+      lesson: 'When a worker is killed and its transport still does not close within a bounded wait, the refusal is WORKER_TERMINATION_UNCONFIRMED rather than a claim that the worker was stopped. A descendant holding the inherited pipes keeps them open after the direct child is gone, and Concord only ever had a handle on that child — so it relinquishes the transport and says plainly that it cannot confirm the rest of the tree died. Claiming containment it does not have would be the more dangerous answer.',
     },
 
     // ---- and the one that needs a browser this machine actually has ---------------------
