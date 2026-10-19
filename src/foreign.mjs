@@ -138,6 +138,13 @@ export function callMcpServer({ executable, args, cwd, env, timeoutMs, maxOutput
     }
 
     const send = (message) => { try { child.stdin.write(JSON.stringify(message) + '\n'); } catch { /* the exit handler reports it */ } };
+    // Reached for an asynchronous launch failure only. On Windows, spawn() throws EFTYPE
+    // synchronously when the target is a regular file that is not executable — measured — so that
+    // case never arrives here and escapes as a raw Node error instead. The engine still contains
+    // it, recording TOOL_FAILED with no toolCode, so nothing runs unbounded; what is lost is the
+    // specific name for it. Left as is rather than wrapped: the useful fix is for the caller to
+    // resolve and check the executable first, which resolveExecutable already does on every path
+    // that configures one.
     child.on('error', (error) => finish(new HarnessError('FOREIGN_SPAWN_FAILED', 'The foreign server could not be started: ' + error.message)));
     child.stderr.on('data', (chunk) => { if (stderr.length < 8192) stderr += chunk.toString('utf8'); });
     child.on('exit', (code) => finish(new HarnessError('FOREIGN_EXITED',

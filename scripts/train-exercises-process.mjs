@@ -100,6 +100,48 @@ const askTypeSafe = (tool, origin, over = {}) => tool.execute(TYPESAFE_INPUT, {
   policy: policyFor({ allowedTools: ['typesafe.evaluate'], allowedOrigins: [origin], ...over }),
 });
 
+/**
+ * A worker that completes the whole DSH handshake, so the checks after it can be reached.
+ *
+ * initialize, session/prompt, session/wait, shutdown — and the identity assertion is exact: the
+ * serverInfo name must be deepseek-harness-sdk-runtime or the session is refused. Everything
+ * downstream of the handshake was unreachable until a fixture could get through it.
+ */
+const handshakingWorker = (extraReceiptFields = '') => [
+  'let buf = "";',
+  'const send = (o) => process.stdout.write(JSON.stringify(o) + "\\n");',
+  'process.stdin.on("data", (chunk) => {',
+  '  buf += chunk.toString();',
+  '  let i;',
+  '  while ((i = buf.indexOf("\\n")) >= 0) {',
+  '    const line = buf.slice(0, i); buf = buf.slice(i + 1);',
+  '    if (!line.trim()) continue;',
+  '    const m = JSON.parse(line);',
+  '    if (m.id === undefined) continue;',
+  '    if (m.method === "initialize") send({ jsonrpc: "2.0", id: m.id, result: { serverInfo: { name: "deepseek-harness-sdk-runtime", version: "1.0.0" } } });',
+  '    else if (m.method === "session/prompt") send({ jsonrpc: "2.0", id: m.id, result: { messageId: "m1"' + extraReceiptFields + ' } });',
+  '    else send({ jsonrpc: "2.0", id: m.id, result: {} });',
+  '  }',
+  '});',
+  SLEEP,
+].join('\n');
+
+/** A foreign server that refuses to initialize at all. */
+const HANDSHAKE_REFUSING_SERVER = [
+  'let buf = "";',
+  'process.stdin.on("data", (chunk) => {',
+  '  buf += chunk.toString();',
+  '  let i;',
+  '  while ((i = buf.indexOf("\\n")) >= 0) {',
+  '    const line = buf.slice(0, i); buf = buf.slice(i + 1);',
+  '    if (!line.trim()) continue;',
+  '    const m = JSON.parse(line);',
+  '    if (m.id !== undefined) process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: m.id, error: { code: -32600, message: "will not initialize" } }) + "\\n");',
+  '  }',
+  '});',
+  SLEEP,
+].join('\n');
+
 /** A worker that reads JSON-RPC and answers every request with a protocol error. */
 const ERRORING_WORKER = [
   'let buf = "";',
@@ -201,7 +243,46 @@ export function processExercises() {
       lesson: 'A worker that answers a request with a JSON-RPC error is refused WORKER_RPC, and only the numeric code is carried out — not the message. A runtime diagnostic may contain credentials or paths, so the code travels and the prose does not.',
     },
 
+    {
+      family: 'process', tool: 'dsh.run', expectThrow: 'WORKER_INPUT_LIMIT', workspace: 'temp',
+      fixture: (dir) => script(dir, 'worker-handshakes.cjs', handshakingWorker()),
+      call: ({ workspaceRoot }) => workerFor(workspaceRoot, [path.join(workspaceRoot, 'worker-handshakes.cjs')])
+        .execute({ sessionId: 'training', prompt: 'z'.repeat(6000) }, {
+          workspaceRoot, policy: policyFor({ allowedTools: ['dsh.run'], timeoutMs: 4000, maxOutputBytes: 900 }),
+        }),
+      lesson: 'A request Concord is about to send that exceeds the byte budget is refused WORKER_INPUT_LIMIT before it is written to the child. The budget bounds both directions: a prompt large enough to be a denial of service against the agent is refused on this side rather than delivered and regretted. Reaching it needs a worker that completes the handshake, because the small initialize request fits where the prompt does not.',
+    },
+    {
+      family: 'process', tool: 'dsh.run', expectThrow: 'WORKER_REDACTION', workspace: 'temp',
+      // Two keys that are different until the credential is removed, and identical afterwards.
+      fixture: (dir) => script(dir, 'worker-collides.cjs', handshakingWorker(', "x[redacted]y": 1, "xSECRETVALUEy": 2')),
+      call: ({ workspaceRoot }) => workerFor(workspaceRoot, [path.join(workspaceRoot, 'worker-collides.cjs')], { env: { API_KEY: 'SECRETVALUE' } })
+        .execute({ sessionId: 'training', prompt: 'hello' }, {
+          workspaceRoot, policy: policyFor({ allowedTools: ['dsh.run'], timeoutMs: 4000 }),
+        }),
+      lesson: 'Credentials are redacted out of everything a worker returns, and two object keys that become identical once the credential is removed are refused WORKER_REDACTION rather than silently merged. A worker could otherwise smuggle a value out by arranging for redaction itself to collapse two keys into one, and the collapsed object would look ordinary.',
+    },
+    {
+      family: 'process', tool: 'browser.snapshot', expectThrow: 'BROWSER_EXECUTABLE', workspace: 'temp',
+      call: ({ workspaceRoot }) => {
+        const tools = makeBrowserTools({ executable: NODE, executableSha256: 'a'.repeat(64) });
+        return tools[0].execute({ url: 'http://127.0.0.1/' }, { workspaceRoot, policy: policyFor({ allowedTools: [tools[0].name] }) });
+      },
+      lesson: 'A browser whose digest does not match the reviewed one is refused BROWSER_EXECUTABLE even though the file exists and would run. This is the check that makes pinning a browser mean something: an updated or substituted binary is a different program, and driving a browser is the broadest thing Concord can be asked to do.',
+    },
+
     // ---- foreign protocol: a server that handshakes and then declines -------------------
+    {
+      family: 'process', tool: 'foreign.call', expectThrow: 'FOREIGN_HANDSHAKE_FAILED', workspace: 'temp',
+      fixture: (dir) => script(dir, 'server-refuses-init.cjs', HANDSHAKE_REFUSING_SERVER),
+      call: ({ workspaceRoot }) => {
+        const tools = foreignFor([path.join(workspaceRoot, 'server-refuses-init.cjs')], { timeoutMs: 2500 });
+        const call = tools.find((tool) => tool.effect === 'process');
+        return call.execute({}, { workspaceRoot, policy: policyFor({ allowedTools: tools.map((tool) => tool.name) }) });
+      },
+      lesson: 'A foreign server that answers initialize with an error is refused FOREIGN_HANDSHAKE_FAILED. The distinction from a timeout is real and was measured: a server replying with an unrecognised result still satisfies the handshake, so this code is specifically about a server that declined rather than one that was malformed or silent.',
+    },
+
     {
       family: 'process', tool: 'foreign.call', expectThrow: 'FOREIGN_CALL_FAILED', workspace: 'temp',
       fixture: (dir) => script(dir, 'server-declines.cjs', CALL_ERRORING_SERVER),
