@@ -6,12 +6,13 @@ import os from 'node:os';
 import { makeBuiltinTools } from '../src/builtins.mjs';
 import { runPlan } from '../src/engine.mjs';
 import { HarnessError } from '../src/value.mjs';
+import { tempDir, realTempDir } from './temp-workspace.mjs';
 
 const tools = new Map(makeBuiltinTools().map((t) => [t.name, t]));
 const policy = { maxOutputBytes: 1048576 };
 
 function tempWorkspace() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'concord-memory-'));
+  return tempDir('concord-memory-');
 }
 
 function candidateFor(lesson, evidence) {
@@ -37,7 +38,7 @@ test('memory.promote writes exactly one file named by the candidate digest', () 
 
 test('a planted symlink named memory is rejected, not followed', (t) => {
   const temp = tempWorkspace();
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-memory-outside-'));
+  const outside = tempDir('concord-memory-outside-');
   try { fs.symlinkSync(outside, path.join(temp, 'memory'), 'dir'); }
   catch (e) { if (e.code === 'EPERM') return t.skip('Host disallows link creation'); throw e; }
   const candidate = candidateFor('lesson three', ['evidence-c']);
@@ -125,7 +126,7 @@ test('a hard-linked entry inside memory/ is rejected, and so is the original it 
 });
 
 test('memory.promote requires an exact grant through the kernel; approval unblocks it, replay repeats nothing', async () => {
-  const temp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'concord-memory-plan-')));
+  const temp = realTempDir('concord-memory-plan-');
   const candidate = candidateFor('plan-gated lesson', ['evidence-h']);
   const registry = new Map(makeBuiltinTools().map((t) => [t.name, t]));
   const policyFull = { version: 1, allowedTools: [...registry.keys()].sort(), allowedEffects: ['pure', 'read', 'write'], maxTasks: 8, maxOutputBytes: 1048576, maxJournalBytes: 16777216, timeoutMs: 5000 };

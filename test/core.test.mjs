@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync, linkSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, rmSync, existsSync, linkSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { canonical, digest, parseJson, validateSchema, clone } from '../src/value.mjs';
@@ -9,6 +9,7 @@ import { makeBuiltinTools } from '../src/builtins.mjs';
 import { makeArtifactTools } from '../src/artifacts.mjs';
 import { makeReaderTools } from '../src/readers.mjs';
 import { HarnessError } from '../src/value.mjs';
+import { tempDir } from './temp-workspace.mjs';
 
 const registry = new Map(makeBuiltinTools().map(t => [t.name, t]));
 const policy = { version: 1, allowedTools: [...registry.keys()], allowedEffects: ['pure', 'read', 'write'], maxOutputBytes: 10000, maxJournalBytes: 100000 };
@@ -115,7 +116,7 @@ test('reserve journal budget before invoking effects', async () => {
   const j = await runPlan(o); assert.equal(calls, 0); assert.equal(j.outcome.code, 'BUDGET_EXHAUSTED'); replayPlan({ ...o, journal: j });
 });
 test('intent is durable before execution and existing journals are refused', async () => {
-  const temp = mkdtempSync(path.join(tmpdir(), 'concord-journal-'));
+  const temp = tempDir('concord-journal-');
   try {
     const filename = path.join(temp, 'events.jsonl');
     const tool = { name: 'x', version: '1', effect: 'read', inputSchema: true, execute() { const log = readFileSync(filename, 'utf8'); assert.match(log, /"type":"intent"/); return true; } };
@@ -124,7 +125,7 @@ test('intent is durable before execution and existing journals are refused', asy
   } finally { rmSync(temp, { recursive: true, force: true }); }
 });
 test('file write requires grant, uses exclusive create, and is not repeated on replay', async () => {
-  const temp = mkdtempSync(path.join(tmpdir(), 'concord-write-'));
+  const temp = tempDir('concord-write-');
   try {
     const plan = { version: 1, tasks: [{ id: 'a', tool: 'files.write', input: { path: 'memory.json', content: { lesson: 'x' } } }] };
     const o = base(plan, { workspaceRoot: temp });
@@ -141,7 +142,7 @@ test('untrusted inputs cannot mutate downstream evidence', async () => {
   assert.equal((await runPlan(options)).outcome.status, 'failed');
 });
 test('file reads reject hardlinks and directories before reading', (t) => {
-  const temp = mkdtempSync(path.join(tmpdir(), 'concord-links-'));
+  const temp = tempDir('concord-links-');
   try {
     const workspace = path.join(temp, 'workspace'); mkdirSync(workspace);
     const outside = path.join(temp, 'outside'); writeFileSync(outside, 'secret');
@@ -246,7 +247,7 @@ test('every declared outputKeys set is really present in that tool\'s actual res
   // So the declaration is verified by running each tool, not by inspection. `outputKeys` means
   // "always present", so a tool with conditional extras (artifact.inspect's per-format blocks)
   // is checked as a subset and never over-promises.
-  const temp = mkdtempSync(path.join(tmpdir(), 'concord-outputkeys-'));
+  const temp = tempDir('concord-outputkeys-');
   writeFileSync(path.join(temp, 'f.txt'), 'hello');
   // Real carriers, so the tools below are exercised on their main path rather than their
   // not-this-format fallback: an empty but valid WASM module, and legacy EVM bytecode.
@@ -436,7 +437,7 @@ test('a failure after the tool returned is not reported as a possibly-occurred e
   // the unambiguous version of that: when a tool RETURNS and the failure is about its output, the
   // engine is holding the output, so the effect definitely occurred. Calling that "may have
   // occurred" invites retrying something non-idempotent, which is the hazard the code exists for.
-  const temp = mkdtempSync(path.join(tmpdir(), 'concord-stage-'));
+  const temp = tempDir('concord-stage-');
   const tool = { name: 'w', version: '1', effect: 'write', inputSchema: true,
     execute({ name }, ctx) { writeFileSync(path.join(ctx.workspaceRoot, name), 'x'); return { big: 'y'.repeat(50) }; } };
   const opts = (plan, pol = {}) => ({ plan, registry: new Map([['w', tool]]), sourceLock: { version: 1 }, workspaceRoot: temp,
@@ -574,7 +575,7 @@ test('a failed read is not reported as a possibly-occurred effect', async () => 
   // consequential — retrying an observation is always safe. Round 010 split pure from non-pure
   // and left read on the wrong side; grantedEffects already names the effects that can change
   // the world, so that is the line the classification should follow.
-  const temp = mkdtempSync(path.join(tmpdir(), 'concord-readfail-'));
+  const temp = tempDir('concord-readfail-');
   const tools = new Map(makeBuiltinTools().map(t => [t.name, t]));
   const opts = {
     plan: { version: 1, tasks: [{ id: 'r', tool: 'files.read', input: { path: 'nonexistent.txt' } }] },

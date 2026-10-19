@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { makeGovernanceTools } from '../src/governance.mjs';
 import { makeBuiltinTools } from '../src/builtins.mjs';
+import { tempDir } from './temp-workspace.mjs';
 
 // Delegation, scheduling and hook rules: three capabilities Concord described and did not have.
 // None needed a dependency; each needed a shape that survives the kernel's contract.
@@ -18,7 +19,7 @@ const policyFor = (registry) => ({
   allowedEffects: ['pure', 'read', 'write', 'network', 'process'], allowedOrigins: [],
   maxTasks: 32, maxOutputBytes: 1048576, maxJournalBytes: 16777216, timeoutMs: 10000,
 });
-const workspace = () => fs.mkdtempSync(path.join(os.tmpdir(), 'concord-gov-'));
+const workspace = () => tempDir('concord-gov-');
 
 function governance() {
   const registry = new Map(makeBuiltinTools().map((tool) => [tool.name, tool]));

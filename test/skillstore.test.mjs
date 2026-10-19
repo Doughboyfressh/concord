@@ -6,6 +6,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { makeSkillStoreTools, skillSlug } from '../src/skillstore.mjs';
 import { parseJson } from '../src/value.mjs';
+import { realTempDir } from './temp-workspace.mjs';
 
 // Adopting a skill, and knowing later whether what you adopted is still what you reviewed.
 
@@ -15,7 +16,7 @@ const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
 /** A workspace holding one real corpus file, and an inventory that describes it truthfully. */
 function fixture(body = '# Greeting\n\nSay hello.\n') {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'concord-skills-')));
+  const root = realTempDir('concord-skills-');
   const relative = 'upstream/example/skills/greeting/SKILL.md';
   fs.mkdirSync(path.join(root, path.dirname(relative)), { recursive: true });
   fs.writeFileSync(path.join(root, relative), body);

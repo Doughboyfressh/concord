@@ -10,6 +10,7 @@ import { parseJson, digest } from '../src/value.mjs';
 import { createMcpServer } from '../src/mcp.mjs';
 import { fileMessage } from '../src/peer.mjs';
 import { loadSourceLock } from '../src/sources.mjs';
+import { tempDir } from './temp-workspace.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const catalog = await loadSourceLock(path.join(root, 'sources.lock.json'));
@@ -92,7 +93,7 @@ function assertStdoutIsPureJsonRpc(session) {
 }
 
 async function withSession(prefix, run) {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const temp = tempDir(prefix);
   const session = startMcpServer(temp);
   try {
     await run(session, temp);

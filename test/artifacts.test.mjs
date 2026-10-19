@@ -7,12 +7,13 @@ import { createHash } from 'node:crypto';
 import { makeArtifactTools } from '../src/artifacts.mjs';
 import { HarnessError, canonical } from '../src/value.mjs';
 import { runPlan, replayPlan } from '../src/engine.mjs';
+import { tempDir } from './temp-workspace.mjs';
 
 const inspect = new Map(makeArtifactTools().map((t) => [t.name, t])).get('artifact.inspect');
 const policy = { maxOutputBytes: 1048576 };
 
 function tempWorkspace() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'concord-artifacts-'));
+  return tempDir('concord-artifacts-');
 }
 
 function writeFixture(temp, name, bytes) {

@@ -4,12 +4,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { makeEvidenceTools } from '../src/evidence.mjs';
+import { realTempDir } from './temp-workspace.mjs';
 
 const tools = new Map(makeEvidenceTools().map((t) => [t.name, t]));
 const policy = { maxOutputBytes: 4 * 1024 * 1024 };
 
 function workspace(t) {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'concord-evidence-')));
+  const dir = realTempDir('concord-evidence-');
   t.after(() => { fs.rmSync(dir, { recursive: true, force: true }); });
   return { dir, context: { workspaceRoot: dir, policy } };
 }

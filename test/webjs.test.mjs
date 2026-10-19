@@ -5,12 +5,13 @@ import os from 'node:os';
 import path from 'node:path';
 import mod from 'node:module';
 import { makeWebTools, parseSourceMap, stripNonCode } from '../src/webjs.mjs';
+import { realTempDir } from './temp-workspace.mjs';
 
 const tools = new Map(makeWebTools().map((t) => [t.name, t]));
 const policy = { maxOutputBytes: 4 * 1024 * 1024 };
 
 function workspace(t) {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'concord-webjs-')));
+  const dir = realTempDir('concord-webjs-');
   t.after(() => { fs.rmSync(dir, { recursive: true, force: true }); });
   return { dir, context: { workspaceRoot: dir, policy } };
 }

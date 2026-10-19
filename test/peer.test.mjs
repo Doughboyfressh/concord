@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createClientChannel, makePeerTools, makeMailboxTools } from '../src/peer.mjs';
 import { createMcpServer } from '../src/mcp.mjs';
+import { tempDir } from './temp-workspace.mjs';
 
 // The other direction of the MCP session: Concord asking, the client answering. Every test drives
 // the protocol directly, so none of this needs a transport or a real client.
@@ -328,7 +329,7 @@ test('a request Concord cannot render for a person is refused before it is sent'
 // agent at all — so these two tools are files rather than protocol.
 
 function mailbox() {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-mailbox-'));
+  const directory = tempDir('concord-mailbox-');
   const tools = byName(makeMailboxTools({ directory }));
   return { directory, post: tools.get('peer.post'), inbox: tools.get('peer.inbox') };
 }

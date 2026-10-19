@@ -4,12 +4,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { makePlatformTools } from '../src/platform.mjs';
+import { realTempDir } from './temp-workspace.mjs';
 
 const tools = new Map(makePlatformTools().map((t) => [t.name, t]));
 const policy = { maxOutputBytes: 8 * 1024 * 1024 };
 
 function workspace(t) {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'concord-platform-')));
+  const dir = realTempDir('concord-platform-');
   t.after(() => { fs.rmSync(dir, { recursive: true, force: true }); });
   return { dir, context: { workspaceRoot: dir, policy } };
 }

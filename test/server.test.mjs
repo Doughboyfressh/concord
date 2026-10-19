@@ -13,6 +13,7 @@ import { makeBuiltinTools } from '../src/builtins.mjs';
 import { makeCapabilityTools } from '../src/capabilities.mjs';
 import { loadSourceLock, makeSourceTools } from '../src/sources.mjs';
 import { parseJson } from '../src/value.mjs';
+import { tempDir } from './temp-workspace.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const catalog = await loadSourceLock(path.join(root, 'sources.lock.json'));
@@ -52,7 +53,7 @@ async function readState(url) {
 }
 
 test('the local server enforces loopback host, origin, and token checks and sends its security headers', async () => {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-server-security-'));
+  const temp = tempDir('concord-server-security-');
   const { url, close } = await startServer(harnessFixture(temp));
   try {
     const state = await fetch(url + '/api/state');
@@ -89,7 +90,7 @@ test('the local server enforces loopback host, origin, and token checks and send
 });
 
 test('the offline demonstration completes and replays over real HTTP', async () => {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-server-offline-'));
+  const temp = tempDir('concord-server-offline-');
   const { url, close } = await startServer(harnessFixture(temp), { sourceCount: catalog.sources.length, files: 0, capabilities: 0, skillFiles: 0, tools: [] });
   try {
     const { token } = await readState(url);
@@ -115,7 +116,7 @@ test('the offline demonstration completes and replays over real HTTP', async () 
 });
 
 test('a live model proposal and its file effect need separate exact grants over real HTTP', async () => {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-server-live-'));
+  const temp = tempDir('concord-server-live-');
   let calls = 0;
   const model = {
     name: 'model.propose', version: 'fixture-1', effect: 'network', inputSchema: { type: 'object' }, config: { fixture: true },
@@ -183,7 +184,7 @@ function waitForStartupLine(child) {
 }
 
 test('scripts/chat.mjs tolerates a repeated identical turn without crashing (regression for the content-addressed evidence collision)', async () => {
-  const store = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-chat-script-store-'));
+  const store = tempDir('concord-chat-script-store-');
   const port = await findFreePort();
   const child = spawn(process.execPath, [path.join(root, 'scripts', 'chat.mjs'), '--port', String(port), '--store', store], { cwd: root });
   try {

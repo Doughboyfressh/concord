@@ -4,12 +4,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { makeManagedTools } from '../src/managed.mjs';
+import { realTempDir } from './temp-workspace.mjs';
 
 const tools = new Map(makeManagedTools().map((t) => [t.name, t]));
 const policy = { maxOutputBytes: 4 * 1024 * 1024 };
 
 function workspace(t) {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'concord-managed-')));
+  const dir = realTempDir('concord-managed-');
   t.after(() => { fs.rmSync(dir, { recursive: true, force: true }); });
   return { dir, context: { workspaceRoot: dir, policy } };
 }

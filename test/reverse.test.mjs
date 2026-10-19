@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { makeReverseTools } from '../src/reverse.mjs';
 import { parseJson } from '../src/value.mjs';
+import { realTempDir } from './temp-workspace.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const table = parseJson(fs.readFileSync(path.join(root, 'reverse-tools.json'), 'utf8'));
@@ -17,7 +18,7 @@ const nodeSha = createHash('sha256').update(fs.readFileSync(node)).digest('hex')
 const byName = (tools) => new Map(tools.map((t) => [t.name, t]));
 
 function workspace(t) {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'concord-reverse-')));
+  const dir = realTempDir('concord-reverse-');
   t.after(() => { fs.rmSync(dir, { recursive: true, force: true }); });
   fs.writeFileSync(path.join(dir, 'show.js'), 'console.log(process.argv.slice(2).join("|"));');
   return { dir, context: { workspaceRoot: dir, policy: { maxOutputBytes: 65536, timeoutMs: 20000 } } };

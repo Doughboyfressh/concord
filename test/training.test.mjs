@@ -10,6 +10,7 @@ import { buildChatContext } from '../src/chat-context.mjs';
 import { createChatHarness } from '../src/chat.mjs';
 import { makeBuiltinTools } from '../src/builtins.mjs';
 import { loadSourceLock } from '../src/sources.mjs';
+import { realTempDir } from './temp-workspace.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const sourceLock = await loadSourceLock(path.join(root, 'sources.lock.json'));
@@ -23,7 +24,7 @@ function fixture(execute, additional = []) {
     execute(input) { inputs.push(input); return { model: 'fixture-1', proposal: execute(input) }; } };
   const registry = new Map([...makeBuiltinTools(), model, ...additional].map(t => [t.name, t]));
   const policy = { version: 1, allowedTools: [...registry.keys()], allowedEffects: ['pure', 'read', 'write', 'network'], maxTasks: 32 };
-  const workspaceRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'concord-training-')));
+  const workspaceRoot = realTempDir('concord-training-');
   const harness = createChatHarness({ registry, policy, sourceLock, workspaceRoot,
     buildContext: args => context(registry, args) });
   return { harness, inputs, registry, close: () => fs.rmSync(workspaceRoot, { recursive: true, force: true }) };

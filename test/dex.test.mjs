@@ -4,12 +4,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { makeDexTools } from '../src/dex.mjs';
+import { realTempDir } from './temp-workspace.mjs';
 
 const tools = new Map(makeDexTools().map((t) => [t.name, t]));
 const policy = { maxOutputBytes: 4 * 1024 * 1024 };
 
 function workspace(t) {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'concord-dex-')));
+  const dir = realTempDir('concord-dex-');
   t.after(() => { fs.rmSync(dir, { recursive: true, force: true }); });
   return { dir, context: { workspaceRoot: dir, policy } };
 }

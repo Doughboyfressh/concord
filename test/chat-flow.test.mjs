@@ -10,6 +10,7 @@ import { makeBuiltinTools } from '../src/builtins.mjs';
 import { makeCapabilityTools } from '../src/capabilities.mjs';
 import { loadSourceLock, makeSourceTools } from '../src/sources.mjs';
 import { parseJson, digest } from '../src/value.mjs';
+import { tempDir } from './temp-workspace.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const catalog = await loadSourceLock(path.join(root, 'sources.lock.json'));
@@ -22,7 +23,7 @@ function setup(workspaceRoot, additional = []) {
 }
 
 test('chat uses all thirteen reviewed instruction modules and executes/replays its evidence plan', async () => {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-chat-flow-'));
+  const temp = tempDir('concord-chat-flow-');
   try {
     const harness = setup(temp);
     const turn = await harness.send('Combine deterministic replay, browser tools, security review and memory in this chat harness.');
@@ -39,7 +40,7 @@ test('chat uses all thirteen reviewed instruction modules and executes/replays i
 });
 
 test('live chat proposal and file effect have separate exact grants; replay repeats neither', async () => {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-chat-live-'));
+  const temp = tempDir('concord-chat-live-');
   let calls = 0;
   try {
     const model = {name:'model.propose',version:'fixture-1',effect:'network',inputSchema:{type:'object'},config:{fixture:true},execute(){calls++;return{model:'fixture-1',proposal:{reply:'I propose saving this reviewed memory.',plan:{version:1,tasks:[{id:'save',tool:'files.write',input:{path:'memory.json',content:{lesson:'Recorded evidence precedes promotion.'}}}]}}};}};
@@ -62,7 +63,7 @@ test('live chat proposal and file effect have separate exact grants; replay repe
 const SKILL_QUERY = 'Review this change for security vulnerabilities before shipping it.';
 
 test('selected retains the capability path needed to fetch a skill body', async () => {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-chat-flow-'));
+  const temp = tempDir('concord-chat-flow-');
   try {
     const harness = setup(temp);
     const turn = await harness.send(SKILL_QUERY);
@@ -84,7 +85,7 @@ test('a resolvable skill match enriches the offline memory-candidate lesson with
 });
 
 test('an unresolvable skill path (the default fresh-clone state) soft-fails without breaking the primary turn', async () => {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-chat-flow-'));
+  const temp = tempDir('concord-chat-flow-');
   try {
     const harness = setup(temp); // no upstream/ under this fresh workspace, and no memory/ directory yet either
     const turn = await harness.send(SKILL_QUERY);
@@ -98,7 +99,7 @@ test('an unresolvable skill path (the default fresh-clone state) soft-fails with
 });
 
 test('a prior promoted memory surfaces as a relevant-past-memory excerpt in a later turn', async () => {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-chat-flow-'));
+  const temp = tempDir('concord-chat-flow-');
   try {
     const lesson = 'When reviewing changes for security vulnerabilities, check authentication boundaries first.';
     const candidate = { version: 1, lesson, evidenceHashes: [digest('reviewed-evidence')], status: 'proposed', executable: false };
@@ -133,7 +134,7 @@ test('live mode supplies acquired skills as untrusted reference data outside the
   assert.equal(receivedPrompt.references.skill.title, 'Security Review Skill');
   assert.doesNotMatch(receivedSystem, /Untrusted reference skill \(ecc\)/);
 
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-chat-flow-'));
+  const temp = tempDir('concord-chat-flow-');
   try {
     const unresolvable = setup(temp, [model]);
     state = await unresolvable.send(SKILL_QUERY);
@@ -156,7 +157,7 @@ test('replay reproduces the skill-enrichment, memory-enrichment, and primary run
 test('a turn attenuated for untrusted input narrows the whole turn and still replays', async () => {
   // hermes serves untrusted webhook payloads from a reduced toolset. The same shape here: the
   // caller declares the turn untrusted and the turn loses authority before the model plans.
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-attenuate-'));
+  const temp = tempDir('concord-attenuate-');
   try {
     const harness = setup(temp);
     const open = await harness.send('Summarise what this harness does.');
