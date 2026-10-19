@@ -14,6 +14,8 @@ import { makeReverseTools } from './reverse.mjs';
 import { makeReaderTools } from './readers.mjs';
 import { makeForeignTools } from './foreign.mjs';
 import { makeMailboxTools, fileMessage, readMailbox } from './peer.mjs';
+import { makeSkillStoreTools } from './skillstore.mjs';
+import { makeGovernanceTools } from './governance.mjs';
 import { buildChatContext } from './chat-context.mjs';
 import { createChatHarness } from './chat.mjs';
 import { createServer, listenServer } from './server.mjs';
@@ -89,9 +91,17 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
     ...makeReverseTools(reverseTable, reverse), ...makeReaderTools(),
     ...makeForeignTools(foreignManifest, flags.foreign ? readJson(flags.foreign) : {}),
     ...makeMailboxTools({ directory: mailboxDir }),
+    ...makeSkillStoreTools(inventory),
   ];
   const registry = new Map(descriptors.map(d => [d.name, d]));
   if (registry.size !== descriptors.length) throw new HarnessError('CHAT_CONFIG', 'Duplicate tool name');
+  const runtimeFiles = [...fs.readdirSync(path.join(root, 'src')).filter(f => f.endsWith('.mjs')).map(f => 'src/' + f), entry, 'app/index.html', 'app/style.css', 'app/client.mjs'].sort();
+  const sourceLock = { catalog, inventoryHash: digest(inventory), runtime: { node: process.version, platform: process.platform, arch: process.arch, files: runtimeFiles.map(f => ({ path: f, sha256: createHash('sha256').update(fs.readFileSync(path.join(root, f))).digest('hex') })) } };
+  // Delegation runs a sub-plan against this very registry under an attenuated policy, so it is
+  // registered once the registry and source lock exist and before allowedTools is derived from
+  // them — a tool added after that derivation would be filtered straight back out.
+  for (const tool of makeGovernanceTools({ registry, sourceLock })) registry.set(tool.name, tool);
+
   const policy = flags.policy ? readJson(flags.policy) : {
     version: 1, allowedTools: [...registry.keys()].sort(), allowedEffects: ['pure', 'read', 'write', 'network', 'process'],
     allowedOrigins: [...new Set([integrations.model?.origin, integrations.typesafe?.origin].filter(Boolean))].sort(),
@@ -106,8 +116,6 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
     timeoutMs: Math.min(POLICY_MAX_TIMEOUT_MS, Math.max(60000, ...[integrations.model?.timeoutMs, integrations.typesafe?.timeoutMs, integrations.registry?.timeoutMs]
       .filter((value) => Number.isInteger(value) && value > 0)))
   };
-  const runtimeFiles = [...fs.readdirSync(path.join(root, 'src')).filter(f => f.endsWith('.mjs')).map(f => 'src/' + f), entry, 'app/index.html', 'app/style.css', 'app/client.mjs'].sort();
-  const sourceLock = { catalog, inventoryHash: digest(inventory), runtime: { node: process.version, platform: process.platform, arch: process.arch, files: runtimeFiles.map(f => ({ path: f, sha256: createHash('sha256').update(fs.readFileSync(path.join(root, f))).digest('hex') })) } };
   const visibleRegistry = new Map([...registry].filter(([name, tool]) => policy.allowedTools.includes(name) && policy.allowedEffects.includes(tool.effect)));
   const harness = createChatHarness({
     registry, policy, sourceLock, workspaceRoot,

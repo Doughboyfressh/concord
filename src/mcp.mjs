@@ -9,6 +9,8 @@ import { makeBuiltinTools } from './builtins.mjs';
 import { loadSourceLock, makeSourceTools } from './sources.mjs';
 import { makeCapabilityTools } from './capabilities.mjs';
 import { createClientChannel, makePeerTools, makeMailboxTools, readMailbox, fileMessage } from './peer.mjs';
+import { makeSkillStoreTools } from './skillstore.mjs';
+import { makeGovernanceTools } from './governance.mjs';
 import { makeArtifactTools } from './artifacts.mjs';
 import { makeIntegrationTools } from './integrations.mjs';
 import { makeReverseTools } from './reverse.mjs';
@@ -93,6 +95,7 @@ async function buildRegistry(flags) {
     ...makeIntegrationTools(integrations), ...makeAgentTools(workers), ...makeBrowserTools(browser),
     ...makeReverseTools(reverseTable, reverse), ...makeReaderTools(),
     ...makeForeignTools(foreignManifest, foreign),
+    ...makeSkillStoreTools(inventory),
   ];
   const registry = new Map();
   for (const tool of descriptors) {
@@ -456,13 +459,16 @@ export async function main(argv = process.argv.slice(2)) {
     if (registry.has(tool.name)) throw new HarnessError('MCP_CONFIG', 'Peer tool name collision', { tool: tool.name });
     registry.set(tool.name, tool);
   }
-  const policy = buildPolicy(flags, registry, integrations);
   const workspaceRoot = fs.realpathSync(path.resolve(flags.workspace ?? root));
   const runtimeFiles = fs.readdirSync(path.join(root, 'src')).filter(f => f.endsWith('.mjs')).map(f => 'src/' + f).sort();
   const sourceLock = {
     catalog, inventoryHash: digest(inventory),
     runtime: { node: process.version, platform: process.platform, arch: process.arch, files: runtimeFiles.map(f => ({ path: f, sha256: createHash('sha256').update(fs.readFileSync(path.join(root, f))).digest('hex') })) },
   };
+  // Delegation runs a sub-plan against this registry, so it is registered once the registry and
+  // source lock exist and before the policy derives allowedTools from them.
+  for (const tool of makeGovernanceTools({ registry, sourceLock })) registry.set(tool.name, tool);
+  const policy = buildPolicy(flags, registry, integrations);
   const visibleRegistry = new Map([...registry].filter(([name, tool]) => policy.allowedTools.includes(name) && policy.allowedEffects.includes(tool.effect)));
   const instructionRoot = path.join(root, 'instructions');
   const buildContext = ({ message, history, observations, proposedPlan }) => buildChatContext({ message, history, observations, proposedPlan, sourceLock: catalog, inventory, registry: visibleRegistry, policy, instructionRoot });
