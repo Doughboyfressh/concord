@@ -4,6 +4,9 @@ import { canonical, digest } from '../src/value.mjs';
 import { readerExercises } from './train-exercises-readers.mjs';
 import { evidenceExercises } from './train-exercises-evidence.mjs';
 import { writeExercises } from './train-exercises-writes.mjs';
+import { composeExercises } from './train-exercises-compose.mjs';
+
+import { derivedExercises } from './train-exercises-derived.mjs';
 
 /**
  * What Concord is trained on: one entry per thing worth proving.
@@ -24,13 +27,15 @@ import { writeExercises } from './train-exercises-writes.mjs';
 const bytes = (...values) => Buffer.from(values);
 const write = (dir, name, content) => fs.writeFileSync(path.join(dir, name), content);
 
-export function exercises(inventory) {
+export function exercises(inventory, registry) {
   const skill = (inventory.capabilities ?? []).find((entry) => entry.kind === 'skill' && typeof entry.sourceSha256 === 'string');
 
   return [
     ...readerExercises(),
     ...evidenceExercises(),
     ...writeExercises(),
+    ...composeExercises(),
+    ...derivedExercises(registry),
 
     // ---- determinism -----------------------------------------------------------------
     {

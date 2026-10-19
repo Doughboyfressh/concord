@@ -18,6 +18,8 @@ import { makeSkillStoreTools } from '../src/skillstore.mjs';
 import { makeGovernanceTools } from '../src/governance.mjs';
 import { exercises } from './train-exercises.mjs';
 import { updateInstructions, verifyCorpus } from './train-consolidate.mjs';
+import { analyseGaps, renderGaps, observeAssertedKeys } from './train-gaps.mjs';
+import { CONTRACTS } from './train-exercises-derived.mjs';
 
 /**
  * Fast training: exercise every capability, keep what the runs prove.
@@ -94,8 +96,42 @@ async function main() {
   const temp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'concord-train-')));
   const learned = [];
   const findings = [];
+  // A refusal code is only known to be reachable from a plan once a run has actually raised one.
+  const observedCodes = new Set();
+  // tool -> output keys some prediction was observed reading, accumulated across the round.
+  const assertedByTool = new Map();
+  // tool -> output keys a real result actually contained this round.
+  const returnedByTool = new Map();
 
-  for (const exercise of exercises(inventory)) {
+  /**
+   * Derived contracts, tallied rather than promoted one tool at a time.
+   *
+   * A generated exercise carries no lesson of its own: seventy-two copies of "this tool refuses
+   * malformed input" would crowd the memory they are supposed to improve. Each contract keeps the
+   * tools it applies to and the tools that satisfied it, and becomes a single lesson afterwards
+   * only if those two sets match.
+   */
+  const contracts = new Map();
+  const contractFor = (name) => {
+    if (!contracts.has(name)) contracts.set(name, { applicable: new Set(), held: new Set() });
+    return contracts.get(name);
+  };
+  /** Route a verified exercise: a hand-written one earns its lesson, a generated one a tally. */
+  const credit = (exercise, evidence) => {
+    if (exercise.contract) { contractFor(exercise.contract).held.add(exercise.tool); return; }
+    learned.push({ family: exercise.family, tool: exercise.tool, lesson: exercise.lesson, evidence });
+  };
+
+  // Counted here rather than inferred from what was learned: a derived exercise credits a contract
+  // tally instead of a lesson, so counting lessons undercounts the work by the hundred-odd
+  // generated checks, and the two contract lessons carry a contract name where a tool name goes.
+  let attempted = 0;
+  const exercisedTools = new Set();
+
+  for (const exercise of exercises(inventory, registry)) {
+    if (exercise.contract) contractFor(exercise.contract).applicable.add(exercise.tool);
+    attempted += 1;
+    if (registry.has(exercise.tool)) exercisedTools.add(exercise.tool);
     const workspaceRoot = exercise.workspace === 'temp' ? temp : root;
     // A reader exercise is only worth anything against real bytes, so a fixture is written into
     // the scratch workspace first. Built here rather than committed: a fixture that drifts from
@@ -118,15 +154,48 @@ async function main() {
     try {
       outcome = await attempt({ plan: exercise.plan, registry, policy, sourceLock, workspaceRoot, grant: exercise.grant });
     } catch (error) {
-      findings.push({ family: exercise.family, tool: exercise.tool, note: 'threw ' + (error instanceof HarnessError ? error.code : error.message) });
+      const code = error instanceof HarnessError ? error.code : null;
+      if (code) observedCodes.add(code);
+      /**
+       * A plan refused while compiling never produces a journal, so there is nothing to replay.
+       *
+       * Reproducibility is still the price of promotion, and compiling a second time is what pays
+       * it here: a refusal that fires once and not again is a flake, not a rule. The evidence says
+       * it was proven by a repeated refusal rather than by a replayed run, because recording a
+       * replay that never happened would corrupt the one thing memory is for.
+       */
+      if (exercise.expectThrow && code === exercise.expectThrow) {
+        let again = null;
+        try { await attempt({ plan: exercise.plan, registry, policy, sourceLock, workspaceRoot, grant: exercise.grant }); }
+        catch (second) { again = second instanceof HarnessError ? second.code : null; }
+        if (again === code) {
+          credit(exercise, { tool: exercise.tool, planHash: digest(exercise.plan), outcome: 'refused-at-compile', code, provenBy: 'compile-refusal-twice' });
+        } else {
+          findings.push({ family: exercise.family, tool: exercise.tool, note: 'refused ' + code + ' once but ' + (again ?? 'not at all') + ' on a second compile' });
+        }
+        continue;
+      }
+      findings.push({ family: exercise.family, tool: exercise.tool, note: 'threw ' + (code ?? error.message) });
       continue;
     }
 
     const { result, approvals } = outcome;
     const failure = result.events.find((event) => event.type === 'failed');
+    if (failure?.data?.toolCode) observedCodes.add(failure.data.toolCode);
+    if (failure?.data?.code) observedCodes.add(failure.data.code);
+    if (result.outcome.code) observedCodes.add(result.outcome.code);
     const held = (() => {
       try {
-        if (exercise.expectCode) return failure?.data?.toolCode === exercise.expectCode;
+        if (exercise.expectCode) {
+          // toolCode is the refusal a tool itself raised; code is the engine's own, and is all
+          // there is when the engine refused before any tool ran. The specific one wins.
+          const raised = failure?.data?.toolCode ?? failure?.data?.code;
+          if (raised !== exercise.expectCode) return false;
+          // Distinct guards can share a single code, so the reason is sometimes the only thing
+          // that tells them apart. Asserting the code alone would let one guard stand in for
+          // another and report coverage it does not have.
+          return !exercise.expectReason || String(failure?.data?.reason ?? '').includes(exercise.expectReason);
+        }
         return Boolean(exercise.expect(result, { workspaceRoot }));
       } catch { return false; }
     })();
@@ -138,6 +207,57 @@ async function main() {
         note: `prediction did not hold (status ${result.outcome.status}, ${approvals.length} approvals)`,
       });
       continue;
+    }
+
+    /**
+     * Every tool returns every key it declares, with nothing undefined.
+     *
+     * Enforced here for every exercise rather than asserted inside each prediction, for two
+     * reasons. A universal contract checked in one place cannot be forgotten by the next exercise
+     * someone writes. And leaving it to predictions corrupted the measurement: a prediction that
+     * touched all seven of a reader's keys to confirm they existed scored the same as one that
+     * checked what the values meant, so key coverage read as 317/418 when most of that was
+     * presence rather than content.
+     *
+     * An undefined value is the specific thing worth catching: it is outside the JSON domain, so
+     * the kernel refuses to record the output and the run fails as OUTPUT_REJECTED naming no
+     * cause. That is exactly how the artifact.compareHar defect presented.
+     */
+    const shapeGap = [];
+    for (const [taskId, value] of Object.entries(result.results ?? {})) {
+      const taskTool = exercise.plan?.tasks?.find((task) => task.id === taskId)?.tool;
+      const declaredOut = registry.get(taskTool)?.outputKeys;
+      if (!Array.isArray(declaredOut) || !value || typeof value !== 'object') continue;
+      for (const key of declaredOut) if (value[key] === undefined) shapeGap.push(taskTool + '.' + key);
+    }
+    if (shapeGap.length) {
+      findings.push({
+        family: exercise.family, tool: exercise.tool,
+        note: 'returned less than it declares: ' + shapeGap.join(', '),
+      });
+      continue;
+    }
+
+    // Which output keys this prediction actually read, watched rather than guessed from its text.
+    // Only predictions that held are recorded: a key touched by a prediction that turned out to be
+    // wrong has not been verified against anything.
+    for (const [taskId, keys] of observeAssertedKeys(exercise, result, { workspaceRoot })) {
+      const tool = exercise.plan?.tasks?.find((task) => task.id === taskId)?.tool;
+      if (!tool) continue;
+      if (!assertedByTool.has(tool)) assertedByTool.set(tool, new Set());
+      for (const key of keys) assertedByTool.get(tool).add(key);
+    }
+
+    // What each tool actually returned, which is a different question from what a prediction read.
+    // A declared key that never appears in any real result means the descriptor promises more than
+    // the tool delivers, and callers written against the declaration would branch on a key that is
+    // never there. No exercise has to be written per tool for this: the round already has the
+    // outputs, so the check is free and cannot be forgotten.
+    for (const [taskId, value] of Object.entries(result.results ?? {})) {
+      const tool = exercise.plan?.tasks?.find((task) => task.id === taskId)?.tool;
+      if (!tool || !value || typeof value !== 'object') continue;
+      if (!returnedByTool.has(tool)) returnedByTool.set(tool, new Set());
+      for (const key of Object.keys(value)) returnedByTool.get(tool).add(key);
     }
 
     // Replay is the second half of the evidence: a lesson is only as good as a run that
@@ -152,13 +272,32 @@ async function main() {
       continue;
     }
 
+    // Evidence names what proved the lesson, not which run happened to prove it. The run root
+    // changes on every execution, so including it made each round mint a fresh copy of an
+    // identical lesson: 114 files for 61 lessons before this was caught. A plan digest plus
+    // the outcome is reproducible by anyone, which is what evidence is supposed to be.
+    credit(exercise, { tool: exercise.tool, planHash: digest(exercise.plan), outcome: result.outcome.status, approvals: approvals.length, replayed: true });
+  }
+
+  /**
+   * A contract that held everywhere it applied becomes exactly one lesson.
+   *
+   * Promoted only if every tool the contract applies to satisfied it; a single exception makes the
+   * general claim false, and recording it anyway would be the most misleading thing in the memory.
+   * The evidence is the tool count and the sorted tool list, so the claim can be rechecked rather
+   * than taken on trust.
+   */
+  for (const [name, tally] of contracts) {
+    const lesson = CONTRACTS[name];
+    if (!lesson) continue;
+    const failed = [...tally.applicable].filter((tool) => !tally.held.has(tool)).sort();
+    if (failed.length) {
+      findings.push({ family: 'contract', tool: name, note: `held for ${tally.held.size} of ${tally.applicable.size} tools but not ${failed.slice(0, 6).join(', ')}, so the general claim was not promoted` });
+      continue;
+    }
     learned.push({
-      family: exercise.family, tool: exercise.tool, lesson: exercise.lesson,
-      // Evidence names what proved the lesson, not which run happened to prove it. The run root
-      // changes on every execution, so including it made each round mint a fresh copy of an
-      // identical lesson: 114 files for 61 lessons before this was caught. A plan digest plus
-      // the outcome is reproducible by anyone, which is what evidence is supposed to be.
-      evidence: { tool: exercise.tool, planHash: digest(exercise.plan), outcome: result.outcome.status, approvals: approvals.length, replayed: true },
+      family: 'contract', tool: name, lesson,
+      evidence: { contract: name, tools: tally.held.size, appliesTo: [...tally.held].sort(), provenBy: 'every-tool-it-applies-to' },
     });
   }
 
@@ -218,13 +357,18 @@ async function main() {
   fs.rmSync(temp, { recursive: true, force: true });
   const seconds = ((Date.now() - started) / 1000).toFixed(1);
   const stored = fs.readdirSync(path.join(root, 'memory')).filter((name) => name.endsWith('.json')).length;
-  const exercised = new Set([...learned, ...findings].map((entry) => entry.tool));
-  const coverage = `${exercised.size}/${registry.size}`;
+  const coverage = `${exercisedTools.size}/${registry.size}`;
+  const contractChecks = [...contracts.values()].reduce((sum, tally) => sum + tally.applicable.size, 0);
+  const contractsHeld = [...contracts.values()].filter((tally) => tally.held.size === tally.applicable.size).length;
+  // Derived, so the round names its own frontier rather than waiting for someone to notice it.
+  const gaps = analyseGaps({ root, exercises: exercises(inventory, registry), registry, observedCodes, assertedByTool, returnedByTool });
 
   const report = [
     '# Capability training round',
     '',
-    `Exercises run: **${learned.length + findings.length}**. Lessons earned and promoted: **${promoted}**. Findings: **${findings.length}**. Tools exercised: **${coverage}**. Wall clock: **${seconds}s**. Stored lessons now: **${stored}**.`,
+    `Exercises run: **${attempted}**. Lessons earned and promoted: **${promoted}**. Findings: **${findings.length}**. Tools exercised: **${coverage}**. Wall clock: **${seconds}s**. Stored lessons now: **${stored}**.`,
+    '',
+    `Of those exercises, **${contractChecks}** were generated from the tools' own declarations rather than written by hand, across **${contracts.size}** derived contracts, **${contractsHeld}** of which held for every tool they apply to. A generated check cannot discover that a declaration is wrong, only that a tool and its declaration disagree, so each contract earns one lesson rather than one per tool.`,
     '',
     `Instruction modules deepened: **${instructionsUpdated.length}** (${instructionsUpdated.map((entry) => entry.sourceId).join(', ') || 'none'}). Skill corpus verified against its index: **${corpus.verified}** files match, **${corpus.mismatched.length}** drifted, **${corpus.absent}** not in this workspace.`,
     '',
@@ -242,12 +386,17 @@ async function main() {
       ? ['| Family | Tool | What happened |', '| --- | --- | --- |', ...findings.map((entry) => `| ${entry.family} | \`${entry.tool}\` | ${entry.note} |`)]
       : ['_None: every exercise behaved as predicted._']),
     '',
+    renderGaps(gaps),
+    '',
   ].join('\n');
 
   if (outPath) fs.writeFileSync(outPath, report + '\n');
   console.log(canonical({
-    exercises: learned.length + findings.length, promoted, findings: findings.length, coverage,
+    exercises: attempted, promoted, findings: findings.length, coverage,
+    contractChecks, contracts: contracts.size, contractsHeld,
     instructionsUpdated: instructionsUpdated.length, corpusVerified: corpus.verified,
+    codesNamed: gaps.codes.named, codesObserved: gaps.codes.observed, codesUnproven: gaps.codes.unproven,
+    outputKeys: gaps.outputKeys.asserted + '/' + gaps.outputKeys.declared, composed: gaps.composition.composed,
     corpusDrifted: corpus.mismatched.length, pruned, seconds: Number(seconds), storedLessons: stored,
   }));
   for (const finding of findings) console.log('finding: ' + finding.family + ' ' + finding.tool + ' - ' + finding.note);

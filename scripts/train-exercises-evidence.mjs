@@ -22,8 +22,50 @@ const DIGEST_B = 'b'.repeat(64);
 /** One task, one tool, run through the real kernel like every other exercise. */
 const one = (tool, input) => ({ version: 1, name: 't', tasks: [{ id: 'a', tool, input }] });
 
+/**
+ * The four below exist because the frontier list caught an over-claim.
+ *
+ * The gap report said the unproven codes were "mostly raised while building a registry, where no
+ * plan can reach them". Reading the actual list showed otherwise: judgment.gate's refusal is
+ * plainly reachable from a plan, and three experiment.compare codes were not refusals at all but
+ * warnings returned inside a successful result, which no refusal could ever reach. The analyser
+ * was counting both spellings as one population. Both things are fixed, and these exercises hold
+ * the reachable ones down.
+ */
 export function evidenceExercises() {
   return [
+    {
+      family: 'evidence', tool: 'judgment.gate', expectCode: 'JUDGMENT_REJECTED', workspace: 'temp',
+      plan: one('judgment.gate', { score: 0.2, threshold: 0.9, evidence: { sample: 'thin' } }),
+      lesson: 'judgment.gate refuses with JUDGMENT_REJECTED when the score is below the declared threshold, rather than returning accepted:false for a caller to overlook. A gate that answered softly would let a failing score pass through as a value someone forgot to check.',
+    },
+    {
+      family: 'evidence', tool: 'experiment.compare', workspace: 'temp',
+      plan: one('experiment.compare', { hypothesis: 'one condition proves it', conditions: [{ name: 'only', varied: { a: 1 }, expected: 1, actual: 1 }] }),
+      expect: (r) => r.results.a.warnings.some((warning) => warning.code === 'SINGLE_CONDITION')
+        && r.results.a.confirmed.length === 1,
+      lesson: 'experiment.compare confirms a single condition and warns SINGLE_CONDITION in the same breath: the comparison passed, and one condition still cannot isolate a cause. The warning rides along with a successful result rather than replacing it, because the finding is real and the inference from it is not.',
+    },
+    {
+      family: 'evidence', tool: 'experiment.compare', workspace: 'temp',
+      plan: one('experiment.compare', { hypothesis: 'two runs, nothing varied', conditions: [
+        { name: 'x', varied: { a: 1 }, expected: 1, actual: 1 },
+        { name: 'y', varied: { a: 1 }, expected: 2, actual: 2 },
+      ] }),
+      expect: (r) => r.results.a.warnings.some((warning) => warning.code === 'UNVARIED_CONDITIONS')
+        && r.results.a.confirmed.length === 2,
+      lesson: 'experiment.compare warns UNVARIED_CONDITIONS when two conditions vary nothing between them, naming them, because that is one data point recorded twice rather than two. Both still confirm, so the count of passes is exactly the misleading number the warning exists to qualify.',
+    },
+    {
+      family: 'evidence', tool: 'experiment.compare', workspace: 'temp',
+      plan: one('experiment.compare', { hypothesis: 'both expect the same thing', conditions: [
+        { name: 'x', varied: { a: 1 }, expected: 1, actual: 1 },
+        { name: 'y', varied: { a: 2 }, expected: 1, actual: 1 },
+      ] }),
+      expect: (r) => r.results.a.discriminating === false
+        && r.results.a.warnings.some((warning) => warning.code === 'NONDISCRIMINATING_EXPECTATION'),
+      lesson: 'experiment.compare sets discriminating:false when every condition declares the same expectation, because such a test reads identically whether or not the varied factor mattered. It is the one warning that also flips a top-level field, so a caller checking a single boolean still cannot miss that the experiment could not have failed.',
+    },
     {
       family: 'evidence', tool: 'artifact.analysisView', workspace: 'temp',
       plan: one('artifact.analysisView', {
