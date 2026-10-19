@@ -297,6 +297,12 @@ async function launchBrowserSession(settings, bound, context, run) {
       '--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profileDir}`,
       '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--disable-extensions', 'about:blank',
     ], { env: {}, shell: false, windowsHide: true, stdio: 'ignore' });
+    // Asynchronous launch failures only, and on Windows there are none to catch: a missing
+    // executable is already refused as BROWSER_PATH by the realpath check above, and a regular
+    // file that is not executable makes spawn() throw EFTYPE synchronously — measured — so it
+    // never becomes an 'error' event. A browser that starts and then dies is not this code
+    // either; the port file simply never appears and the deadline reports BROWSER_TIMEOUT. Kept
+    // because the event is real on other platforms and costs nothing here.
     const started = new Promise((_, reject) => child.once('error', () => reject(new HarnessError('BROWSER_PROCESS', 'Browser could not start'))));
     const onAbort = () => fail('BROWSER_ABORTED', 'Browser snapshot was cancelled');
     if (context?.signal?.aborted) onAbort();

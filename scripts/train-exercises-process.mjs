@@ -4,7 +4,8 @@ import http from 'node:http';
 import { createHash } from 'node:crypto';
 import { spawnBounded, limits, resolveExecutable, makeIntegrationTools } from '../src/integrations.mjs';
 import { makeAgentTools } from '../src/workers.mjs';
-import { makeBrowserTools } from '../src/browser.mjs';
+import { makeBrowserTools, discoverPageTarget } from '../src/browser.mjs';
+import { findAppBrowser } from '../src/desktop.mjs';
 import { makeForeignTools } from '../src/foreign.mjs';
 
 /**
@@ -179,8 +180,66 @@ const CALL_ERRORING_SERVER = [
   SLEEP,
 ].join('\n');
 
+/**
+ * Serve one DevTools target list and run discovery against it.
+ *
+ * discoverPageTarget is exported for exactly this, so every BROWSER_CDP route is reachable with a
+ * loopback HTTP server and no browser at all. Worth noticing: the target list is the first thing
+ * Concord believes from the browser, and a browser is the least trustworthy thing it talks to, so
+ * each malformed shape gets its own refusal rather than one catch-all.
+ */
+async function againstTargetList(body, { status = 200 } = {}) {
+  const server = http.createServer((request, response) => {
+    response.writeHead(status, { 'content-type': 'application/json' });
+    response.end(typeof body === 'string' ? body : JSON.stringify(body));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try { return await discoverPageTarget(server.address().port); }
+  finally { server.close(); }
+}
+
+/** Serve a page for a real browser to load, run one snapshot against it, then close. */
+async function againstPage(html, run) {
+  const server = http.createServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(html);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try { return await run('http://127.0.0.1:' + server.address().port + '/'); }
+  finally { server.close(); }
+}
+
+/**
+ * A browser this machine actually has, or null.
+ *
+ * The output-budget refusal is the one code here that cannot be reached without driving a real
+ * browser through a real CDP session, so its exercise is emitted only where one exists. Absent
+ * rather than failing: a machine with no browser should report one fewer exercise, not a finding
+ * about its own installation.
+ */
+const INSTALLED_BROWSER = (() => {
+  try { return findAppBrowser(); } catch { return null; }
+})();
+
 export function processExercises() {
   return [
+    // ---- the DevTools target list, which is the first thing a browser is believed about --
+    {
+      family: 'process', tool: 'browser.discoverPageTarget', expectThrow: 'BROWSER_CDP',
+      call: () => againstTargetList('this is not json'),
+      lesson: 'A DevTools target list that is not strict JSON is refused BROWSER_CDP. The list is the first thing Concord believes from a browser, and a browser is the least trustworthy process it launches, so the response is parsed strictly rather than leniently.',
+    },
+    {
+      family: 'process', tool: 'browser.discoverPageTarget', expectThrow: 'BROWSER_CDP',
+      call: () => againstTargetList([{ type: 'background_page', webSocketDebuggerUrl: 'ws://127.0.0.1:1/x' }]),
+      lesson: 'A target list containing no inspectable page is refused BROWSER_CDP rather than falling back to whatever target happens to be present. Attaching to a background page or a service worker instead of the page that was asked for would snapshot something nobody requested.',
+    },
+    {
+      family: 'process', tool: 'browser.discoverPageTarget', expectThrow: 'BROWSER_CDP',
+      call: () => againstTargetList([{ type: 'page', webSocketDebuggerUrl: 'ws://example.com/devtools/page/1' }]),
+      lesson: 'A DevTools WebSocket endpoint that is not loopback is refused BROWSER_CDP, and so is one whose scheme is not ws. This is the sharpest check in the browser path: the endpoint comes from the browser rather than from configuration, so a compromised or confused browser could otherwise redirect a debugging session — with full page control — to a host across the network.',
+    },
+
     // ---- the HTTP connector: refusing an answer it did not compute ----------------------
     {
       family: 'process', tool: 'typesafe.evaluate', expectThrow: 'INTEGRATION_ORIGIN',
@@ -504,5 +563,22 @@ export function processExercises() {
       },
       lesson: 'A foreign server producing more than its budget is refused FOREIGN_OUTPUT_LIMIT as it writes. A foreign server is the least trusted thing Concord talks to, so its output is bounded while being read rather than after it has all arrived.',
     },
+
+    // ---- and the one that needs a browser this machine actually has ---------------------
+    ...(INSTALLED_BROWSER ? [{
+      family: 'process', tool: 'browser.snapshot', expectThrow: 'BROWSER_OUTPUT_LIMIT', workspace: 'temp',
+      call: ({ workspaceRoot }) => againstPage(
+        '<html><body><h1>Training page</h1><p>' + 'word '.repeat(400) + '</p></body></html>',
+        (url) => {
+          const tools = makeBrowserTools({ executable: INSTALLED_BROWSER.executable, timeoutMs: 45000, maxOutputBytes: 200 });
+          const snapshot = tools.find((tool) => tool.name === 'browser.snapshot');
+          return snapshot.execute({ url }, {
+            workspaceRoot,
+            policy: policyFor({ allowedTools: ['browser.snapshot'], maxOutputBytes: 200, timeoutMs: 45000 }),
+          });
+        },
+      ),
+      lesson: 'A snapshot whose result exceeds the output budget is refused BROWSER_OUTPUT_LIMIT after the page has been read and before the result is returned, and the browser process and its temporary profile are still cleaned up. This is the only browser refusal that needs a real CDP session: the page is served from loopback, loaded by a headless browser this machine actually has, and the whole round trip takes about three hundred milliseconds. The budget is checked against the serialised result rather than the page, because what matters is what would enter the journal.',
+    }] : []),
   ];
 }
