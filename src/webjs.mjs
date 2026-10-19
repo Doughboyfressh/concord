@@ -696,9 +696,12 @@ export function makeWebTools() {
           }
           const statusChanged = mine[0].status !== theirs[0].status;
           const typeChanged = mine[0].mimeType !== theirs[0].mimeType;
+          // Normalised to null exactly as artifact.harCapture does, because the input schema
+          // admits an entry carrying neither field and an undefined is outside the JSON domain:
+          // the kernel would refuse to record this output at all, naming no cause.
           changes.push({ request: key, state: statusChanged || typeChanged ? 'changed' : 'unchanged',
-            left: { status: mine[0].status, mimeType: mine[0].mimeType },
-            right: { status: theirs[0].status, mimeType: theirs[0].mimeType } });
+            left: { status: mine[0].status ?? null, mimeType: mine[0].mimeType ?? null },
+            right: { status: theirs[0].status ?? null, mimeType: theirs[0].mimeType ?? null } });
         }
         const tally = (state) => changes.filter((change) => change.state === state).length;
         return { changes,

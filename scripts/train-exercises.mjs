@@ -1,6 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { canonical, digest } from '../src/value.mjs';
+import { readerExercises } from './train-exercises-readers.mjs';
+import { evidenceExercises } from './train-exercises-evidence.mjs';
+import { writeExercises } from './train-exercises-writes.mjs';
 
 /**
  * What Concord is trained on: one entry per thing worth proving.
@@ -25,6 +28,10 @@ export function exercises(inventory) {
   const skill = (inventory.capabilities ?? []).find((entry) => entry.kind === 'skill' && typeof entry.sourceSha256 === 'string');
 
   return [
+    ...readerExercises(),
+    ...evidenceExercises(),
+    ...writeExercises(),
+
     // ---- determinism -----------------------------------------------------------------
     {
       family: 'determinism', tool: 'json.hash',
