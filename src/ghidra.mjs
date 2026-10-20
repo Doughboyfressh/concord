@@ -952,6 +952,7 @@ export function makeGhidraTools() {
           id: node.attributes.id ?? null, processor: node.attributes.processor ?? null,
           endian: node.attributes.endian ?? null, size: integer(node.attributes.size),
           variant: node.attributes.variant ?? null, deprecated: bool(node.attributes.deprecated) ?? false,
+          slaFile: node.attributes.slafile ?? null, processorSpec: node.attributes.processorspec ?? null,
           compilers: kids(node, 'compiler').map((c) => c.attributes.id ?? null),
         }));
         const rows = flattenOpinions(opinionRead.root);
@@ -976,7 +977,12 @@ export function makeGhidraTools() {
               processor: row.processor ?? null, endian: row.endian ?? null, size: integer(row.size),
               variant: row.variant ?? null, compilerSpecID: row.compilerSpecID ?? null },
             secondaryMatch: secondaryCheck.how,
+            // The table and processor spec filenames come along, because resolving a language id is
+            // only useful if the next step can load it: without these a caller has to guess which .sla
+            // the id refers to, and guessing the table is how a binary gets decoded as the wrong
+            // architecture while every tool still reports success.
             languages: candidates.map((language) => ({ id: language.id, variant: language.variant, deprecated: language.deprecated,
+              slaFile: language.slaFile ?? null, processorSpec: language.processorSpec ?? null,
               compilerSpecKnown: row.compilerSpecID === undefined ? null : language.compilers.includes(row.compilerSpecID) })),
             resolved: candidates.length > 0,
           });

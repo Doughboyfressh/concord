@@ -255,3 +255,41 @@ test('the instruction budget is reported rather than quietly truncating the grap
   assert.equal(result.counts.instructions, 1);
   assert.ok(result.limitations.some((line) => /instruction limit/.test(line)));
 });
+
+/**
+ * A branch out of the analysed window.
+ *
+ * The target is dequeued, found to be outside the bytes, and that is the whole of what can be said
+ * about it. The failure this guards is silence: dropping it leaves a successor edge pointing at an
+ * address nothing decoded, which is indistinguishable in the output from a block that was analysed
+ * and found to be empty. recoverCallGraph already reports the same situation as an external node.
+ */
+test('a branch leaving the supplied bytes is reported, and names the instruction it came from', () => {
+  // 0x00  br 0x40    -- the program is two bytes long, so 0x40 is not in it
+  const result = recoverControlFlow(toy(), program(0x04, 0x40), { address: 0n });
+
+  // The edge is still reported: a missing edge would read as dead code.
+  assert.deepEqual(blockAt(result, '0x0').successors, [{ to: '0x40', kind: 'branch' }]);
+
+  assert.equal(result.counts.unresolved, 1);
+  assert.deepEqual(result.unresolved, [{ address: '0x40', kind: 'out_of_range',
+    reason: 'Flow from 0x0 leaves the bytes supplied, so the target was never decoded' }]);
+  assert.ok(result.limitations.some((line) => line.includes('outside the bytes supplied')),
+    'the limitation must say that some targets were never decoded');
+  // Nothing was invented at the target: one instruction decoded, one block.
+  assert.equal(result.counts.instructions, 1);
+  assert.equal(result.counts.blocks, 1);
+});
+
+test('an entry point outside the supplied bytes is reported as such, not as empty code', () => {
+  const result = recoverControlFlow(toy(), program(0x03), { address: 0n, entries: [0x99n] });
+  assert.deepEqual(result.unresolved, [{ address: '0x99', kind: 'out_of_range',
+    reason: 'This entry point lies outside the bytes supplied, so nothing was decoded there' }]);
+  assert.equal(result.counts.instructions, 0);
+  assert.equal(result.counts.blocks, 0);
+});
+
+test('an out-of-range target is canonical, so it survives the kernel journal', () => {
+  const result = recoverControlFlow(toy(), program(0x04, 0x40), { address: 0n });
+  assert.equal(typeof canonical(result.unresolved), 'string');
+});

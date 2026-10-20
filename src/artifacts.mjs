@@ -97,11 +97,20 @@ function readFixedString(buffer, offset, length, maxLength) {
 // list DT_NEEDED entries (linked shared library names) — the same bytes the dynamic linker
 // itself would read, never executed or loaded. Spec verified independently against a real
 // ELF64 shared library before this was written.
-function elfNeededLibraries(buffer, is64, littleEndian) {
+/**
+ * The PT_LOAD segments, which are what maps a virtual address to a file offset.
+ *
+ * Read by both the library walker and the entry point, so it is one function rather than a closure
+ * inside one of them: an ELF entry point is a virtual address, and a caller who hands it on as a
+ * file offset reads whatever bytes happen to live at that number.
+ */
+function elfLoadSegments(buffer, is64, littleEndian) {
   const phOff = is64 ? readUint(buffer, 32, 8, littleEndian) : readUint(buffer, 28, 4, littleEndian);
   const phEntSize = is64 ? readUint(buffer, 54, 2, littleEndian) : readUint(buffer, 42, 2, littleEndian);
   const phNum = is64 ? readUint(buffer, 56, 2, littleEndian) : readUint(buffer, 44, 2, littleEndian);
-  if (typeof phOff !== 'number' || typeof phEntSize !== 'number' || typeof phNum !== 'number') return [];
+  if (typeof phOff !== 'number' || typeof phEntSize !== 'number' || typeof phNum !== 'number') {
+    return { loadSegments: [], dynamicOffset: undefined };
+  }
 
   let dynamicOffset;
   const loadSegments = [];
@@ -116,13 +125,20 @@ function elfNeededLibraries(buffer, is64, littleEndian) {
     if (type === 2) dynamicOffset = segOffset; // PT_DYNAMIC
     if (type === 1) loadSegments.push({ offset: segOffset, vaddr, filesz }); // PT_LOAD
   }
-  if (typeof dynamicOffset !== 'number') return [];
+  return { loadSegments, dynamicOffset };
+}
 
-  function vaddrToOffset(vaddr) {
-    if (typeof vaddr !== 'number') return undefined;
-    for (const seg of loadSegments) if (vaddr >= seg.vaddr && vaddr < seg.vaddr + seg.filesz) return seg.offset + (vaddr - seg.vaddr);
-    return undefined;
-  }
+/** A virtual address to a file offset, or undefined when no loaded segment covers it. */
+function elfVaddrToOffset(loadSegments, vaddr) {
+  if (typeof vaddr !== 'number') return undefined;
+  for (const seg of loadSegments) if (vaddr >= seg.vaddr && vaddr < seg.vaddr + seg.filesz) return seg.offset + (vaddr - seg.vaddr);
+  return undefined;
+}
+
+function elfNeededLibraries(buffer, is64, littleEndian) {
+  const { loadSegments, dynamicOffset } = elfLoadSegments(buffer, is64, littleEndian);
+  if (typeof dynamicOffset !== 'number') return [];
+  const vaddrToOffset = (vaddr) => elfVaddrToOffset(loadSegments, vaddr);
 
   const entrySize = is64 ? 16 : 8;
   const neededOffsets = [];
@@ -156,12 +172,19 @@ function parseElf(buffer) {
   const dataEncoding = dataByte === 1 ? 'little-endian' : dataByte === 2 ? 'big-endian' : 'unknown';
   const headerSize = is64 ? 64 : 52;
   if (buffer.length < headerSize) return { class: klass, dataEncoding, truncatedHeader: true };
+  // The entry point is a virtual address. Disassembly needs a file offset, so both are reported
+  // and neither has to be guessed from the other.
+  const entry = is64 ? readUint(buffer, 24, 8, littleEndian) : readUint(buffer, 24, 4, littleEndian);
+  const { loadSegments } = elfLoadSegments(buffer, is64, littleEndian);
+  const entryPointFileOffset = elfVaddrToOffset(loadSegments, entry);
   return {
     class: klass, dataEncoding,
     type: readUint(buffer, 16, 2, littleEndian),
     machine: readUint(buffer, 18, 2, littleEndian),
-    entryPoint: is64 ? readUint(buffer, 24, 8, littleEndian) : readUint(buffer, 24, 4, littleEndian),
+    entryPoint: entry,
+    ...(entryPointFileOffset === undefined ? {} : { entryPointOffset: entryPointFileOffset }),
     sectionCount: is64 ? readUint(buffer, 60, 2, littleEndian) : readUint(buffer, 48, 2, littleEndian),
+    segments: loadSegments.map((seg) => ({ vaddr: seg.vaddr, fileOffset: seg.offset, fileSize: seg.filesz })),
     neededLibraries: elfNeededLibraries(buffer, is64, littleEndian),
   };
 }
@@ -184,7 +207,10 @@ function peSections(buffer, sectionTableOffset, sectionCount) {
     const sizeOfRawData = readUint(buffer, off + 16, 4, true);
     const pointerToRawData = readUint(buffer, off + 20, 4, true);
     if ([virtualSize, virtualAddress, sizeOfRawData, pointerToRawData].some((v) => typeof v !== 'number')) break;
-    sections.push({ virtualSize, virtualAddress, sizeOfRawData, pointerToRawData });
+    const rawName = buffer.toString('latin1', off, off + 8);
+    const nul = rawName.indexOf('\u0000');
+    sections.push({ name: nul === -1 ? rawName : rawName.slice(0, nul),
+      virtualSize, virtualAddress, sizeOfRawData, pointerToRawData });
   }
   return sections;
 }
@@ -224,11 +250,32 @@ function parsePe(buffer) {
   if (signatureOffset === undefined || !magicMatch(buffer, signatureOffset, [0x50, 0x45, 0x00, 0x00])) return undefined;
   const sizeOfOptionalHeader = readUint(buffer, signatureOffset + 20, 2, true);
   const sectionCount = readUint(buffer, signatureOffset + 6, 2, true);
+  // AddressOfEntryPoint is an RVA, not a file offset, and the two differ by the gap between a
+  // section virtual address and where its bytes actually sit in the file. Reporting only the RVA
+  // invites a caller to pass it as an offset, which disassembles the wrong bytes and reports
+  // success, so the converted offset and the loaded address are reported alongside it.
+  const magic = sizeOfOptionalHeader ? readUint(buffer, signatureOffset + 24, 2, true) : undefined;
+  const isPe32Plus = magic === 0x20b;
+  const imageBase = sizeOfOptionalHeader
+    ? (isPe32Plus ? readUint(buffer, signatureOffset + 48, 8, true) : readUint(buffer, signatureOffset + 52, 4, true))
+    : undefined;
+  const sections = sizeOfOptionalHeader
+    ? peSections(buffer, signatureOffset + 24 + sizeOfOptionalHeader, sectionCount) : [];
+  const entryPoint = sizeOfOptionalHeader ? readUint(buffer, signatureOffset + 40, 4, true) : undefined;
+  const entryPointOffset = peRvaToOffset(sections, entryPoint);
+  const entryPointAddress = typeof imageBase === 'number' && typeof entryPoint === 'number'
+    ? imageBase + entryPoint : undefined;
+  const optional = (key, value) => (value === undefined ? {} : { [key]: value });
   return {
     machine: readUint(buffer, signatureOffset + 4, 2, true),
     sectionCount,
     timestamp: readUint(buffer, signatureOffset + 8, 4, true),
-    entryPoint: sizeOfOptionalHeader ? readUint(buffer, signatureOffset + 40, 4, true) : undefined,
+    ...optional('entryPoint', entryPoint),
+    ...optional('entryPointOffset', entryPointOffset),
+    ...optional('entryPointAddress', entryPointAddress),
+    ...optional('imageBase', imageBase),
+    sections: sections.map((section) => ({ name: section.name, virtualAddress: section.virtualAddress,
+      virtualSize: section.virtualSize, fileOffset: section.pointerToRawData, fileSize: section.sizeOfRawData })),
     imports: sizeOfOptionalHeader ? peImports(buffer, signatureOffset, sizeOfOptionalHeader, sectionCount) : [],
   };
 }

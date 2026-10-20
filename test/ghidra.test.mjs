@@ -137,6 +137,11 @@ test('the loader decision resolves only to languages that exist, and reports a r
   assert.equal(hit.counts.resolved, 1);
   assert.deepEqual(hit.matched[0].languages.map((l) => l.id), ['Toy:LE:32:default']);
   assert.equal(hit.matched[0].languages[0].compilerSpecKnown, true);
+  // The table and spec filenames come with the id. Resolving a language is only useful if the next
+  // step can load it, and a caller left to guess which .sla an id refers to can guess wrong and be
+  // told nothing: decoding a binary with the wrong table reports success on every instruction.
+  assert.equal(hit.matched[0].languages[0].slaFile, 'toy.sla');
+  assert.equal(hit.matched[0].languages[0].processorSpec, 'toy.pspec');
 
   // primary 334 names variant "absent", which no language declares. The row matched, so saying
   // nothing matched would be wrong, and inventing Toy:BE:64:absent would be worse: the honest

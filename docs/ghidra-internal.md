@@ -416,6 +416,66 @@ eight-byte location nothing reads; only genuinely overlapping ranges collapse no
 first input is a destination *address*, not a value fetched from it, so counting it as a read
 reported phantom `ram` inputs on regions that touch no memory.
 
+## Run against a real binary
+
+Every layer above was built against the shipped corpus, hand-known disassembly and a toy language.
+None of it had seen an executable. The obvious test subject is Ghidra's own decompiler: the
+distribution ships `decompile.exe`, 2.5 MB of x86-64 PE, and `decompile`, 3.4 MB of x86-64 ELF —
+the same program for two platforms, which makes the two headers checkable against each other.
+
+The chain is: `artifact.inspect` reads the header, `artifact.ghidraLanguageMatch` turns the machine
+type into a language and a table, and `artifact.disassemble` → `artifact.controlFlow` →
+`artifact.callGraph` → `artifact.dataflow` read the code. On `decompile.exe` the entry point
+disassembles to the MSVC startup thunk — `SUB RSP,0x28`, a call, `ADD RSP,0x28`, a tail jump, then
+`INT3` padding and functions using the Microsoft x64 argument registers — and both relative
+branches resolve correctly against the loaded address. 962 instructions and 226 basic blocks were
+recovered from a 64 KB window, 34 regions and 70 call edges, and dataflow reached its fixpoint in
+three rounds over 327 p-code operations, reporting one partially overwritten read.
+
+### The entry point is not where the bytes are
+
+Running the chain found one gap, and it is the kind this project exists to avoid. A PE
+`AddressOfEntryPoint` is a relative virtual address. Every tool here takes a *file offset*. The two
+differ by the distance between a section's virtual address and its `PointerToRawData`, which on
+`decompile.exe` is 0xC00: the entry point RVA is 0x1bb85c and its bytes are at 0x1bac5c.
+
+Nothing in the repository converted between them. The conversion was *present* —
+`peRvaToOffset` and `peSections` had existed all along, used privately to walk the import
+directory, and the ELF side had the equivalent mapping as a closure inside the library walker — but
+neither was reachable by a caller, and neither entry point was reported as anything but an address.
+
+What that produces is worth stating exactly, because it was measured rather than predicted. Passing
+the RVA as an offset disassembles eight of eight instructions, three kilobytes away from the entry
+point, into plausible-looking register moves, and reports `supported: true` with no indication
+whatsoever that the bytes are wrong. A stream of x86 is almost always decodable as *something*,
+so there is no error for the decoder to raise. This is the exact shape every rule above was written
+against, arrived at not through a bad decoder but through two correct numbers being confused.
+
+So the header now reports all three numbers, because they are three different things: the RVA, the
+file offset its section table implies, and the address the code believes it runs at. The section
+table and image base come too, since the conversion needs them. When no section covers the RVA the
+offset key is *absent* rather than null or zero — `canonical()` refuses `undefined`, and a guessed
+offset is worse than a stated gap. ELF is the same shape through its PT_LOAD segments, verified
+independently against the program headers of the Linux build.
+
+The last link was smaller and the same in kind: `artifact.ghidraLanguageMatch` resolved a machine
+type to `x86:LE:64:default` but dropped the `slafile` and `processorspec` attributes it had already
+read, so a caller holding a language id still had to guess which `.sla` it meant. Guessing the
+table is how a binary gets decoded as the wrong architecture while every tool reports success.
+Both filenames are now carried through, and the chain runs with nothing hardcoded.
+
+### Flow that leaves the window
+
+The run also found that `artifact.controlFlow` dropped a branch or call target outside the bytes it
+was given. The edge stayed in the output, pointing at an address nothing had decoded, which in the
+result is indistinguishable from a block that was analysed. `recoverCallGraph` had always reported
+this honestly as an external node; the block-level trace just skipped it.
+
+Such a target is now listed as unresolved with kind `out_of_range`, naming the instruction it came
+from, and the edge is still reported — a missing edge reads as dead code. On the 64 KB window of
+`decompile.exe` there were sixteen, every one a genuine call or branch into code the window did not
+cover. The two layers now agree instead of one being quietly weaker.
+
 ## What this does not do
 
 It does not decompile. Lifting p-code to C is the other ~157,000 lines of the decompiler, and

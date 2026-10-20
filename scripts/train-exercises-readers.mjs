@@ -191,5 +191,36 @@ export function readerExercises() {
         && Array.isArray(r.results.a.limitations),
       lesson: 'artifact.jsApplication walks a module graph from a single entry and resolves the files it reaches, reporting resolved modules, external packages and unresolved specifiers as separate lists, so a dependency it could not find is never quietly counted as one that was not there.',
     },
+    {
+      family: 'readers', tool: 'artifact.inspect', workspace: 'temp',
+      // A PE whose section table puts the entry point at a file offset 0xC00 below its RVA, which
+      // is the same shape as a real Windows binary: .text at virtual 0x1000, raw at 0x400.
+      fixture: (dir) => {
+        const pe = Buffer.alloc(512);
+        pe.write('MZ', 0, 'latin1');
+        pe.writeInt32LE(64, 0x3c);
+        pe.write('PE\u0000\u0000', 64, 'latin1');
+        pe.writeUInt16LE(0x8664, 68);
+        pe.writeUInt16LE(1, 70);
+        pe.writeUInt16LE(240, 84);
+        pe.writeUInt16LE(0x20b, 88);
+        pe.writeUInt32LE(0x1234, 104);
+        pe.writeBigUInt64LE(0x140000000n, 112);
+        const section = 64 + 24 + 240;
+        pe.write('.text', section, 'latin1');
+        pe.writeUInt32LE(0x2000, section + 8);
+        pe.writeUInt32LE(0x1000, section + 12);
+        pe.writeUInt32LE(0x2000, section + 16);
+        pe.writeUInt32LE(0x400, section + 20);
+        write(dir, 'prog.exe', pe);
+      },
+      plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'artifact.inspect', input: { path: 'prog.exe' } }] },
+      expect: (r) => r.results.a.format === 'pe' && r.results.a.pe.entryPoint === 0x1234
+        && r.results.a.pe.entryPointOffset === 0x634
+        && r.results.a.pe.entryPointOffset !== r.results.a.pe.entryPoint
+        && r.results.a.pe.entryPointAddress === 0x140001234
+        && r.results.a.pe.sections[0].name === '.text',
+      lesson: 'artifact.inspect reports a PE entry point three ways because they are three different numbers, and confusing them is the most direct route to confidently wrong disassembly. AddressOfEntryPoint is a relative virtual address; the bytes live at a file offset that differs by the gap between a section virtual address and its PointerToRawData; and the address the code believes it runs at is the image base plus the RVA. On a real Windows binary that gap is 0xC00, so handing the RVA to a disassembler as an offset decodes bytes three kilobytes away and reports success on every one of them, because a stream of x86 bytes is almost always decodable as something. The conversion needs the section table, so the section table is reported too, and when no section covers the RVA the offset key is absent rather than null or zero: canonical refuses undefined, and a guessed offset is worse than a stated gap. The same distinction applies to ELF, where the mapping comes from the PT_LOAD segments instead.',
+    },
   ];
 }

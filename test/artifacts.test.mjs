@@ -194,19 +194,121 @@ test('identifies ELF, PE (via MZ+PE signature), ZIP, and PNG by magic bytes', ()
 test('extracts correct ELF32 header fields', () => {
   const temp = tempWorkspace();
   const result = inspect.execute({ path: writeFixture(temp, 'a32.elf', minimalElf(false)) }, { workspaceRoot: temp, policy });
-  assert.deepEqual(result.elf, { class: '32-bit', dataEncoding: 'little-endian', type: 2, machine: 3, entryPoint: 0x8048000, sectionCount: 11, neededLibraries: [] });
+  assert.deepEqual(result.elf, { class: '32-bit', dataEncoding: 'little-endian', type: 2, machine: 3, entryPoint: 0x8048000, sectionCount: 11, segments: [], neededLibraries: [] });
 });
 
 test('extracts correct ELF64 header fields, including a 64-bit entry point', () => {
   const temp = tempWorkspace();
   const result = inspect.execute({ path: writeFixture(temp, 'a64.elf', minimalElf(true)) }, { workspaceRoot: temp, policy });
-  assert.deepEqual(result.elf, { class: '64-bit', dataEncoding: 'little-endian', type: 2, machine: 0x3e, entryPoint: 0x400000, sectionCount: 11, neededLibraries: [] });
+  assert.deepEqual(result.elf, { class: '64-bit', dataEncoding: 'little-endian', type: 2, machine: 0x3e, entryPoint: 0x400000, sectionCount: 11, segments: [], neededLibraries: [] });
 });
 
 test('extracts correct PE header fields', () => {
   const temp = tempWorkspace();
   const result = inspect.execute({ path: writeFixture(temp, 'a.exe', minimalPe()) }, { workspaceRoot: temp, policy });
-  assert.deepEqual(result.pe, { machine: 0x8664, sectionCount: 7, timestamp: 1700000000, entryPoint: 0x1000, imports: [] });
+  assert.deepEqual(result.pe, { machine: 0x8664, sectionCount: 7, timestamp: 1700000000, entryPoint: 0x1000, sections: [], imports: [] });
+});
+
+/**
+ * A PE whose section table really maps the entry point somewhere other than its RVA.
+ *
+ * The gap matters: AddressOfEntryPoint is an RVA, every disassembler input is a file offset, and the
+ * two differ by exactly the distance between a section virtual address and where its bytes sit in
+ * the file. A fixture where the two happen to be equal would pass with the conversion deleted.
+ */
+function peWithSections() {
+  const buffer = Buffer.alloc(512);
+  buffer.write('MZ', 0, 'latin1');
+  buffer.writeInt32LE(64, 0x3c);
+  buffer.write('PE\u0000\u0000', 64, 'latin1');
+  buffer.writeUInt16LE(0x8664, 68);
+  buffer.writeUInt16LE(1, 70); // one section
+  buffer.writeUInt32LE(1700000000, 72);
+  buffer.writeUInt16LE(240, 84); // SizeOfOptionalHeader
+  buffer.writeUInt16LE(0x20b, 88); // PE32+ magic, which moves ImageBase and the data directories
+  buffer.writeUInt32LE(0x1234, 104); // AddressOfEntryPoint, an RVA
+  buffer.writeBigUInt64LE(0x140000000n, 112); // ImageBase
+  const section = 64 + 24 + 240;
+  buffer.write('.text', section, 'latin1');
+  buffer.writeUInt32LE(0x2000, section + 8); // VirtualSize
+  buffer.writeUInt32LE(0x1000, section + 12); // VirtualAddress
+  buffer.writeUInt32LE(0x2000, section + 16); // SizeOfRawData
+  buffer.writeUInt32LE(0x400, section + 20); // PointerToRawData
+  return buffer;
+}
+
+test('a PE entry point RVA is converted to the file offset its section table implies', () => {
+  const temp = tempWorkspace();
+  const result = inspect.execute({ path: writeFixture(temp, 'sections.exe', peWithSections()) }, { workspaceRoot: temp, policy });
+  assert.equal(result.pe.entryPoint, 0x1234);
+  // 0x1234 - 0x1000 + 0x400. The point of the assertion is that it is not 0x1234.
+  assert.equal(result.pe.entryPointOffset, 0x634);
+  assert.notEqual(result.pe.entryPointOffset, result.pe.entryPoint);
+  assert.equal(result.pe.imageBase, 0x140000000);
+  assert.equal(result.pe.entryPointAddress, 0x140001234);
+  assert.deepEqual(result.pe.sections, [{ name: '.text', virtualAddress: 0x1000, virtualSize: 0x2000, fileOffset: 0x400, fileSize: 0x2000 }]);
+});
+
+test('an entry point RVA no section covers reports no file offset rather than a wrong one', () => {
+  const temp = tempWorkspace();
+  const buffer = peWithSections();
+  buffer.writeUInt32LE(0x900000, 104); // an RVA past every section
+  const result = inspect.execute({ path: writeFixture(temp, 'unmapped.exe', buffer) }, { workspaceRoot: temp, policy });
+  assert.equal(result.pe.entryPoint, 0x900000);
+  assert.ok(!('entryPointOffset' in result.pe), 'an unmappable RVA must not produce an offset key');
+  // The loaded address is still known, because it needs only the image base.
+  assert.equal(result.pe.entryPointAddress, 0x140900000);
+});
+
+/** A 64-bit ELF with one PT_LOAD, so the entry virtual address maps to a different file offset. */
+function elfWithSegment() {
+  const buffer = Buffer.alloc(256);
+  buffer.write('\u007fELF', 0, 'latin1');
+  buffer[4] = 2;
+  buffer[5] = 1;
+  buffer[6] = 1;
+  buffer.writeUInt16LE(2, 16);
+  buffer.writeUInt16LE(0x3e, 18);
+  buffer.writeUInt32LE(1, 20);
+  buffer.writeBigUInt64LE(0x400500n, 24); // e_entry
+  buffer.writeBigUInt64LE(64n, 32); // e_phoff
+  buffer.writeUInt16LE(56, 54); // e_phentsize
+  buffer.writeUInt16LE(1, 56); // e_phnum
+  buffer.writeUInt16LE(11, 60); // e_shnum
+  buffer.writeUInt32LE(1, 64); // p_type = PT_LOAD
+  buffer.writeBigUInt64LE(0x200n, 64 + 8); // p_offset
+  buffer.writeBigUInt64LE(0x400000n, 64 + 16); // p_vaddr
+  buffer.writeBigUInt64LE(0x1000n, 64 + 32); // p_filesz
+  return buffer;
+}
+
+test('an ELF entry point virtual address is converted through its PT_LOAD segment', () => {
+  const temp = tempWorkspace();
+  const result = inspect.execute({ path: writeFixture(temp, 'seg.elf', elfWithSegment()) }, { workspaceRoot: temp, policy });
+  assert.equal(result.elf.entryPoint, 0x400500);
+  assert.equal(result.elf.entryPointOffset, 0x700); // 0x400500 - 0x400000 + 0x200
+  assert.notEqual(result.elf.entryPointOffset, result.elf.entryPoint);
+  assert.deepEqual(result.elf.segments, [{ vaddr: 0x400000, fileOffset: 0x200, fileSize: 0x1000 }]);
+});
+
+test('an ELF entry point outside every loaded segment reports no file offset', () => {
+  const temp = tempWorkspace();
+  const buffer = elfWithSegment();
+  buffer.writeBigUInt64LE(0x900000n, 24);
+  const result = inspect.execute({ path: writeFixture(temp, 'unmapped.elf', buffer) }, { workspaceRoot: temp, policy });
+  assert.equal(result.elf.entryPoint, 0x900000);
+  assert.ok(!('entryPointOffset' in result.elf), 'an unmappable virtual address must not produce an offset key');
+});
+
+test('no header field is ever reported as undefined, which canonical refuses', () => {
+  const temp = tempWorkspace();
+  for (const [name, bytes] of [['sections.exe', peWithSections()], ['a.exe', minimalPe()],
+    ['seg.elf', elfWithSegment()], ['a64.elf', minimalElf(true)], ['a32.elf', minimalElf(false)]]) {
+    const result = inspect.execute({ path: writeFixture(temp, name, bytes) }, { workspaceRoot: temp, policy });
+    const header = result.pe ?? result.elf;
+    const undefinedKeys = Object.entries(header).filter(([, value]) => value === undefined).map(([key]) => key);
+    assert.deepEqual(undefinedKeys, [], `${name} reported undefined for ${undefinedKeys.join(', ')}`);
+  }
 });
 
 test('a huge section count is only ever reported, never used to drive a parsing loop', () => {
@@ -589,7 +691,11 @@ test('header-only and partial artifacts satisfy the real harness JSON and replay
   const temp = tempWorkspace();
   const macho = Buffer.alloc(32); macho.writeUInt32LE(0xfeedfacf, 0);
   const futureWasm = buildWasmFixture([]); futureWasm.writeUInt32LE(2, 4);
-  const inputs = [['no-uuid.dylib', macho], ['partial.wasm', Buffer.from([0, 0x61, 0x73, 0x6d])], ['future.wasm', futureWasm]];
+  // The PE and ELF entries carry the optional entry-point-offset keys, which is the case that
+  // breaks if an unknown field is reported as undefined instead of omitted: canonical() refuses
+  // undefined, so the whole journal would fail to serialise rather than the field being missing.
+  const inputs = [['no-uuid.dylib', macho], ['partial.wasm', Buffer.from([0, 0x61, 0x73, 0x6d])], ['future.wasm', futureWasm],
+    ['sections.exe', peWithSections()], ['seg.elf', elfWithSegment()], ['a.exe', minimalPe()], ['a64.elf', minimalElf(true)]];
   for (const [name, bytes] of inputs) {
     writeFixture(temp, name, bytes);
     const options = { plan: { version: 1, tasks: [{ id: 'inspect', tool: 'artifact.inspect', input: { path: name } }] }, policy: { version: 1, allowedTools: ['artifact.inspect'], allowedEffects: ['read'] }, registry: new Map([[inspect.name, inspect]]), sourceLock: {}, workspaceRoot: fs.realpathSync(temp) };

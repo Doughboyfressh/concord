@@ -225,6 +225,25 @@ export function ghidraExercises() {
     },
     {
       family: 'ghidra', tool: 'artifact.controlFlow', workspace: 'temp',
+      fixture: (dir) => {
+        writeGhidraFixtures(dir);
+        // br to 0x40, in a program two bytes long: the target is not in the bytes supplied.
+        fs.writeFileSync(path.join(dir, 'toy-away.bin'), Buffer.from([0x04, 0x40]));
+      },
+      plan: task('artifact.controlFlow', { table: 'toy-decode.sla', path: 'toy-away.bin', address: '0x0' }),
+      expect: (r) => {
+        const out = r.results.a;
+        return out.supported === true && out.counts.instructions === 1 && out.counts.blocks === 1
+          && out.blocks[0].successors.length === 1 && out.blocks[0].successors[0].to === '0x40'
+          && out.unresolved.length === 1 && out.unresolved[0].kind === 'out_of_range'
+          && out.unresolved[0].address === '0x40'
+          && out.unresolved[0].reason.includes('Flow from 0x0')
+          && out.limitations.some((line) => line.includes('outside the bytes supplied'));
+      },
+      lesson: 'artifact.controlFlow reports a flow target outside the bytes it was given instead of dropping it. The edge is still listed, because a missing edge reads as dead code, and the target is also recorded as unresolved with kind out_of_range naming the instruction it came from, because an edge pointing at an address nothing decoded is otherwise indistinguishable in the output from a block that was analysed. Skipping it silently is the failure this prevents, and it is not hypothetical: analysing a window of a real 2.5MB executable produced sixteen such targets, every one of them a genuine call or branch into code the window did not cover. recoverCallGraph already reported the same situation as an external node, so this makes the two layers agree rather than inventing a new convention.',
+    },
+    {
+      family: 'ghidra', tool: 'artifact.controlFlow', workspace: 'temp',
       fixture: (dir) => writeGhidraFixtures(dir),
       plan: task('artifact.controlFlow', { table: 'toy-decode.sla', path: 'toy-flow.bin', address: 'not-hex' }),
       expect: (r) => r.results.a.supported === false && r.results.a.reason === 'invalid_address'

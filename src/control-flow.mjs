@@ -107,6 +107,12 @@ function classifyFlow(lifted) {
  */
 function traceReachable(language, bytes, baseAddress, entries, options) {
   const decoded = new Map();
+  // A flow target outside the analysed bytes is recorded rather than dropped. Dropping it silently
+  // leaves a successor edge pointing at an address nothing ever decoded, which reads exactly like
+  // analysed code — the same confidently-wrong shape recoverCallGraph already avoids with
+  // external nodes.
+  const outOfRange = new Map();
+  const referrers = new Map();
   const queue = [...entries];
   const limit = options.limit ?? 1024;
   const seen = new Set(entries.map(String));
@@ -118,7 +124,12 @@ function traceReachable(language, bytes, baseAddress, entries, options) {
     const address = queue.shift();
     if (decoded.has(String(address))) continue;
     const offset = offsetOf(address);
-    if (offset < 0 || offset >= bytes.length) continue;
+    if (offset < 0 || offset >= bytes.length) {
+      if (!outOfRange.has(String(address))) {
+        outOfRange.set(String(address), { address, from: referrers.get(String(address)) ?? null });
+      }
+      continue;
+    }
 
     let lifted;
     try {
@@ -165,23 +176,31 @@ function traceReachable(language, bytes, baseAddress, entries, options) {
     // Flow that reaches one is recorded as leaving the region rather than followed, which is what
     // keeps one function's body out of another's when the two are adjacent or tail-call.
     const isBoundary = (candidate) => options.boundaries?.has(String(candidate)) === true;
+    // Remember which instruction referred to a target, so an out-of-range edge can name where it
+    // came from instead of reporting a bare address.
+    const enqueue = (target) => {
+      if (seen.has(String(target))) return;
+      seen.add(String(target));
+      referrers.set(String(target), address);
+      queue.push(target);
+    };
     const next = address + BigInt(lifted.length + delaySlotLength);
     record.fallThrough = flow.fallsThrough ? next : null;
     if (flow.fallsThrough) {
       if (isBoundary(next)) record.exits.push({ to: next, via: 'fallthrough' });
-      else if (!seen.has(String(next))) { seen.add(String(next)); queue.push(next); }
+      else enqueue(next);
     }
     for (const target of flow.branchTargets) {
       if (isBoundary(target)) record.exits.push({ to: target, via: 'branch' });
-      else if (!seen.has(String(target))) { seen.add(String(target)); queue.push(target); }
+      else enqueue(target);
     }
     // A call target is followed only when asked for: a called address begins its own region, and
     // following it by default would merge two functions into one graph.
     for (const target of flow.callTargets) {
-      if (options.followCalls && !seen.has(String(target))) { seen.add(String(target)); queue.push(target); }
+      if (options.followCalls) enqueue(target);
     }
   }
-  return { decoded, truncated };
+  return { decoded, truncated, outOfRange };
 }
 
 /** Basic blocks, from the leaders a flow graph implies. */
@@ -246,7 +265,7 @@ export function recoverControlFlow(language, bytes, options = {}) {
   const entries = (options.entries?.length ? options.entries : [baseAddress]).map((entry) => BigInt(entry));
   if (entries.length > MAX_ENTRIES) fail('FLOW_LIMIT', 'More entry points were supplied than this analysis follows');
 
-  const { decoded, truncated } = traceReachable(language, bytes, baseAddress, entries, options);
+  const { decoded, truncated, outOfRange } = traceReachable(language, bytes, baseAddress, entries, options);
   const blocks = buildBlocks(decoded, entries);
 
   const calls = [];
@@ -262,6 +281,13 @@ export function recoverControlFlow(language, bytes, options = {}) {
     if (record.flow.indirectBranch) unresolved.push({ address: hex(record.address), kind: 'indirect_branch', reason: 'The target is computed at run time, which usually means a jump table' });
   }
 
+  for (const entry of outOfRange.values()) {
+    unresolved.push({ address: hex(entry.address), kind: 'out_of_range',
+      reason: entry.from === null
+        ? 'This entry point lies outside the bytes supplied, so nothing was decoded there'
+        : `Flow from ${hex(entry.from)} leaves the bytes supplied, so the target was never decoded` });
+  }
+
   const limitations = [];
   if (truncated) limitations.push('Tracing stopped at the instruction limit, so the graph below covers only what was reached first');
   if (unresolved.some((entry) => entry.kind === 'indirect_branch')) {
@@ -272,6 +298,9 @@ export function recoverControlFlow(language, bytes, options = {}) {
   }
   if (!options.followCalls && calls.length) {
     limitations.push('Call targets are reported as edges but not traced: a called address begins its own region, and following it would merge two functions into one graph');
+  }
+  if (outOfRange.size) {
+    limitations.push(`${outOfRange.size} flow target(s) lie outside the bytes supplied and were not decoded. They are listed as unresolved and still appear as successor edges, so an edge into one is a real edge to code this range does not cover rather than a block that was analysed`);
   }
   limitations.push('Reachability is from the supplied entry points only. Code reached solely through an unresolved indirect branch does not appear, and bytes that are data were never decoded');
 
