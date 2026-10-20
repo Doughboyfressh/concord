@@ -54,8 +54,9 @@ the approval hash cannot describe; a resolved one is deterministic.
 | `artifact.disassemble` | `.sla` + bytes | The instructions those bytes decode to, and with `pcode:true` what each one does |
 | `artifact.controlFlow` | `.sla` + bytes | Basic blocks and their edges for one region, from the entry points given |
 | `artifact.callGraph` | `.sla` + bytes | Every region a call can reach, and the graph of calls between them |
+| `artifact.dataflow` | `.sla` + bytes | Which storage a region reads before writing, which it writes, and what each value derives from |
 
-All eleven are `read` effects over bytes already inside the workspace. None spawns a process or
+All twelve are `read` effects over bytes already inside the workspace. None spawns a process or
 reaches the network, so none needs an approval.
 
 ### The `.sla` format
@@ -359,6 +360,61 @@ tail call jmp 0x20         the jumping region stays 1 instruction; edge marked t
 fallthrough into neighbour the same fact by fallthrough rather than branch, reported the same way
 external + indirect        0x1000 becomes an external node; the indirect call creates none
 ```
+
+## Dataflow
+
+Which write supplies the value each read observes. This is what register-use recovery and taint
+analysis are built on, and like the layers under it, it reads only p-code.
+
+It is a classic forward fixpoint, **not** Ghidra's SSA. `heritage.cc` — 2,872 lines, and it is
+shipped as source — builds static single assignment with phi nodes and does serious work on memory
+aliasing. This computes reaching definitions and leaves a join as what it is: a read with more than
+one reaching definition. That is weaker, and saying so is the point. A read with three reaching
+definitions honestly describes a merge; inventing a phi node would imply an analysis nobody ran.
+
+### The kill rule decides whether this is right or merely plausible
+
+From `Varnode::contains` and `Varnode::characterizeOverlap` in varnode.cc:105-170:
+
+> A definition kills a previous one **only if it fully covers it.** Storage that merely overlaps is
+> left alive and reported as partially overwritten.
+
+This is the classic register-dataflow bug. On x86, `mov al,1` must not kill EAX — three of EAX's
+bytes still hold what they held. A kill rule based on "same space and overlapping" discards the
+surviving definition and then reports the value as coming from the wrong place, confidently. The
+toy language carries a one-byte write (`setlow`) purely so this rule is tested in the repository
+and not only against the distribution: a kill rule based on overlap passes every other test.
+
+### What is deliberately outside, and declared
+
+- **The constant space is not storage.** varnode.cc returns "non-comparable" for it; a literal has
+  no definition to reach.
+- **Memory through a computed pointer is not resolved.** No LOAD is attributed to any STORE. Ghidra
+  spends much of heritage.cc on exactly this, and claiming a resolution that was not performed
+  would be the worst error available here. A slice therefore *ends* at a loaded value and says so.
+- **Unique-space temporaries are instruction-local.** A language that needs them distinct across
+  instructions declares a `uniqmask`; most declare none, so a unique definition is not followed
+  past the instruction that made it.
+
+### Checked against real x86
+
+```
+mov eax,0x2a ; ret            inputs: ESP          outputs: EAX, ESP, EIP
+mov eax,[ebp+8] ; add ; ret   inputs: ESP, EBP     outputs: EAX, flags, EIP
+mov al,1 ; inc eax ; ret      EAX stays an input, read shows partiallyOverwritten
+conditional, then inc eax     INT_ADD reads EAX from 0x4004:0 and 0x400b:0  (both paths)
+```
+
+The last line is the fixpoint working: a value defined on two paths reaches its read as two
+definitions. And the `__cdecl` cross-check agrees with `x86gcc.cspec` read independently — it
+declares stack arguments and an EAX return; the analysis finds EBP/ESP frame access and EAX as an
+output.
+
+Two of my own errors were caught by that comparison rather than by a test. The summary merged
+*adjacent* ranges, which glued ESP at `register:0x10` and EBP at `register:0x14` into one
+eight-byte location nothing reads; only genuinely overlapping ranges collapse now. And a BRANCH's
+first input is a destination *address*, not a value fetched from it, so counting it as a read
+reported phantom `ram` inputs on regions that touch no memory.
 
 ## What this does not do
 

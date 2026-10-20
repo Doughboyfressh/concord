@@ -156,7 +156,7 @@ export function ghidraExercises() {
       family: 'ghidra', tool: 'artifact.disassemble', workspace: 'temp',
       fixture: (dir) => {
         writeGhidraFixtures(dir);
-        fs.writeFileSync(path.join(dir, 'code.bin'), Buffer.from([0x00, 0x02, 0x7f, 0x07, 0x00]));
+        fs.writeFileSync(path.join(dir, 'code.bin'), Buffer.from([0x00, 0x02, 0x7f, 0x08, 0x00]));
       },
       plan: task('artifact.disassemble', { table: 'toy-decode.sla', path: 'code.bin', address: '0x400000', limit: 8 }),
       expect: (r) => {
@@ -230,6 +230,41 @@ export function ghidraExercises() {
       expect: (r) => r.results.a.supported === false && r.results.a.reason === 'invalid_address'
         && r.results.a.blocks.length === 0,
       lesson: 'artifact.controlFlow refuses a malformed base address rather than defaulting it to zero, because a wrong base silently relocates every branch target and call edge it reports. The check lives in execute rather than in the input schema deliberately: the kernel schema subset is explicit and validateSchema refuses any keyword outside it, so declaring a pattern constraint would make every plan using the tool fail with INVALID_SCHEMA at compile time instead of producing a refusal that names what was wrong.',
+    },
+    {
+      family: 'ghidra', tool: 'artifact.dataflow', workspace: 'temp',
+      fixture: (dir) => {
+        writeGhidraFixtures(dir);
+        //   0x00  ld 0x42   defines all four bytes of r0
+        //   0x02  setlow    writes only the low byte
+        //   0x03  ret       reads all four bytes
+        fs.writeFileSync(path.join(dir, 'partial.bin'), Buffer.from([0x02, 0x42, 0x07, 0x03]));
+      },
+      plan: task('artifact.dataflow', { table: 'toy-decode.sla', path: 'partial.bin', address: '0x0', detail: true }),
+      expect: (r) => {
+        const out = r.results.a;
+        const wide = out.uses.find((use) => use.varnode.size === 4 && use.op === 'RETURN');
+        return out.supported === true
+          && wide && wide.reaching.length === 1 && wide.reaching[0] === '0x0:0'
+          && wide.partiallyOverwritten.length === 1 && wide.partiallyOverwritten[0] === '0x2:0'
+          && wide.external === false
+          && out.summary.inputs.length === 0
+          && out.limitations.some((line) => /fully covers it/.test(line));
+      },
+      lesson: 'artifact.dataflow computes reaching definitions over p-code varnodes, so it answers which write supplies the value each read observes, and because it reads only p-code it behaves the same on every architecture. The rule that decides whether it is right rather than merely plausible is the kill rule, taken from Varnode::contains in varnode.cc: a definition kills a previous one only when it fully covers it. A write to one byte of a register therefore leaves a wider definition alive and reports it as partially overwritten, which is the difference between tracking a value correctly and claiming it came from the wrong place — on x86 a write to AL must not discard EAX, because three of its bytes still hold what they held before. Two things are deliberately outside the analysis and declared rather than approximated: the constant space is not storage because a literal has no definition to reach, and memory through a computed pointer is not resolved, so no load is attributed to any store. And this is reaching definitions rather than static single assignment, so a read with several reaching definitions is a join reported as it is rather than merged behind a phi node that nothing here computed.',
+    },
+    {
+      family: 'ghidra', tool: 'artifact.dataflow', workspace: 'temp',
+      fixture: (dir) => writeGhidraFixtures(dir),
+      plan: task('artifact.dataflow', { table: 'toy-decode.sla', path: 'toy-flow.bin', address: '0x0' }),
+      expect: (r) => {
+        const out = r.results.a;
+        return out.supported === true
+          && out.definitions.length === 0 && out.uses.length === 0
+          && out.counts.definitions > 0
+          && out.limitations.some((line) => /detail:true/.test(line));
+      },
+      lesson: 'artifact.dataflow returns the definition and use chains only when detail:true is asked for, and says so when it does not. The summary — which storage a region reads before writing, and which it writes — is the answer most questions want and is small enough to always return, while the chains over a few hundred instructions are large enough to crowd out everything else in an output budget. The counts describe the whole analysis either way, so the omission is visible rather than looking like an analysis that found nothing.',
     },
     {
       family: 'ghidra', tool: 'artifact.callGraph', workspace: 'temp',

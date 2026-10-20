@@ -248,7 +248,7 @@ export function buildDecodableSla() {
       ...close(ELEM.operand_sym),
     ]),
 
-    ...open(ELEM.subtable_sym), ...attrUnsigned(ATTR.id, INSTRUCTION_SYMBOL), ...attrSigned(ATTR.numct, 7),
+    ...open(ELEM.subtable_sym), ...attrUnsigned(ATTR.id, INSTRUCTION_SYMBOL), ...attrSigned(ATTR.numct, 8),
     // `halt` has no template at all, which is how a constructor that declares no semantics
     // appears: the lifter must say so rather than report an empty effect.
     ...constructor(['halt'], { length: 1, firstWhitespace: -1 }),
@@ -280,18 +280,19 @@ export function buildDecodableSla() {
       template: constructTpl([opTpl(OP_CBRANCH, null, [targetTpl(0), regTpl(REGISTER_SPACE, R0, 1)])]) }),
     ...constructor(['call', ' ', { operand: 0 }], { length: 1, firstWhitespace: 1, operands: [TARGET_CALL],
       template: constructTpl([opTpl(OP_CALL, null, [targetTpl(0)])]) }),
-    // Three bits at bits 5, 6 and 7 — the low three bits of the opcode byte — select the branch.
-    // The eighth is deliberately empty so an unclaimed opcode is refused rather than rounded.
+    // Writes only the low byte of r0. This exists so the kill rule can be tested: a definition
+    // kills a previous one only when it fully covers it, so this must leave a prior four byte
+    // definition of r0 alive and partially overwritten rather than discarding it.
+    ...constructor(['setlow'], { length: 1, firstWhitespace: -1,
+      template: constructTpl([opTpl(OP_COPY, regTpl(REGISTER_SPACE, R0, 1),
+        [varnodeTpl(constSpaceId(CONST_SPACE), constReal(1), constReal(1))])]) }),
+    // Four bits at bits 4 to 7 — the low four bits of the opcode byte — select the branch. The
+    // branches past the last constructor are deliberately empty so an unclaimed opcode is refused
+    // rather than rounded to its nearest neighbour.
     ...open(ELEM.decision), ...attrSigned(ATTR.number, 0), ...attrBool(ATTR.context, false),
-    ...attrSigned(ATTR.startbit, 5), ...attrSigned(ATTR.size, 3),
-    ...terminal(1, [{ id: 0, opcode: 0x00 }]),
-    ...terminal(2, [{ id: 1, opcode: 0x01 }]),
-    ...terminal(3, [{ id: 2, opcode: 0x02 }]),
-    ...terminal(4, [{ id: 3, opcode: 0x03 }]),
-    ...terminal(5, [{ id: 4, opcode: 0x04 }]),
-    ...terminal(6, [{ id: 5, opcode: 0x05 }]),
-    ...terminal(7, [{ id: 6, opcode: 0x06 }]),
-    ...terminal(8, []),
+    ...attrSigned(ATTR.startbit, 4), ...attrSigned(ATTR.size, 4),
+    ...[0, 1, 2, 3, 4, 5, 6, 7].flatMap((opcode) => terminal(opcode + 1, [{ id: opcode, opcode }])),
+    ...[8, 9, 10, 11, 12, 13, 14, 15].flatMap((opcode) => terminal(opcode + 1, [])),
     ...close(ELEM.decision),
     ...close(ELEM.subtable_sym),
     ...close(ELEM.symbol_table),
@@ -525,6 +526,7 @@ export function writeGhidraFixtures(dir) {
     'artifact.disassemble': { table: 'toy-decode.sla', path: 'toy-code.bin' },
     'artifact.controlFlow': { table: 'toy-decode.sla', path: 'toy-flow.bin', address: '0x0' },
     'artifact.callGraph': { table: 'toy-decode.sla', path: 'toy-calls.bin', address: '0x0' },
+    'artifact.dataflow': { table: 'toy-decode.sla', path: 'toy-flow.bin', address: '0x0', detail: true },
     'artifact.ghidraLanguages': { path: 'toy.ldefs' },
     'artifact.ghidraProcessorSpec': { path: 'toy.pspec' },
     'artifact.ghidraCompilerSpec': { path: 'toy.cspec' },

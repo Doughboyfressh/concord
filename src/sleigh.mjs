@@ -520,6 +520,7 @@ export function loadLanguage(bytes) {
     alignment: asNumber(sleigh.attributes.align, 1),
     uniqueBase: sleigh.attributes.uniqbase ?? null,
     maxDelaySlotBytes: asNumber(sleigh.attributes.maxdelay, 0),
+    uniqueMask: asNumber(sleigh.attributes.uniqmask, 0),
     formatVersion: asNumber(sleigh.attributes.version),
     defaultSpace: spacesNode?.attributes.defaultspace ?? null,
     spaces,
@@ -562,6 +563,11 @@ class Walker {
     this.depth = 0;
     this.breadcrumb = new Int32Array(MAX_OPERAND_DEPTH + 2);
     this.commits = [];
+    // SleighBuilder::setUniqueOffset. A language that needs its temporaries kept apart across
+    // instructions declares a uniqmask, and the instruction's own address supplies the bits. Most
+    // languages declare none, so this is zero and temporaries repeat — which is Ghidra's own
+    // behaviour and the reason a unique-space definition is not tracked across instructions.
+    this.uniqueOffset = (address & BigInt(language.uniqueMask ?? 0)) << 8n;
   }
 
   /** Raw instruction bytes, read big-endian, exactly as ParserContext::getInstructionBytes does. */
@@ -1213,12 +1219,26 @@ const renderVarnode = (varnode) => ({
   size: varnode.size,
 });
 
-/** Resolve one varnode template to a concrete varnode. */
+const sizeMask = (bytes) => (bytes <= 0 || bytes >= 8 ? MASK64 : (1n << BigInt(8 * bytes)) - 1n);
+
+/**
+ * Resolve one varnode template to a concrete varnode.
+ *
+ * The three offset adjustments are `SleighBuilder::generateLocation`, and each one matters. A
+ * constant is masked to its own size, so a literal cannot carry bits wider than the varnode that
+ * holds it. Any other address is wrapped to its space, so an offset cannot name storage outside
+ * the space it is in. And a unique-space temporary has the instruction's own bits mixed in when
+ * the language asks for it, which is how Ghidra keeps two instructions' temporaries apart.
+ */
 function fixVarnode(template, walker, language, constSpace, curSpace) {
+  const space = fixSpace(template.space, walker, language, curSpace);
+  const size = Number(fixConst(template.size, walker, language, constSpace, curSpace));
+  let offset = fixConst(template.offset, walker, language, constSpace, curSpace);
+  if (space === constSpace || space?.kind === 'constant') offset &= sizeMask(size);
+  else if (space?.kind === 'unique') offset |= walker.uniqueOffset;
+  else offset &= sizeMask(space?.size ?? 8);
   return {
-    space: fixSpace(template.space, walker, language, curSpace),
-    offset: fixConst(template.offset, walker, language, constSpace, curSpace),
-    size: Number(fixConst(template.size, walker, language, constSpace, curSpace)),
+    space, offset, size,
     dynamic: template.offset.kind === 'handle'
       && Boolean(walker.point.resolved[template.offset.index]?.handle?.offsetSpace),
     template,

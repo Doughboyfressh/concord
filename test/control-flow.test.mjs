@@ -111,8 +111,8 @@ test('a delay slot belongs to its branch rather than being its successor', () =>
 
 test('an opcode nothing claims is reported unresolved rather than skipped', () => {
   //   0x00  brc 0x02  -> 0x02 and 0x02
-  //   0x02  (0x07, which no constructor claims)
-  const result = recoverControlFlow(toy(), program(0x05, 0x02, 0x07), { address: 0n });
+  //   0x02  (0x08, which no constructor claims)
+  const result = recoverControlFlow(toy(), program(0x05, 0x02, 0x08), { address: 0n });
   assert.equal(result.counts.unresolved, 1);
   assert.deepEqual(result.unresolved[0], { address: '0x2', kind: 'undecodable', reason: 'no_matching_constructor' });
   // An undecodable address is not an instruction, so it does not appear in the instruction list.

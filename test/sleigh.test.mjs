@@ -25,7 +25,7 @@ test('a compiled table becomes a language with its root table and spaces', () =>
   assert.equal(toy.alignment, 1);
   assert.equal(toy.defaultSpace, 'ram');
   assert.equal(toy.root.name, 'instruction');
-  assert.equal(toy.root.constructors.length, 7);
+  assert.equal(toy.root.constructors.length, 8);
   // The root is found by name, as sleighbase.cc does after decoding, rather than by assuming an id.
   assert.equal(toy.root.kind, 'subtable');
   assert.deepEqual(toy.spaces.map((space) => space.name), ['unique', 'ram', 'register']);
@@ -73,9 +73,9 @@ test('an operand extends the instruction length and prints its decoded value', (
 
 test('an opcode no constructor claims is refused rather than rounded to a neighbour', () => {
   const toy = language();
-  // The eighth branch of the decision tree is deliberately empty. Reporting the nearest match
+  // The branches past the last constructor are deliberately empty. Reporting the nearest match
   // would turn an unknown encoding into a confident wrong answer.
-  const unmatched = decodeInstruction(toy, bytes(0x07), { address: 0n });
+  const unmatched = decodeInstruction(toy, bytes(0x08), { address: 0n });
   assert.equal(unmatched.decoded, false);
   assert.equal(unmatched.reason, 'no_matching_constructor');
   assert.equal(unmatched.length, 0);
@@ -108,7 +108,7 @@ test('a sequence decodes one instruction after another, advancing by each length
 
 test('a sequence stops at the first encoding it cannot decode rather than resynchronising', () => {
   const toy = language();
-  const run = decodeRange(toy, bytes(0x00, 0x07, 0x00), { address: 0n });
+  const run = decodeRange(toy, bytes(0x00, 0x08, 0x00), { address: 0n });
   assert.equal(run.instructions.length, 2);
   assert.equal(run.instructions[0].text, 'halt');
   assert.equal(run.instructions[1].decoded, false);
@@ -199,7 +199,7 @@ test('a delay slot is reported as part of the effect that is missing', () => {
 
 test('lifting an undecodable instruction reports why instead of returning empty p-code', () => {
   const toy = language();
-  const lifted = liftInstruction(toy, bytes(0x07), { address: 0n });
+  const lifted = liftInstruction(toy, bytes(0x08), { address: 0n });
   assert.equal(lifted.lifted, false);
   assert.equal(lifted.liftReason, 'no_matching_constructor');
   assert.deepEqual(lifted.pcode, []);
