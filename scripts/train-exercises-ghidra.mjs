@@ -232,6 +232,22 @@ export function ghidraExercises() {
       lesson: 'artifact.controlFlow refuses a malformed base address rather than defaulting it to zero, because a wrong base silently relocates every branch target and call edge it reports. The check lives in execute rather than in the input schema deliberately: the kernel schema subset is explicit and validateSchema refuses any keyword outside it, so declaring a pattern constraint would make every plan using the tool fail with INVALID_SCHEMA at compile time instead of producing a refusal that names what was wrong.',
     },
     {
+      family: 'ghidra', tool: 'artifact.callGraph', workspace: 'temp',
+      fixture: (dir) => writeGhidraFixtures(dir),
+      plan: task('artifact.callGraph', { table: 'toy-decode.sla', path: 'toy-calls.bin', address: '0x0' }),
+      expect: (r) => {
+        const out = r.results.a;
+        return out.supported === true
+          && out.counts.regions === 3 && out.counts.callEdges === 2 && out.counts.leaves === 1
+          && out.regions.map((region) => region.entry).join(',') === '0x0,0x4,0x8'
+          && out.regions.map((region) => region.instructions).join(',') === '2,2,1'
+          && out.edges.every((edge) => edge.kind === 'call')
+          && out.nodes.find((node) => node.address === '0x4').calledBy === 1
+          && out.counts.recursive === 0;
+      },
+      lesson: 'artifact.callGraph grows one entry point into every region a call can reach, where a region is all code reachable from an entry without following a call. Each region stays its own body rather than absorbing its callees, and a call site is kept per edge because two calls to one address are two facts and the site is where a caller looks for the arguments. Recursion is detected by reachability rather than by self-edges, so mutual recursion between two regions that never call themselves is still reported. The hard part is where a region stops: a tail jump is indistinguishable from an ordinary branch by inspecting the instruction, and Ghidra resolves that in its Java function-boundary analysis which is not shipped as source, so there is no rule to port. Rather than invent a heuristic that silently reclassifies a jump as a call, this uses evidence — an address that is called from somewhere is a function entry — in a second pass that treats those addresses as region boundaries. Flow arriving at one by a branch or a fallthrough is then reported as a tail edge marked candidate: the structure is certain, the intent is not. Without that pass one tail call swallows its callee and the graph comes back nearly empty, which is the wrong answer in the shape of a plausible one. A call target outside the range becomes an external node so the edge survives without a body, and an indirect call creates no node at all, which makes every graph a lower bound rather than a census.',
+    },
+    {
       family: 'ghidra', tool: 'artifact.compareSleighSource', workspace: 'temp',
       fixture: (dir) => {
         writeGhidraFixtures(dir);

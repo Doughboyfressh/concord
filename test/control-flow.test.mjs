@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadLanguage } from '../src/sleigh.mjs';
-import { recoverControlFlow } from '../src/control-flow.mjs';
+import { recoverControlFlow, recoverCallGraph } from '../src/control-flow.mjs';
 import { canonical } from '../src/value.mjs';
 import { buildDecodableSla } from './ghidra-fixtures.mjs';
 
@@ -141,6 +141,112 @@ test('the recovery is canonical and repeatable, which is what replay would verif
   assert.equal(canonical(once), canonical(twice));
   assert.ok(once.instructions.every((instruction) => typeof instruction.address === 'string'));
   assert.ok(once.blocks.every((block) => typeof block.start === 'string'));
+});
+
+test('a call graph grows one entry into every region a call can reach', () => {
+  //   0x00  call 0x04     main
+  //   0x02  ret
+  //   0x04  call 0x08     helper
+  //   0x06  ret
+  //   0x08  ret           leaf
+  const result = recoverCallGraph(toy(), program(0x06, 0x04, 0x03, 0x00, 0x06, 0x08, 0x03, 0x00, 0x03), { address: 0n });
+  assert.equal(result.counts.regions, 3);
+  assert.equal(result.counts.callEdges, 2);
+  assert.equal(result.counts.leaves, 1);
+  assert.deepEqual(result.regions.map((region) => region.entry), ['0x0', '0x4', '0x8']);
+  // Each region is only its own body: following a call would merge the callee into the caller.
+  assert.deepEqual(result.regions.map((region) => region.instructions), [2, 2, 1]);
+  assert.deepEqual(result.edges.map((edge) => [edge.from, edge.to, edge.kind]),
+    [['0x0', '0x4', 'call'], ['0x4', '0x8', 'call']]);
+  // A node records how many call sites reach it, which is not the same as how many callers it has.
+  assert.equal(result.nodes.find((node) => node.address === '0x4').calledBy, 1);
+  assert.equal(result.nodes.find((node) => node.address === '0x0').calledBy, 0);
+});
+
+test('two call sites to one callee are two edges, because the sites are different facts', () => {
+  //   0x00  call 0x06 ; 0x02 call 0x06 ; 0x04 ret ; 0x06 ret
+  const result = recoverCallGraph(toy(), program(0x06, 0x06, 0x06, 0x06, 0x03, 0x00, 0x03), { address: 0n });
+  assert.equal(result.counts.edges, 2);
+  assert.deepEqual(result.edges.map((edge) => edge.site), ['0x0', '0x2']);
+  // Collapsing them would lose the call sites, which is where a caller looks to find the arguments.
+  assert.equal(result.nodes.find((node) => node.address === '0x6').calledBy, 2);
+  assert.equal(result.counts.regions, 2);
+});
+
+test('mutual recursion is reported on both regions, not just on a self-call', () => {
+  //   0x00  call 0x04 ; 0x02 ret ; 0x04 call 0x00 ; 0x06 ret
+  const result = recoverCallGraph(toy(), program(0x06, 0x04, 0x03, 0x00, 0x06, 0x00, 0x03), { address: 0n });
+  assert.equal(result.counts.recursive, 2);
+  assert.ok(result.nodes.every((node) => node.recursive));
+  // Reachability, not a self-edge test: neither region calls itself directly.
+  assert.ok(result.edges.every((edge) => edge.from !== edge.to));
+});
+
+test('a branch into another region is a tail candidate, and does not swallow that region', () => {
+  //   0x00  call 0x06
+  //   0x02  call 0x08
+  //   0x04  ret
+  //   0x05  halt        padding, unreachable
+  //   0x06  br 0x08     a tail jump into a known entry
+  //   0x08  ret
+  // 0x08 is a known entry because 0x00 calls it, so the branch at 0x06 leaves its region.
+  const result = recoverCallGraph(toy(),
+    program(0x06, 0x06, 0x06, 0x08, 0x03, 0x00, 0x04, 0x08, 0x03), { address: 0n });
+  assert.equal(result.counts.regions, 3);
+  assert.equal(result.counts.tailCandidates, 1);
+
+  const tail = result.edges.find((edge) => edge.kind === 'tail');
+  assert.deepEqual([tail.from, tail.to, tail.via, tail.candidate], ['0x6', '0x8', 'branch', true]);
+  // The jumping region is one instruction and does not contain the callee's body. Without the
+  // second pass it would have absorbed 0x08 and this edge would not exist at all.
+  const jumper = result.regions.find((region) => region.entry === '0x6');
+  assert.equal(jumper.instructions, 1);
+  assert.deepEqual(jumper.overlaps, []);
+  assert.equal(result.regions.find((region) => region.entry === '0x8').instructions, 1);
+  // The intent is not asserted, only the structure, and the output says so.
+  assert.ok(result.limitations.some((line) => /marked candidate/.test(line)));
+});
+
+test('falling through into the next region is reported too, by the same rule', () => {
+  //   0x00  call 0x04
+  //   0x02  ld 0x00     and then no return, so flow runs on into 0x04
+  //   0x04  ret
+  // A function that ends without a return and runs into its neighbour is the same structural fact
+  // as a tail jump, reached by fallthrough instead of a branch, so it is reported the same way
+  // rather than silently merging the two regions into one.
+  const result = recoverCallGraph(toy(), program(0x06, 0x04, 0x02, 0x00, 0x03), { address: 0n });
+  assert.equal(result.counts.regions, 2);
+  const tail = result.edges.find((edge) => edge.kind === 'tail');
+  assert.deepEqual([tail.from, tail.to, tail.via], ['0x0', '0x4', 'fallthrough']);
+  // The caller stops at the boundary: two instructions, not three.
+  assert.equal(result.regions.find((region) => region.entry === '0x0').instructions, 2);
+});
+
+test('a call outside the range is an external node, not a dangling edge', () => {
+  //   0x00  call 0x40  (outside a four byte range) ; 0x02 ret
+  const result = recoverCallGraph(toy(), program(0x06, 0x40, 0x03, 0x00), { address: 0n });
+  assert.deepEqual(result.external, ['0x40']);
+  assert.equal(result.counts.regions, 1);
+  const node = result.nodes.find((entry) => entry.address === '0x40');
+  assert.equal(node.kind, 'external');
+  assert.equal(node.calledBy, 1);
+  // The edge is real even though the callee was never read, so it is kept and the node is marked.
+  assert.deepEqual(result.edges.map((edge) => edge.to), ['0x40']);
+  assert.ok(result.limitations.some((line) => /outside the analysed range/.test(line)));
+});
+
+test('the region budget is reported rather than silently returning a partial graph', () => {
+  const code = program(0x06, 0x04, 0x03, 0x00, 0x06, 0x08, 0x03, 0x00, 0x03);
+  const result = recoverCallGraph(toy(), code, { address: 0n, regionLimit: 1 });
+  assert.equal(result.counts.regions, 1);
+  assert.ok(result.limitations.some((line) => /region budget/.test(line)));
+});
+
+test('a call graph is a lower bound when a call target is computed at run time', () => {
+  const full = recoverCallGraph(toy(), program(0x06, 0x04, 0x03, 0x00, 0x03), { address: 0n });
+  // Nothing here is indirect, so the claim to check is that the limitation is always present:
+  // every call graph this produces names the calls it resolved, never all the calls that exist.
+  assert.ok(full.limitations.some((line) => /absence from this graph is not evidence/.test(line)));
 });
 
 test('the instruction budget is reported rather than quietly truncating the graph', () => {

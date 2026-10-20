@@ -513,9 +513,18 @@ export function writeGhidraFixtures(dir) {
   //   0x07  ret         ends flow
   writeFileSync(path.join(dir, 'toy-flow.bin'),
     Buffer.from([0x05, 0x05, 0x02, 0x01, 0x00, 0x06, 0x08, 0x03]));
+  // Three regions in the toy language, so a call graph has something to be a graph of:
+  //   0x00  call 0x04   main calls helper
+  //   0x02  ret
+  //   0x04  call 0x08   helper calls leaf
+  //   0x06  ret
+  //   0x08  ret         leaf
+  writeFileSync(path.join(dir, 'toy-calls.bin'),
+    Buffer.from([0x06, 0x04, 0x03, 0x00, 0x06, 0x08, 0x03, 0x00, 0x03]));
   return {
     'artifact.disassemble': { table: 'toy-decode.sla', path: 'toy-code.bin' },
     'artifact.controlFlow': { table: 'toy-decode.sla', path: 'toy-flow.bin', address: '0x0' },
+    'artifact.callGraph': { table: 'toy-decode.sla', path: 'toy-calls.bin', address: '0x0' },
     'artifact.ghidraLanguages': { path: 'toy.ldefs' },
     'artifact.ghidraProcessorSpec': { path: 'toy.pspec' },
     'artifact.ghidraCompilerSpec': { path: 'toy.cspec' },

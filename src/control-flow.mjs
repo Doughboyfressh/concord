@@ -158,14 +158,22 @@ function traceReachable(language, bytes, baseAddress, entries, options) {
 
     const record = { address, offset, decoded: true, reason: null, length: lifted.length,
       text: lifted.text, mnemonic: lifted.mnemonic, pcodeOps: lifted.pcode.length,
-      delaySlotBytes: lifted.delaySlotBytes, delaySlotLength, delaySlots, flow };
+      delaySlotBytes: lifted.delaySlotBytes, delaySlotLength, delaySlots, flow, exits: [] };
     decoded.set(String(address), record);
 
+    // A boundary is an address this trace must not enter — in practice another region's entry.
+    // Flow that reaches one is recorded as leaving the region rather than followed, which is what
+    // keeps one function's body out of another's when the two are adjacent or tail-call.
+    const isBoundary = (candidate) => options.boundaries?.has(String(candidate)) === true;
     const next = address + BigInt(lifted.length + delaySlotLength);
     record.fallThrough = flow.fallsThrough ? next : null;
-    if (flow.fallsThrough && !seen.has(String(next))) { seen.add(String(next)); queue.push(next); }
+    if (flow.fallsThrough) {
+      if (isBoundary(next)) record.exits.push({ to: next, via: 'fallthrough' });
+      else if (!seen.has(String(next))) { seen.add(String(next)); queue.push(next); }
+    }
     for (const target of flow.branchTargets) {
-      if (!seen.has(String(target))) { seen.add(String(target)); queue.push(target); }
+      if (isBoundary(target)) record.exits.push({ to: target, via: 'branch' });
+      else if (!seen.has(String(target))) { seen.add(String(target)); queue.push(target); }
     }
     // A call target is followed only when asked for: a called address begins its own region, and
     // following it by default would merge two functions into one graph.
@@ -243,10 +251,12 @@ export function recoverControlFlow(language, bytes, options = {}) {
 
   const calls = [];
   const unresolved = [];
+  const exits = [];
   let relativeBranches = 0;
   for (const record of decoded.values()) {
     if (!record.decoded) { unresolved.push({ address: hex(record.address), kind: 'undecodable', reason: record.reason }); continue; }
     relativeBranches += record.flow.relativeBranches;
+    for (const exit of record.exits) exits.push({ from: hex(record.address), to: hex(exit.to), via: exit.via });
     for (const target of record.flow.callTargets) calls.push({ from: hex(record.address), to: hex(target), kind: 'direct' });
     if (record.flow.indirectCall) unresolved.push({ address: hex(record.address), kind: 'indirect_call', reason: 'The target is computed at run time' });
     if (record.flow.indirectBranch) unresolved.push({ address: hex(record.address), kind: 'indirect_branch', reason: 'The target is computed at run time, which usually means a jump table' });
@@ -285,12 +295,203 @@ export function recoverControlFlow(language, bytes, options = {}) {
       instructions: block.instructions.length,
       successors: block.successors.map((edge) => ({ to: hex(edge.to), kind: edge.kind })),
     })),
-    calls, unresolved,
+    calls, unresolved, exits,
     counts: {
       instructions: ordered.length, blocks: blocks.length, calls: calls.length,
-      unresolved: unresolved.length, relativeBranches,
+      unresolved: unresolved.length, relativeBranches, exits: exits.length,
       returnBlocks: blocks.filter((block) => block.kind === 'return').length,
       conditionalBlocks: blocks.filter((block) => block.kind === 'conditional').length,
+    },
+    limitations,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The call graph, across regions
+// ---------------------------------------------------------------------------------------------
+
+const MAX_REGIONS = 256;
+
+/**
+ * Analyse every region a call can reach, and the graph of calls between them.
+ *
+ * A region is all code reachable from one entry *without* following a call, which is the only
+ * definition here that needs no guessing. Its call targets become regions of their own, so one
+ * entry point grows into the whole reachable program.
+ *
+ * The hard part is where a region stops, and it is worth being precise about why this is done in
+ * two passes rather than one.
+ *
+ * A tail call — `jmp other_function` — is indistinguishable from an ordinary branch by looking at
+ * the instruction. Ghidra converts some jumps into calls, but that happens in its Java
+ * function-boundary analysis, which is not shipped as source; the conversion in flow.cc applies
+ * only to an indirect jump whose table could not be recovered. So there is no rule to port, and
+ * inventing a heuristic that silently reclassifies a jump as a call would make this output a guess
+ * wearing the shape of a fact.
+ *
+ * What is available is evidence rather than heuristic: **an address that is called from somewhere
+ * is a function entry**. So the first pass follows calls only and collects every direct call
+ * target. The second pass re-analyses each region treating those addresses as boundaries — flow
+ * reaching one is recorded as leaving the region instead of being traversed. A branch or a
+ * fallthrough into a called address is therefore reported as a `tail` edge and explicitly labelled
+ * a candidate, because the structural fact (flow leaves here and arrives at a known entry) is
+ * certain while the intent (tail call, or two adjacent functions) is not.
+ *
+ * Without this, one tail call swallows the callee into the caller and the call graph comes back
+ * nearly empty — the wrong answer in the shape of a plausible one.
+ */
+export function recoverCallGraph(language, bytes, options = {}) {
+  const baseAddress = options.address === undefined ? 0n : BigInt(options.address);
+  const limit = options.regionLimit ?? 64;
+  const inRange = (address) => address >= baseAddress && address < baseAddress + BigInt(bytes.length);
+
+  /** Analyse one entry, never following a call, optionally stopping at known entries. */
+  const analyse = (entry, boundaries) => recoverControlFlow(language, bytes, {
+    address: baseAddress, entries: [entry], followCalls: false,
+    limit: options.limit ?? 512, contextValues: options.contextValues,
+    boundaries: boundaries ? new Set([...boundaries].filter((key) => key !== String(entry))) : undefined,
+  });
+
+  // Pass one: follow calls from the roots and collect every address that is called.
+  const roots = (options.entries?.length ? options.entries : [baseAddress]).map((entry) => BigInt(entry));
+  const discover = (boundaries) => {
+    const regions = new Map();
+    const external = new Set();
+    const queue = [...roots];
+    const queued = new Set(roots.map(String));
+    while (queue.length) {
+      if (regions.size >= Math.min(limit, MAX_REGIONS)) break;
+      const entry = queue.shift();
+      if (regions.has(String(entry))) continue;
+      const region = analyse(entry, boundaries);
+      regions.set(String(entry), { entry, region });
+      for (const call of region.calls) {
+        const target = BigInt(call.to);
+        if (!inRange(target)) { external.add(call.to); continue; }
+        if (!queued.has(String(target))) { queued.add(String(target)); queue.push(target); }
+      }
+    }
+    return { regions, external };
+  };
+
+  const first = discover(undefined);
+  const called = new Set();
+  for (const { region } of first.regions.values()) {
+    for (const call of region.calls) if (inRange(BigInt(call.to))) called.add(String(BigInt(call.to)));
+  }
+  // A root is an entry by declaration, so it bounds other regions too even if nothing calls it.
+  for (const root of roots) called.add(String(root));
+
+  // Pass two: the same walk, now stopping where another region begins.
+  const { regions, external } = discover(called);
+
+  const edges = [];
+  const unresolved = [];
+  const regionReports = [];
+  const entryKeys = new Set(regions.keys());
+
+  for (const { entry, region } of regions.values()) {
+    const decodedAddresses = region.instructions.map((instruction) => BigInt(instruction.address));
+    const span = decodedAddresses.length
+      ? { start: hex(decodedAddresses[0]), end: hex(BigInt(region.blocks[region.blocks.length - 1]?.end ?? decodedAddresses[0])) }
+      : { start: hex(entry), end: hex(entry) };
+
+    for (const call of region.calls) edges.push({ from: hex(entry), to: call.to, kind: 'call', site: call.from });
+    // An exit is flow leaving this region and arriving at a known entry. The structure is certain;
+    // whether it was written as a tail call is not, so the edge says candidate.
+    for (const exit of region.exits) {
+      if (entryKeys.has(String(BigInt(exit.to)))) {
+        edges.push({ from: hex(entry), to: exit.to, kind: 'tail', site: exit.from, via: exit.via, candidate: true });
+      }
+    }
+    for (const entry2 of region.unresolved) {
+      unresolved.push({ region: hex(entry), ...entry2 });
+    }
+    // Another region's entry sitting inside this region's decoded instructions means the two
+    // overlap: the same bytes belong to both, which a reader needs told rather than left to find.
+    const overlaps = [...entryKeys]
+      .filter((key) => key !== String(entry) && decodedAddresses.some((address) => String(address) === key))
+      .map((key) => hex(BigInt(key)));
+
+    regionReports.push({
+      entry: hex(entry), start: span.start, end: span.end,
+      instructions: region.counts.instructions, blocks: region.counts.blocks,
+      returns: region.blocks.some((block) => block.kind === 'return'),
+      calls: region.calls.map((call) => call.to),
+      indirectCallSites: region.unresolved.filter((item) => item.kind === 'indirect_call').length,
+      indirectBranchSites: region.unresolved.filter((item) => item.kind === 'indirect_branch').length,
+      exits: region.exits.map((exit) => ({ to: exit.to, via: exit.via })),
+      overlaps,
+    });
+  }
+
+  // Nodes: every analysed region, plus every call target outside the range, which is a real edge
+  // to something this analysis cannot see rather than a dangling reference.
+  const nodes = [
+    ...regionReports.map((report) => ({ address: report.entry, kind: 'analysed' })),
+    ...[...external].sort().map((address) => ({ address, kind: 'external' })),
+  ];
+  const byAddress = new Map(nodes.map((node) => [node.address, node]));
+  for (const node of nodes) { node.calls = 0; node.calledBy = 0; node.recursive = false; }
+  for (const edge of edges) {
+    const from = byAddress.get(edge.from);
+    const to = byAddress.get(edge.to);
+    if (from) from.calls += 1;
+    if (to) to.calledBy += 1;
+  }
+
+  // Recursion: a node that can reach itself. Bounded breadth-first reachability per node, which is
+  // affordable because the region count is capped and is the honest answer for a cyclic graph —
+  // reporting only self-edges would miss mutual recursion entirely.
+  const outgoing = new Map(nodes.map((node) => [node.address, []]));
+  for (const edge of edges) outgoing.get(edge.from)?.push(edge.to);
+  for (const node of nodes) {
+    const seen = new Set();
+    const queue = [...(outgoing.get(node.address) ?? [])];
+    while (queue.length) {
+      const at = queue.shift();
+      if (at === node.address) { node.recursive = true; break; }
+      if (seen.has(at)) continue;
+      seen.add(at);
+      for (const nextNode of outgoing.get(at) ?? []) queue.push(nextNode);
+    }
+  }
+
+  const limitations = [];
+  if (regions.size >= Math.min(limit, MAX_REGIONS)) {
+    limitations.push('The region budget was reached, so regions reachable only through the ones not analysed are absent');
+  }
+  if (edges.some((edge) => edge.kind === 'tail')) {
+    limitations.push('A tail edge means flow left one region and arrived at the entry of another, by a branch or a fallthrough rather than by a call. The structure is certain; whether the author wrote a tail call or simply placed two functions adjacently is not, so these are marked candidate. Ghidra decides this in its Java function-boundary analysis, which is not available here, and guessing would turn an inference into an apparent fact');
+  }
+  if (external.size) {
+    limitations.push(`${external.size} call target(s) lie outside the analysed range and are reported as external nodes with no body: the edge is real even though the callee was not read`);
+  }
+  if (regionReports.some((report) => report.overlaps.length)) {
+    limitations.push('Two regions share bytes: one region\'s entry lies inside another\'s decoded instructions. That is usually a tail call, a shared epilogue, or a function boundary that is not where it was assumed to be');
+  }
+  if (unresolved.some((item) => item.kind === 'indirect_call')) {
+    limitations.push('An indirect call has a target computed at run time, so the edge exists but its destination is unknown and no node is created for it; a call graph with indirect calls is a lower bound on what is reachable');
+  }
+  limitations.push('Regions are discovered by following calls from the entry points given. Code reached only through an unresolved indirect call or branch has no region, so absence from this graph is not evidence that an address is unreachable');
+
+  return {
+    entries: roots.map(hex),
+    regions: regionReports.sort((a, b) => (BigInt(a.entry) < BigInt(b.entry) ? -1 : 1)),
+    nodes: nodes.sort((a, b) => (a.kind === b.kind ? (BigInt(a.address) < BigInt(b.address) ? -1 : 1) : a.kind.localeCompare(b.kind))),
+    edges: edges.sort((a, b) => (a.from === b.from ? (a.site < b.site ? -1 : 1) : (BigInt(a.from) < BigInt(b.from) ? -1 : 1))),
+    external: [...external].sort(),
+    unresolved,
+    counts: {
+      regions: regionReports.length, nodes: nodes.length, edges: edges.length,
+      callEdges: edges.filter((edge) => edge.kind === 'call').length,
+      tailCandidates: edges.filter((edge) => edge.kind === 'tail').length,
+      external: external.size, unresolved: unresolved.length,
+      recursive: nodes.filter((node) => node.recursive).length,
+      // A leaf has no outgoing edge of any kind. Counting only calls would call a region that
+      // tail-jumps elsewhere a leaf, when control demonstrably continues somewhere else.
+      leaves: nodes.filter((node) => node.kind === 'analysed' && node.calls === 0).length,
+      instructions: regionReports.reduce((sum, report) => sum + report.instructions, 0),
     },
     limitations,
   };
@@ -383,6 +584,72 @@ export function makeControlFlowTools() {
       }
       limitations.push(...recovered.limitations);
       limitations.push('A control-flow graph is an interpretation of bytes under one chosen language; selecting the wrong table produces a confident graph of a program that does not exist');
+
+      return { ...base, supported: true, reason: null, ...recovered, limitations };
+    },
+  }), Object.freeze({
+    name: 'artifact.callGraph', version: '1.0.0', effect: 'read',
+    outputKeys: ['table', 'path', 'sha256', 'supported', 'reason', 'entries', 'regions', 'nodes', 'edges', 'external', 'unresolved', 'counts', 'limitations', 'untrusted'],
+    inputSchema: object({
+      table: string, path: string,
+      offset: { type: 'integer', minimum: 0 },
+      length: { type: 'integer', minimum: 1, maximum: 1048576 },
+      address: ADDRESS,
+      entries: { type: 'array', minItems: 1, maxItems: MAX_ENTRIES, items: ADDRESS },
+      limit: { type: 'integer', minimum: 1, maximum: MAX_INSTRUCTIONS },
+      regionLimit: { type: 'integer', minimum: 1, maximum: MAX_REGIONS },
+      context: { type: 'object', additionalProperties: { type: 'integer' } },
+    }, ['table', 'path']),
+    execute(input, context) {
+      const limitations = [];
+      const tableBytes = readBytes(context, input.table, 4);
+      const targetBytes = readBytes(context, input.path, 4);
+      const base = { table: input.table, path: input.path, sha256: sha256(targetBytes), untrusted: true };
+      const empty = { entries: [], regions: [], nodes: [], edges: [], external: [], unresolved: [], counts: {} };
+
+      let language;
+      try { language = loadLanguage(tableBytes); }
+      catch (error) {
+        return { ...base, supported: false, reason: 'table_unreadable', detail: error?.message ?? null, ...empty, limitations };
+      }
+      const offset = input.offset ?? 0;
+      if (offset >= targetBytes.length) {
+        return { ...base, supported: false, reason: 'offset_past_end',
+          detail: 'The requested offset lies past the end of the file', ...empty, limitations };
+      }
+      for (const candidate of [input.address, ...(input.entries ?? [])]) {
+        if (candidate !== undefined && !ADDRESS_RE.test(candidate)) {
+          return { ...base, supported: false, reason: 'invalid_address',
+            detail: 'An address must be up to 16 hexadecimal digits, optionally prefixed with 0x', ...empty, limitations };
+        }
+      }
+      const end = input.length === undefined ? targetBytes.length : Math.min(targetBytes.length, offset + input.length);
+      const slice = targetBytes.subarray(offset, end);
+      const address = input.address === undefined ? 0n : parseAddress(input.address);
+      const entries = (input.entries ?? []).map(parseAddress);
+      for (const entry of entries) {
+        if (entry < address || entry >= address + BigInt(slice.length)) {
+          return { ...base, supported: false, reason: 'entry_outside_range',
+            detail: `Entry point ${hex(entry)} is not inside the selected range`, ...empty, limitations };
+        }
+      }
+
+      let recovered;
+      try {
+        recovered = recoverCallGraph(language, slice, {
+          address, entries, limit: input.limit ?? 512,
+          regionLimit: input.regionLimit ?? 64, contextValues: input.context,
+        });
+      } catch (error) {
+        return { ...base, supported: false, reason: error?.code === 'SLEIGH_CONTEXT' ? 'context_rejected' : 'flow_limit',
+          detail: error?.message ?? null, ...empty, limitations };
+      }
+
+      if (!input.context) {
+        limitations.push('No initial context was supplied, so a language whose decode depends on context decodes in whatever its zeroed context selects; the defaults are declared in the .pspec and readable with artifact.ghidraProcessorSpec');
+      }
+      limitations.push(...recovered.limitations);
+      limitations.push('A call graph is an interpretation of bytes under one chosen language, and it is a lower bound: it names the calls that could be resolved, never all the calls that exist');
 
       return { ...base, supported: true, reason: null, ...recovered, limitations };
     },

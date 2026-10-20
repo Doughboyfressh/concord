@@ -52,9 +52,10 @@ the approval hash cannot describe; a resolved one is deterministic.
 | `artifact.sleighCompiled` | `.sla` | Endianness, alignment, address spaces, registers, userops, subtables, provenance |
 | `artifact.compareSleighSource` | `.sla` + `.slaspec` | Whether a compiled table and a source file agree |
 | `artifact.disassemble` | `.sla` + bytes | The instructions those bytes decode to, and with `pcode:true` what each one does |
-| `artifact.controlFlow` | `.sla` + bytes | Basic blocks, their edges, and the call graph, from the entry points given |
+| `artifact.controlFlow` | `.sla` + bytes | Basic blocks and their edges for one region, from the entry points given |
+| `artifact.callGraph` | `.sla` + bytes | Every region a call can reach, and the graph of calls between them |
 
-All ten are `read` effects over bytes already inside the workspace. None spawns a process or
+All eleven are `read` effects over bytes already inside the workspace. None spawns a process or
 reaches the network, so none needs an approval.
 
 ### The `.sla` format
@@ -312,6 +313,52 @@ ARM    sub/cmp/bne loop    back edge to 0x5000, fallthrough to the bx lr
 `validateSchema` refuses any keyword outside it, so a `pattern` constraint would make every plan
 using the tool fail with `INVALID_SCHEMA` at compile time instead of producing a refusal that names
 what was wrong.
+
+## The call graph, across regions
+
+One entry point grows into the whole reachable program. A **region** is all code reachable from one
+entry *without* following a call — the only definition here that needs no guessing — and its call
+targets become regions of their own.
+
+The hard part is where a region stops, and it is worth saying plainly why this takes two passes.
+
+A tail call, `jmp other_function`, is indistinguishable from an ordinary branch by looking at the
+instruction. Ghidra does convert some jumps into calls, but that happens in its Java
+function-boundary analysis, which is not shipped as source; the conversion in `flow.cc` applies
+only to an *indirect* jump whose table could not be recovered. So there is no rule to port, and a
+heuristic that silently reclassified a jump as a call would make this output a guess wearing the
+shape of a fact.
+
+What is available is evidence rather than heuristic: **an address that is called from somewhere is
+a function entry.** So the first pass follows calls and collects every direct call target. The
+second pass re-analyses each region treating those addresses as boundaries — flow reaching one is
+recorded as leaving the region instead of traversed. A branch or a fallthrough into a called
+address is then reported as a `tail` edge, explicitly marked `candidate`, because the structure
+(flow leaves here, arrives at a known entry) is certain while the intent (tail call, or two
+functions placed next to each other) is not.
+
+Without that pass, one tail call swallows its callee into the caller and the graph comes back
+nearly empty — the wrong answer in the shape of a plausible one.
+
+Three smaller decisions follow the same principle of not overstating:
+
+- **Two call sites to one callee are two edges.** The site is where a caller looks for the
+  arguments, so collapsing them loses the thing being asked about.
+- **Recursion is reachability, not self-edges.** Mutual recursion between two regions that never
+  call themselves is still reported, which a self-edge test would miss entirely.
+- **An indirect call creates no node.** The edge exists and its destination does not, so every
+  graph here is a lower bound on what is reachable rather than a census. A call target outside the
+  analysed range becomes an `external` node: the edge is real even though the callee was not read.
+
+### Checked against constructed programs
+
+```
+three functions chained    3 regions, 2 edges, 1 leaf; callee counted as calledBy=2 for 2 sites
+mutual recursion           both nodes RECURSIVE, and neither calls itself directly
+tail call jmp 0x20         the jumping region stays 1 instruction; edge marked tail candidate
+fallthrough into neighbour the same fact by fallthrough rather than branch, reported the same way
+external + indirect        0x1000 becomes an external node; the indirect call creates none
+```
 
 ## What this does not do
 
