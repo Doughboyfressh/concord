@@ -2,9 +2,13 @@
 
 `sources.lock.json` records the twelve references originally requested for this harness,
 plus `hermes-local`, a locally installed hermes build catalogued separately from the pinned
-`hermes-agent` revision. Eleven
+`hermes-agent` revision, and `ghidra`, a released distribution archive. Eleven
 repository entries name full forty-character Git commits. The two hosted websites
-are explicitly unpinned mutable observations. `observedOn` is audit metadata written
+are explicitly unpinned mutable observations. The one distribution entry is pinned by the
+release identifier it ships under rather than by a commit, which is a third kind because
+neither existing one could describe it without lying: calling it immutable would claim a
+revision nobody recorded, and calling it a mutable observation would claim a released archive
+can change under a fixed name. `observedOn` is audit metadata written
 into the file; source tools never read the clock. No repository, upstream runtime,
 MCP server, SDK, skill collection, or website body is installed by this catalog.
 
@@ -23,6 +27,7 @@ MCP server, SDK, skill collection, or website body is installed by this catalog.
 | `deepseek-harness` | Harness and evaluation reference | Explicit runtime adapter |
 | `awesome-cyber-skills` | Security practice environments | Reference catalog only |
 | `awesome-hacking` | Security resource index | Reference catalog only |
+| `ghidra` | Processor specifications and disassembly | Internal readers plus gated engine |
 
 Four of REA's 117 tools now run as native Concord tools rather than through an adapter; the rest
 are catalogued, 66 of them unable to be internalized because replay cannot cover a device or a
@@ -133,3 +138,8 @@ Run the focused checks with `node --test test/sources.test.mjs`. Link tests are
 explicitly skipped when the environment disallows creating links. Run in a host
 environment that permits symlinks, Windows junctions, and hard links to exercise
 those checks; restricted test runs must not be reported as having covered them.
+
+Ghidra is a 876 MB distribution whose engine needs a Java runtime, so it is split rather than
+adopted: its entire specification corpus is read natively by eight Concord readers, and the parts
+that must execute stay behind the process effect. See
+[taking Ghidra's capabilities internally](ghidra-internal.md).

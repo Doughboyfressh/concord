@@ -3,6 +3,7 @@ import { makeManagedTools } from './managed.mjs';
 import { makeWebTools } from './webjs.mjs';
 import { makePlatformTools } from './platform.mjs';
 import { makeEvidenceTools } from './evidence.mjs';
+import { makeGhidraTools } from './ghidra.mjs';
 
 /**
  * One registration point for the static format readers that realize REA's `internalizable` tools.
@@ -14,5 +15,5 @@ import { makeEvidenceTools } from './evidence.mjs';
  */
 export function makeReaderTools() {
   return [...makeDexTools(), ...makeManagedTools(), ...makeWebTools(), ...makePlatformTools(),
-    ...makeEvidenceTools()];
+    ...makeEvidenceTools(), ...makeGhidraTools()];
 }

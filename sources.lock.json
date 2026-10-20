@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "observedOn": "2026-10-15",
-  "purpose": "Provenance catalog for all twelve requested references. Catalogued does not mean downloaded, installed, licensed for every use, or trusted for execution.",
+  "purpose": "Provenance catalog for all twelve requested references, plus hermes-local and ghidra. Catalogued does not mean downloaded, installed, licensed for every use, or trusted for execution.",
   "sources": [
     {
       "id": "ecc",
@@ -12,12 +12,32 @@
       "defaultBranch": "main",
       "revision": "76aaa77df6adc5b889e689007bf99b9a4f74af34",
       "mutability": "immutable-reference",
-      "roles": ["workflow-guidance", "skills", "evaluation-guidance"],
-      "primaryLinks": ["https://github.com/affaan-m/ECC/tree/76aaa77df6adc5b889e689007bf99b9a4f74af34", "https://github.com/affaan-m/ECC/blob/76aaa77df6adc5b889e689007bf99b9a4f74af34/README.md"],
-      "license": {"spdx": "MIT", "scope": "repository", "caveat": "Preserve the upstream copyright and license when copying covered material; audit bundled third-party material separately."},
-      "integration": {"status": "catalogued", "mode": "reviewed-skill-snapshots", "runtimeInstalled": false},
-      "capabilities": ["Reusable agent, skill, hook, and workflow guidance"],
-      "caveats": ["Imported hooks are data and are never automatically executed.", "Workflow suggestions do not override the harness policy or approvals."]
+      "roles": [
+        "workflow-guidance",
+        "skills",
+        "evaluation-guidance"
+      ],
+      "primaryLinks": [
+        "https://github.com/affaan-m/ECC/tree/76aaa77df6adc5b889e689007bf99b9a4f74af34",
+        "https://github.com/affaan-m/ECC/blob/76aaa77df6adc5b889e689007bf99b9a4f74af34/README.md"
+      ],
+      "license": {
+        "spdx": "MIT",
+        "scope": "repository",
+        "caveat": "Preserve the upstream copyright and license when copying covered material; audit bundled third-party material separately."
+      },
+      "integration": {
+        "status": "catalogued",
+        "mode": "reviewed-skill-snapshots",
+        "runtimeInstalled": false
+      },
+      "capabilities": [
+        "Reusable agent, skill, hook, and workflow guidance"
+      ],
+      "caveats": [
+        "Imported hooks are data and are never automatically executed.",
+        "Workflow suggestions do not override the harness policy or approvals."
+      ]
     },
     {
       "id": "ego-lite",
@@ -28,12 +48,35 @@
       "defaultBranch": "main",
       "revision": "4cf79356509bccdead17863250b442f60a881c25",
       "mutability": "immutable-reference",
-      "roles": ["browser-automation", "browser-context", "tool-protocol-reference"],
-      "primaryLinks": ["https://github.com/citrolabs/ego-lite/tree/4cf79356509bccdead17863250b442f60a881c25", "https://github.com/citrolabs/ego-lite/blob/4cf79356509bccdead17863250b442f60a881c25/README.md"],
-      "license": {"spdx": "MIT", "scope": "repository", "caveat": "Repository license does not grant access to separately operated model services or third-party integrations."},
-      "integration": {"status": "catalogued", "mode": "explicit-runtime-adapter", "runtimeInstalled": false},
-      "capabilities": ["Logged-in browser context sharing", "Task spaces, page snapshots, screenshots, inputs, CDP and HTTP helpers", "Document-bound element references and site learnings"],
-      "caveats": ["The public helper requires its separately installed browser host.", "Mutable site learnings and page/document identity must be captured as observations.", "Windows availability is not verified; pinned upstream documents disagree on availability."]
+      "roles": [
+        "browser-automation",
+        "browser-context",
+        "tool-protocol-reference"
+      ],
+      "primaryLinks": [
+        "https://github.com/citrolabs/ego-lite/tree/4cf79356509bccdead17863250b442f60a881c25",
+        "https://github.com/citrolabs/ego-lite/blob/4cf79356509bccdead17863250b442f60a881c25/README.md"
+      ],
+      "license": {
+        "spdx": "MIT",
+        "scope": "repository",
+        "caveat": "Repository license does not grant access to separately operated model services or third-party integrations."
+      },
+      "integration": {
+        "status": "catalogued",
+        "mode": "explicit-runtime-adapter",
+        "runtimeInstalled": false
+      },
+      "capabilities": [
+        "Logged-in browser context sharing",
+        "Task spaces, page snapshots, screenshots, inputs, CDP and HTTP helpers",
+        "Document-bound element references and site learnings"
+      ],
+      "caveats": [
+        "The public helper requires its separately installed browser host.",
+        "Mutable site learnings and page/document identity must be captured as observations.",
+        "Windows availability is not verified; pinned upstream documents disagree on availability."
+      ]
     },
     {
       "id": "rea",
@@ -44,12 +87,30 @@
       "defaultBranch": "main",
       "revision": "1b97b0f3707b1cf78ac98bd4ae81638b33cc286f",
       "mutability": "immutable-reference",
-      "roles": ["reverse-engineering", "tool-protocol-reference"],
-      "primaryLinks": ["https://github.com/morluto/rea/tree/1b97b0f3707b1cf78ac98bd4ae81638b33cc286f", "https://github.com/morluto/rea/blob/1b97b0f3707b1cf78ac98bd4ae81638b33cc286f/README.md"],
-      "license": {"spdx": "MIT", "scope": "repository", "caveat": "Target artifacts and external analysis engines retain their own rights, licenses, and authorization requirements."},
-      "integration": {"status": "catalogued", "mode": "explicit-analysis-adapter", "runtimeInstalled": false},
-      "capabilities": ["Reverse-engineering and artifact analysis tooling"],
-      "caveats": ["Native analysis and subprocess actions require separately provisioned tools, explicit policy, and recorded effects."]
+      "roles": [
+        "reverse-engineering",
+        "tool-protocol-reference"
+      ],
+      "primaryLinks": [
+        "https://github.com/morluto/rea/tree/1b97b0f3707b1cf78ac98bd4ae81638b33cc286f",
+        "https://github.com/morluto/rea/blob/1b97b0f3707b1cf78ac98bd4ae81638b33cc286f/README.md"
+      ],
+      "license": {
+        "spdx": "MIT",
+        "scope": "repository",
+        "caveat": "Target artifacts and external analysis engines retain their own rights, licenses, and authorization requirements."
+      },
+      "integration": {
+        "status": "catalogued",
+        "mode": "explicit-analysis-adapter",
+        "runtimeInstalled": false
+      },
+      "capabilities": [
+        "Reverse-engineering and artifact analysis tooling"
+      ],
+      "caveats": [
+        "Native analysis and subprocess actions require separately provisioned tools, explicit policy, and recorded effects."
+      ]
     },
     {
       "id": "twentyfirst-repository",
@@ -60,12 +121,34 @@
       "defaultBranch": "main",
       "revision": "b96d84dcf748d5e56f2f72f2bab9a4f7f33574cf",
       "mutability": "immutable-reference",
-      "roles": ["ui-assets", "registry-protocol-reference"],
-      "primaryLinks": ["https://github.com/serafimcloud/21st/tree/b96d84dcf748d5e56f2f72f2bab9a4f7f33574cf", "https://github.com/serafimcloud/21st/blob/b96d84dcf748d5e56f2f72f2bab9a4f7f33574cf/README.md", "https://github.com/serafimcloud/21st/blob/b96d84dcf748d5e56f2f72f2bab9a4f7f33574cf/apps/web/lib/licenses.ts"],
-      "license": {"spdx": "MIT", "scope": "registry-application-source", "caveat": "Hosted community components carry individual licenses; repository MIT is not a blanket license for registry assets or paid components."},
-      "integration": {"status": "catalogued", "mode": "reviewed-ui-asset-snapshots", "runtimeInstalled": false},
-      "capabilities": ["React, Tailwind, and Radix component registry", "Shadcn-compatible registry JSON", "Source-defined authenticated component search"],
-      "caveats": ["Snapshot exact component responses and dependency versions before use.", "Do not execute upstream Tailwind parsing or install hooks during import."]
+      "roles": [
+        "ui-assets",
+        "registry-protocol-reference"
+      ],
+      "primaryLinks": [
+        "https://github.com/serafimcloud/21st/tree/b96d84dcf748d5e56f2f72f2bab9a4f7f33574cf",
+        "https://github.com/serafimcloud/21st/blob/b96d84dcf748d5e56f2f72f2bab9a4f7f33574cf/README.md",
+        "https://github.com/serafimcloud/21st/blob/b96d84dcf748d5e56f2f72f2bab9a4f7f33574cf/apps/web/lib/licenses.ts"
+      ],
+      "license": {
+        "spdx": "MIT",
+        "scope": "registry-application-source",
+        "caveat": "Hosted community components carry individual licenses; repository MIT is not a blanket license for registry assets or paid components."
+      },
+      "integration": {
+        "status": "catalogued",
+        "mode": "reviewed-ui-asset-snapshots",
+        "runtimeInstalled": false
+      },
+      "capabilities": [
+        "React, Tailwind, and Radix component registry",
+        "Shadcn-compatible registry JSON",
+        "Source-defined authenticated component search"
+      ],
+      "caveats": [
+        "Snapshot exact component responses and dependency versions before use.",
+        "Do not execute upstream Tailwind parsing or install hooks during import."
+      ]
     },
     {
       "id": "twentyfirst-website",
@@ -74,12 +157,31 @@
       "url": "https://21st.dev/",
       "revision": null,
       "mutability": "mutable-observation",
-      "roles": ["ui-assets", "ui-discovery"],
-      "primaryLinks": ["https://21st.dev/", "https://21st.dev/r/shadcn/accordion"],
-      "license": {"spdx": null, "scope": "service-and-individual-assets", "caveat": "Check current service terms and each component's license and access rights; neither website availability nor repository MIT licenses every hosted asset."},
-      "integration": {"status": "catalogued", "mode": "network-acquisition-only", "runtimeInstalled": false},
-      "capabilities": ["Hosted component discovery, prompts, and source distribution"],
-      "caveats": ["This entry is an observation and does not include a captured website body or immutable asset digest.", "Live search results, dependencies, and paid access can change; replay must use recorded effects."]
+      "roles": [
+        "ui-assets",
+        "ui-discovery"
+      ],
+      "primaryLinks": [
+        "https://21st.dev/",
+        "https://21st.dev/r/shadcn/accordion"
+      ],
+      "license": {
+        "spdx": null,
+        "scope": "service-and-individual-assets",
+        "caveat": "Check current service terms and each component's license and access rights; neither website availability nor repository MIT licenses every hosted asset."
+      },
+      "integration": {
+        "status": "catalogued",
+        "mode": "network-acquisition-only",
+        "runtimeInstalled": false
+      },
+      "capabilities": [
+        "Hosted component discovery, prompts, and source distribution"
+      ],
+      "caveats": [
+        "This entry is an observation and does not include a captured website body or immutable asset digest.",
+        "Live search results, dependencies, and paid access can change; replay must use recorded effects."
+      ]
     },
     {
       "id": "vercel-skills",
@@ -90,12 +192,34 @@
       "defaultBranch": "main",
       "revision": "13e4063a1cf913f5606d57d42ab83a86f5001e04",
       "mutability": "immutable-reference",
-      "roles": ["skills", "skill-discovery", "skill-distribution"],
-      "primaryLinks": ["https://github.com/vercel-labs/skills/tree/13e4063a1cf913f5606d57d42ab83a86f5001e04", "https://github.com/vercel-labs/skills/blob/13e4063a1cf913f5606d57d42ab83a86f5001e04/README.md", "https://github.com/vercel-labs/skills/blob/13e4063a1cf913f5606d57d42ab83a86f5001e04/src/local-lock.ts"],
-      "license": {"spdx": "MIT", "scope": "cli-repository", "caveat": "Every discovered skill retains its own license; the CLI's MIT license does not cover third-party skill content."},
-      "integration": {"status": "catalogued", "mode": "reviewed-skill-snapshots", "runtimeInstalled": false},
-      "capabilities": ["SKILL.md discovery and distribution across coding agents", "Project skill metadata and content hashes"],
-      "caveats": ["Branch refs and update commands are mutable; record immutable revisions and exact bytes.", "This harness does not install or invoke the upstream CLI."]
+      "roles": [
+        "skills",
+        "skill-discovery",
+        "skill-distribution"
+      ],
+      "primaryLinks": [
+        "https://github.com/vercel-labs/skills/tree/13e4063a1cf913f5606d57d42ab83a86f5001e04",
+        "https://github.com/vercel-labs/skills/blob/13e4063a1cf913f5606d57d42ab83a86f5001e04/README.md",
+        "https://github.com/vercel-labs/skills/blob/13e4063a1cf913f5606d57d42ab83a86f5001e04/src/local-lock.ts"
+      ],
+      "license": {
+        "spdx": "MIT",
+        "scope": "cli-repository",
+        "caveat": "Every discovered skill retains its own license; the CLI's MIT license does not cover third-party skill content."
+      },
+      "integration": {
+        "status": "catalogued",
+        "mode": "reviewed-skill-snapshots",
+        "runtimeInstalled": false
+      },
+      "capabilities": [
+        "SKILL.md discovery and distribution across coding agents",
+        "Project skill metadata and content hashes"
+      ],
+      "caveats": [
+        "Branch refs and update commands are mutable; record immutable revisions and exact bytes.",
+        "This harness does not install or invoke the upstream CLI."
+      ]
     },
     {
       "id": "orca",
@@ -106,12 +230,32 @@
       "defaultBranch": "main",
       "revision": "7909e72d2da494697fd519a70543e09fee5b50a6",
       "mutability": "immutable-reference",
-      "roles": ["browser-automation", "testing-reference"],
-      "primaryLinks": ["https://github.com/stablyai/orca/tree/7909e72d2da494697fd519a70543e09fee5b50a6", "https://github.com/stablyai/orca/blob/7909e72d2da494697fd519a70543e09fee5b50a6/README.md"],
-      "license": {"spdx": "MIT", "scope": "repository", "caveat": "Browser dependencies, remote services, and target applications retain their own licenses and access requirements."},
-      "integration": {"status": "catalogued", "mode": "explicit-browser-adapter", "runtimeInstalled": false},
-      "capabilities": ["Agent development environment with isolated worktrees", "Terminal, browser, desktop, mobile and SSH surfaces", "Code review and experimental task/worker orchestration"],
-      "caveats": ["Browser state and remote pages are external effects; installation and live browser control are not implied by this catalog."]
+      "roles": [
+        "browser-automation",
+        "testing-reference"
+      ],
+      "primaryLinks": [
+        "https://github.com/stablyai/orca/tree/7909e72d2da494697fd519a70543e09fee5b50a6",
+        "https://github.com/stablyai/orca/blob/7909e72d2da494697fd519a70543e09fee5b50a6/README.md"
+      ],
+      "license": {
+        "spdx": "MIT",
+        "scope": "repository",
+        "caveat": "Browser dependencies, remote services, and target applications retain their own licenses and access requirements."
+      },
+      "integration": {
+        "status": "catalogued",
+        "mode": "explicit-browser-adapter",
+        "runtimeInstalled": false
+      },
+      "capabilities": [
+        "Agent development environment with isolated worktrees",
+        "Terminal, browser, desktop, mobile and SSH surfaces",
+        "Code review and experimental task/worker orchestration"
+      ],
+      "caveats": [
+        "Browser state and remote pages are external effects; installation and live browser control are not implied by this catalog."
+      ]
     },
     {
       "id": "typesafe-docs",
@@ -120,12 +264,32 @@
       "url": "https://docs.typesafe.ai/introduction",
       "revision": null,
       "mutability": "mutable-observation",
-      "roles": ["typed-contract-reference", "evaluation-reference"],
-      "primaryLinks": ["https://docs.typesafe.ai/introduction"],
-      "license": {"spdx": null, "scope": "hosted-documentation", "caveat": "Documentation, hosted service access, and SDK code may have different terms; no redistribution or installation rights are inferred from this URL."},
-      "integration": {"status": "catalogued", "mode": "documentation-reference", "runtimeInstalled": false},
-      "capabilities": ["Typed choice, score and yes/no judgments", "Probability distributions and confidence for applicable question types", "Versioned structured evaluation API"],
-      "caveats": ["The trailing comma in the supplied documentation URL was normalized as punctuation.", "This entry records an unpinned URL, not a vendored SDK or captured document body."]
+      "roles": [
+        "typed-contract-reference",
+        "evaluation-reference"
+      ],
+      "primaryLinks": [
+        "https://docs.typesafe.ai/introduction"
+      ],
+      "license": {
+        "spdx": null,
+        "scope": "hosted-documentation",
+        "caveat": "Documentation, hosted service access, and SDK code may have different terms; no redistribution or installation rights are inferred from this URL."
+      },
+      "integration": {
+        "status": "catalogued",
+        "mode": "documentation-reference",
+        "runtimeInstalled": false
+      },
+      "capabilities": [
+        "Typed choice, score and yes/no judgments",
+        "Probability distributions and confidence for applicable question types",
+        "Versioned structured evaluation API"
+      ],
+      "caveats": [
+        "The trailing comma in the supplied documentation URL was normalized as punctuation.",
+        "This entry records an unpinned URL, not a vendored SDK or captured document body."
+      ]
     },
     {
       "id": "hermes-agent",
@@ -136,12 +300,33 @@
       "defaultBranch": "main",
       "revision": "4e59ac2b883b4133ea8a2d299abac45189781c09",
       "mutability": "immutable-reference",
-      "roles": ["agent-runtime-reference", "skills", "memory-reference"],
-      "primaryLinks": ["https://github.com/NousResearch/hermes-agent/tree/4e59ac2b883b4133ea8a2d299abac45189781c09", "https://github.com/NousResearch/hermes-agent/blob/4e59ac2b883b4133ea8a2d299abac45189781c09/README.md"],
-      "license": {"spdx": "MIT", "scope": "repository", "caveat": "Model providers, external tools, and contributed skills may impose separate terms and licenses."},
-      "integration": {"status": "catalogued", "mode": "explicit-runtime-adapter", "runtimeInstalled": false},
-      "capabilities": ["Persistent agents, learning, memory and reusable skills", "Delegation, scheduling, channels and multiple terminal backends", "ACP and batch evaluation interfaces"],
-      "caveats": ["Adaptive memory and newly generated skills require explicit versioned snapshots before later execution."]
+      "roles": [
+        "agent-runtime-reference",
+        "skills",
+        "memory-reference"
+      ],
+      "primaryLinks": [
+        "https://github.com/NousResearch/hermes-agent/tree/4e59ac2b883b4133ea8a2d299abac45189781c09",
+        "https://github.com/NousResearch/hermes-agent/blob/4e59ac2b883b4133ea8a2d299abac45189781c09/README.md"
+      ],
+      "license": {
+        "spdx": "MIT",
+        "scope": "repository",
+        "caveat": "Model providers, external tools, and contributed skills may impose separate terms and licenses."
+      },
+      "integration": {
+        "status": "catalogued",
+        "mode": "explicit-runtime-adapter",
+        "runtimeInstalled": false
+      },
+      "capabilities": [
+        "Persistent agents, learning, memory and reusable skills",
+        "Delegation, scheduling, channels and multiple terminal backends",
+        "ACP and batch evaluation interfaces"
+      ],
+      "caveats": [
+        "Adaptive memory and newly generated skills require explicit versioned snapshots before later execution."
+      ]
     },
     {
       "id": "hermes-local",
@@ -152,12 +337,36 @@
       "defaultBranch": "main",
       "revision": "f17021fbec01d7f6b1277d897c97b639b9a15765",
       "mutability": "immutable-reference",
-      "roles": ["agent-runtime-reference", "skills", "tool-contract-reference", "least-authority-reference"],
-      "primaryLinks": ["https://github.com/NousResearch/hermes-agent/tree/f17021fbec01d7f6b1277d897c97b639b9a15765"],
-      "license": {"spdx": "MIT", "scope": "repository", "caveat": "Copyright (c) 2025 Nous Research. Preserve the upstream MIT notice when copying covered material; bundled skills, model providers and external tools may impose separate terms."},
-      "integration": {"status": "catalogued-from-local-install", "mode": "static-surface-inventory", "runtimeInstalled": false},
-      "capabilities": ["225 declared tool contracts with descriptions, parameter names and required fields", "98 SKILL.md instruction corpora, 29 of them absent from the pinned hermes-agent revision", "A declared least-authority tool subset for untrusted input, used as the model for per-turn attenuation"],
-      "caveats": ["The same repository as hermes-agent at a different, later snapshot: 1487 commits ahead of base 0.22.2. Both entries are kept because they describe different content.", "The revision comes from the installation's own install-stamp.json, which reported dirty false. It was not verified against the remote, so blob links are unverified.", "The inventory is static analysis of source text. No hermes module was imported and no gateway was contacted; Concord never executes this code.", "Tool effects are classified by explicit rule and carry an effectBasis. A name matching no rule is left unclassified rather than guessed."]
+      "roles": [
+        "agent-runtime-reference",
+        "skills",
+        "tool-contract-reference",
+        "least-authority-reference"
+      ],
+      "primaryLinks": [
+        "https://github.com/NousResearch/hermes-agent/tree/f17021fbec01d7f6b1277d897c97b639b9a15765"
+      ],
+      "license": {
+        "spdx": "MIT",
+        "scope": "repository",
+        "caveat": "Copyright (c) 2025 Nous Research. Preserve the upstream MIT notice when copying covered material; bundled skills, model providers and external tools may impose separate terms."
+      },
+      "integration": {
+        "status": "catalogued-from-local-install",
+        "mode": "static-surface-inventory",
+        "runtimeInstalled": false
+      },
+      "capabilities": [
+        "225 declared tool contracts with descriptions, parameter names and required fields",
+        "98 SKILL.md instruction corpora, 29 of them absent from the pinned hermes-agent revision",
+        "A declared least-authority tool subset for untrusted input, used as the model for per-turn attenuation"
+      ],
+      "caveats": [
+        "The same repository as hermes-agent at a different, later snapshot: 1487 commits ahead of base 0.22.2. Both entries are kept because they describe different content.",
+        "The revision comes from the installation's own install-stamp.json, which reported dirty false. It was not verified against the remote, so blob links are unverified.",
+        "The inventory is static analysis of source text. No hermes module was imported and no gateway was contacted; Concord never executes this code.",
+        "Tool effects are classified by explicit rule and carry an effectBasis. A name matching no rule is left unclassified rather than guessed."
+      ]
     },
     {
       "id": "deepseek-harness",
@@ -168,12 +377,32 @@
       "defaultBranch": "master",
       "revision": "86a402200d95fecef4529d969836f1fe13c6cb0d",
       "mutability": "immutable-reference",
-      "roles": ["agent-runtime-reference", "evaluation-reference"],
-      "primaryLinks": ["https://github.com/deepseek-ai/deepseek-harness/tree/86a402200d95fecef4529d969836f1fe13c6cb0d", "https://github.com/deepseek-ai/deepseek-harness/blob/86a402200d95fecef4529d969836f1fe13c6cb0d/README.md"],
-      "license": {"spdx": "MIT", "scope": "repository", "caveat": "Repository licensing does not include separately provisioned model APIs or external services."},
-      "integration": {"status": "catalogued", "mode": "explicit-runtime-adapter", "runtimeInstalled": false},
-      "capabilities": ["Replaceable plugins, model and tool services", "Append-only sessions, SDK and ACP profiles", "Recorded model stream replay fixtures"],
-      "caveats": ["Live model inference is an external effect; temperature or seed settings alone do not guarantee repeatable model output."]
+      "roles": [
+        "agent-runtime-reference",
+        "evaluation-reference"
+      ],
+      "primaryLinks": [
+        "https://github.com/deepseek-ai/deepseek-harness/tree/86a402200d95fecef4529d969836f1fe13c6cb0d",
+        "https://github.com/deepseek-ai/deepseek-harness/blob/86a402200d95fecef4529d969836f1fe13c6cb0d/README.md"
+      ],
+      "license": {
+        "spdx": "MIT",
+        "scope": "repository",
+        "caveat": "Repository licensing does not include separately provisioned model APIs or external services."
+      },
+      "integration": {
+        "status": "catalogued",
+        "mode": "explicit-runtime-adapter",
+        "runtimeInstalled": false
+      },
+      "capabilities": [
+        "Replaceable plugins, model and tool services",
+        "Append-only sessions, SDK and ACP profiles",
+        "Recorded model stream replay fixtures"
+      ],
+      "caveats": [
+        "Live model inference is an external effect; temperature or seed settings alone do not guarantee repeatable model output."
+      ]
     },
     {
       "id": "awesome-cyber-skills",
@@ -184,12 +413,31 @@
       "defaultBranch": "master",
       "revision": "c0681bf3f0e25490efb5d2f75e503fa9e6427ff8",
       "mutability": "immutable-reference",
-      "roles": ["security-reference", "lab-catalog"],
-      "primaryLinks": ["https://github.com/joe-shenouda/awesome-cyber-skills/tree/c0681bf3f0e25490efb5d2f75e503fa9e6427ff8", "https://github.com/joe-shenouda/awesome-cyber-skills/blob/c0681bf3f0e25490efb5d2f75e503fa9e6427ff8/README.md"],
-      "license": {"spdx": "MIT", "scope": "reference-list", "caveat": "Linked platforms and labs have independent licenses, terms, prices, and scopes; the list does not authorize testing arbitrary systems."},
-      "integration": {"status": "catalog-only", "mode": "reference-data", "runtimeInstalled": false},
-      "capabilities": ["Curated security practice environments with category and difficulty metadata"],
-      "caveats": ["This is a link catalog, not executable agent skills.", "External lab availability and authorization must be established for each requested use."]
+      "roles": [
+        "security-reference",
+        "lab-catalog"
+      ],
+      "primaryLinks": [
+        "https://github.com/joe-shenouda/awesome-cyber-skills/tree/c0681bf3f0e25490efb5d2f75e503fa9e6427ff8",
+        "https://github.com/joe-shenouda/awesome-cyber-skills/blob/c0681bf3f0e25490efb5d2f75e503fa9e6427ff8/README.md"
+      ],
+      "license": {
+        "spdx": "MIT",
+        "scope": "reference-list",
+        "caveat": "Linked platforms and labs have independent licenses, terms, prices, and scopes; the list does not authorize testing arbitrary systems."
+      },
+      "integration": {
+        "status": "catalog-only",
+        "mode": "reference-data",
+        "runtimeInstalled": false
+      },
+      "capabilities": [
+        "Curated security practice environments with category and difficulty metadata"
+      ],
+      "caveats": [
+        "This is a link catalog, not executable agent skills.",
+        "External lab availability and authorization must be established for each requested use."
+      ]
     },
     {
       "id": "awesome-hacking",
@@ -200,12 +448,71 @@
       "defaultBranch": "master",
       "revision": "b2bb13aa69b4f568a1bab0cbb17b7a00a350dc36",
       "mutability": "immutable-reference",
-      "roles": ["security-reference", "reference-index"],
-      "primaryLinks": ["https://github.com/Hack-with-Github/Awesome-Hacking/tree/b2bb13aa69b4f568a1bab0cbb17b7a00a350dc36", "https://github.com/Hack-with-Github/Awesome-Hacking/blob/b2bb13aa69b4f568a1bab0cbb17b7a00a350dc36/README.md"],
-      "license": {"spdx": "CC0-1.0", "scope": "reference-list", "caveat": "The CC0 dedication covers this list, not the independently licensed repositories, software, and content it links."},
-      "integration": {"status": "catalog-only", "mode": "reference-data", "runtimeInstalled": false},
-      "capabilities": ["Index of security, defensive, reverse-engineering, and testing resource lists"],
-      "caveats": ["This is a reference index, not a tool runtime or blanket authorization to run linked tools."]
+      "roles": [
+        "security-reference",
+        "reference-index"
+      ],
+      "primaryLinks": [
+        "https://github.com/Hack-with-Github/Awesome-Hacking/tree/b2bb13aa69b4f568a1bab0cbb17b7a00a350dc36",
+        "https://github.com/Hack-with-Github/Awesome-Hacking/blob/b2bb13aa69b4f568a1bab0cbb17b7a00a350dc36/README.md"
+      ],
+      "license": {
+        "spdx": "CC0-1.0",
+        "scope": "reference-list",
+        "caveat": "The CC0 dedication covers this list, not the independently licensed repositories, software, and content it links."
+      },
+      "integration": {
+        "status": "catalog-only",
+        "mode": "reference-data",
+        "runtimeInstalled": false
+      },
+      "capabilities": [
+        "Index of security, defensive, reverse-engineering, and testing resource lists"
+      ],
+      "caveats": [
+        "This is a reference index, not a tool runtime or blanket authorization to run linked tools."
+      ]
+    },
+    {
+      "id": "ghidra",
+      "kind": "distribution",
+      "requestedUrl": "https://github.com/NationalSecurityAgency/ghidra",
+      "url": "https://github.com/NationalSecurityAgency/ghidra",
+      "repository": "NationalSecurityAgency/ghidra",
+      "defaultBranch": "master",
+      "revision": null,
+      "release": "ghidra_12.1.4_PUBLIC_20260921",
+      "mutability": "pinned-release-archive",
+      "roles": [
+        "processor-specification-corpus",
+        "disassembly-reference",
+        "decompiler-engine-reference"
+      ],
+      "primaryLinks": [
+        "https://github.com/NationalSecurityAgency/ghidra/releases"
+      ],
+      "license": {
+        "spdx": "Apache-2.0",
+        "scope": "distribution",
+        "caveat": "Apache License 2.0. The element and attribute id tables in src/ghidra.mjs are transcribed from Ghidra/Features/Decompiler/src/decompile/cpp/slaformat.cc and the wire encoding from marshal.hh, so src/ghidra.mjs is a derivative work: preserve this attribution and the upstream NOTICE when redistributing. The specification files carry no per-file license header and inherit the distribution LICENSE."
+      },
+      "integration": {
+        "status": "catalogued-from-local-install",
+        "mode": "internal-readers-plus-gated-engine",
+        "runtimeInstalled": false
+      },
+      "capabilities": [
+        "189 language definitions across 59 processor families, read natively from 51 .ldefs",
+        "86 processor specs, 105 compiler specs and 29 loader opinion tables, read natively",
+        "137 compiled SLEIGH tables decoded natively from their zlib PackedFormat wire form",
+        "337 SLEIGH source files read with their preprocessor guard stacks preserved rather than evaluated"
+      ],
+      "caveats": [
+        "The specification corpus is data and is read as bytes; no Ghidra code is imported and nothing here is executed.",
+        "Ghidra itself requires a Java runtime, so analyzeHeadless and decompile.exe cannot be internalized: they are reachable only as a reviewed provider under the process effect, never as a Concord dependency.",
+        "decompile.exe is not a standalone decompiler. ghidra_process.cc shows it is a slave of the JVM host, reading a burst-message protocol on stdin and calling back for memory, symbols and specs.",
+        "A .slaspec states facts conditionally. Reading one as though the preprocessor had run would attribute one variant’s registers to all 22 of them, so guards are reported and never resolved."
+      ]
     }
   ]
 }

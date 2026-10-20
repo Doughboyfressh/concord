@@ -22,13 +22,13 @@ function setup(workspaceRoot, additional = []) {
   return createChatHarness({registry,policy:{version:1,allowedTools:[...registry.keys()],allowedEffects:['pure','read','write','network'],maxTasks:32,maxOutputBytes:1048576,maxJournalBytes:16777216,timeoutMs:10000},sourceLock:catalog,workspaceRoot,buildContext:context});
 }
 
-test('chat uses all thirteen reviewed instruction modules and executes/replays its evidence plan', async () => {
+test('chat uses all fourteen reviewed instruction modules and executes/replays its evidence plan', async () => {
   const temp = tempDir('concord-chat-flow-');
   try {
     const harness = setup(temp);
     const turn = await harness.send('Combine deterministic replay, browser tools, security review and memory in this chat harness.');
     assert.equal(turn.mode, 'offline-demo');
-    assert.equal(turn.sourceCoverage.length, 13);
+    assert.equal(turn.sourceCoverage.length, 14);
     assert.ok(turn.history.some(m => m.role === 'assistant' && m.content.length));
     assert.ok(turn.proposedPlan?.tasks.length);
     const state = await harness.executePlan();

@@ -36,15 +36,23 @@ async function directoryLink(t, target, destination) {
   }
 }
 
-test('source lock covers eleven immutable repositories and two explicitly mutable websites', () => {
-  assert.equal(lock.sources.length, 13);
+test('source lock covers eleven immutable repositories, two mutable websites and one pinned distribution', () => {
+  assert.equal(lock.sources.length, 14);
   assert.equal(lock.sources.filter((source) => source.kind === 'repository').length, 11);
+  assert.equal(lock.sources.filter((source) => source.kind === 'website').length, 2);
+  assert.equal(lock.sources.filter((source) => source.kind === 'distribution').length, 1);
   for (const source of lock.sources) {
     assert.equal(source.integration.runtimeInstalled, false);
     assert.ok(source.license.caveat);
     assert.ok(source.primaryLinks.length);
     if (source.kind === 'repository') assert.match(source.revision, /^[a-f0-9]{40}$/);
-    else {
+    else if (source.kind === 'distribution') {
+      // Pinned, but by a release identifier rather than a commit. Both facts are asserted because
+      // a distribution that recorded neither would be an unpinned reference wearing a pinned name.
+      assert.equal(source.revision, null);
+      assert.equal(source.mutability, 'pinned-release-archive');
+      assert.match(source.release, /^[A-Za-z0-9][A-Za-z0-9._-]*$/);
+    } else {
       assert.equal(source.revision, null);
       assert.equal(source.mutability, 'mutable-observation');
     }
@@ -64,6 +72,14 @@ test('source locks reject duplicate identifiers, short pins, and falsely pinned 
   const website = structuredClone(lock);
   website.sources.find((source) => source.kind === 'website').revision = '0'.repeat(40);
   assert.throws(() => makeSourceTools(website), errorCode('SOURCE_LOCK_INVALID'));
+  // A distribution's pin is its release identifier, so dropping it leaves an unpinned entry that
+  // still claims to be pinned. That is the one way this kind can lie, so it is refused.
+  const unpinned = structuredClone(lock);
+  delete unpinned.sources.find((source) => source.kind === 'distribution').release;
+  assert.throws(() => makeSourceTools(unpinned), errorCode('SOURCE_LOCK_INVALID'));
+  const falselyCommitted = structuredClone(lock);
+  falselyCommitted.sources.find((source) => source.kind === 'distribution').revision = '0'.repeat(40);
+  assert.throws(() => makeSourceTools(falselyCommitted), errorCode('SOURCE_LOCK_INVALID'));
 });
 
 test('source lock loading rejects duplicate JSON keys and oversized documents', async (t) => {

@@ -10,6 +10,7 @@ import { makeArtifactTools } from '../src/artifacts.mjs';
 import { makeReaderTools } from '../src/readers.mjs';
 import { HarnessError } from '../src/value.mjs';
 import { tempDir } from './temp-workspace.mjs';
+import { writeGhidraFixtures } from './ghidra-fixtures.mjs';
 
 const registry = new Map(makeBuiltinTools().map(t => [t.name, t]));
 const policy = { version: 1, allowedTools: [...registry.keys()], allowedEffects: ['pure', 'read', 'write'], maxOutputBytes: 10000, maxJournalBytes: 100000 };
@@ -253,6 +254,11 @@ test('every declared outputKeys set is really present in that tool\'s actual res
   // not-this-format fallback: an empty but valid WASM module, and legacy EVM bytecode.
   writeFileSync(path.join(temp, 'm.wasm'), Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]));
   writeFileSync(path.join(temp, 'code.bin'), Buffer.from([0x60, 0x01, 0x50, 0x00]));
+  // The Ghidra readers each have a not-this-format branch, so a wrong-shaped carrier would check
+  // nothing here: every one would answer `supported: false` and still have all its declared keys.
+  // These fixtures are valid against the shipped RelaxNG schemas, and the .sla is a real zlib
+  // PackedFormat stream, so the keys are checked on the path that actually decodes something.
+  const ghidraInputs = writeGhidraFixtures(temp);
   const context = { workspaceRoot: temp, policy: { maxOutputBytes: 100000 }, requestHash: 'a'.repeat(64) };
   const tools = new Map([...makeBuiltinTools(), ...makeArtifactTools(), ...makeReaderTools()].map(t => [t.name, t]));
   const candidate = await tools.get('memory.candidate').execute({ lesson: 'a lesson worth keeping', evidence: [{ a: 1 }] }, context);
@@ -324,6 +330,7 @@ test('every declared outputKeys set is really present in that tool\'s actual res
     'memory.promote': candidate,
     'memory.recall': { query: 'lesson', limit: 3 },
     'skills.rank': { query: 'binary', skills: [{ id: 'a', text: 'binary analysis' }] },
+    ...ghidraInputs,
   };
   const declared = [...tools.values()].filter(t => Array.isArray(t.outputKeys));
   assert.ok(declared.length >= 11, 'declarations exist to verify');

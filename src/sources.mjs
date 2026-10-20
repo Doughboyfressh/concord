@@ -34,7 +34,7 @@ function checkLock(value) {
       fail('SOURCE_LOCK_INVALID', 'Source ids must be unique portable identifiers');
     }
     ids.add(source.id);
-    if (!['repository', 'website'].includes(source.kind)) fail('SOURCE_LOCK_INVALID', 'Unsupported source kind', { sourceId: source.id });
+    if (!['repository', 'website', 'distribution'].includes(source.kind)) fail('SOURCE_LOCK_INVALID', 'Unsupported source kind', { sourceId: source.id });
     for (const field of ['requestedUrl', 'url']) {
       let url;
       try { url = new URL(source[field]); } catch { fail('SOURCE_LOCK_INVALID', 'Invalid primary source URL', { sourceId: source.id, field }); }
@@ -51,6 +51,15 @@ function checkLock(value) {
     if (source.kind === 'repository') {
       if (source.mutability !== 'immutable-reference' || typeof source.revision !== 'string' || !/^[a-f0-9]{40}$/.test(source.revision)) {
         fail('SOURCE_LOCK_INVALID', 'Repositories require a full immutable Git revision', { sourceId: source.id });
+      }
+    } else if (source.kind === 'distribution') {
+      // A released archive is pinned, but not by a commit: the pin is the release identifier it
+      // ships under. Forcing it into either existing kind would have to lie — calling it immutable
+      // would claim a revision that is not recorded, and calling it a mutable observation would
+      // claim it can change under a fixed name, which a released archive cannot.
+      if (source.mutability !== 'pinned-release-archive' || source.revision !== null
+        || typeof source.release !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(source.release)) {
+        fail('SOURCE_LOCK_INVALID', 'Distributions require a release identifier and no Git revision', { sourceId: source.id });
       }
     } else if (source.mutability !== 'mutable-observation' || source.revision !== null) {
       fail('SOURCE_LOCK_INVALID', 'Websites must be marked as unpinned mutable observations', { sourceId: source.id });

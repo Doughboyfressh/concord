@@ -31,6 +31,12 @@
       "sourceId": "ego-lite"
     },
     {
+      "bytes": 3835,
+      "file": "ghidra.md",
+      "sha256": "e3225a668edb9916ec3a196772c2c6aa290a080e282c0500e932dfda37f7d769",
+      "sourceId": "ghidra"
+    },
+    {
       "bytes": 9239,
       "file": "hermes-agent.md",
       "sha256": "a4d95142a34e2bfb172abf58520b1320deaa5a50844b984ad5f8b87113a230e3",

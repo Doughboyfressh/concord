@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { canonical, digest } from '../src/value.mjs';
 import { readerExercises } from './train-exercises-readers.mjs';
+import { ghidraExercises } from './train-exercises-ghidra.mjs';
 import { evidenceExercises } from './train-exercises-evidence.mjs';
 import { writeExercises } from './train-exercises-writes.mjs';
 import { composeExercises } from './train-exercises-compose.mjs';
@@ -35,6 +36,7 @@ export function exercises(inventory, registry) {
 
   return [
     ...readerExercises(),
+    ...ghidraExercises(),
     ...evidenceExercises(),
     ...writeExercises(),
     ...composeExercises(),
@@ -89,8 +91,11 @@ export function exercises(inventory, registry) {
     {
       family: 'sources', tool: 'sources.catalog',
       plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'sources.catalog', input: {} }] },
-      expect: (r) => Array.isArray(r.results.a.sources) && r.results.a.sources.length === 13,
-      lesson: 'sources.catalog reports 13 pinned upstream sources as inert provenance: listing a source is not a claim that its runtime is installed or that its tools exist here.',
+      // The count is asserted deliberately rather than read from the lock, so pinning a source
+      // without reviewed instructions for it is a finding here. The kernel enforces the same
+      // bijection at CHAT_CONTEXT, and this exercise is the cheaper place to notice.
+      expect: (r) => Array.isArray(r.results.a.sources) && r.results.a.sources.length === 14,
+      lesson: 'sources.catalog reports 14 pinned upstream sources as inert provenance: listing a source is not a claim that its runtime is installed or that its tools exist here. Eleven are Git repositories pinned by commit, two are explicitly unpinned website observations, and one is a release archive pinned by its release identifier rather than by a revision.',
     },
     {
       family: 'knowledge', tool: 'capabilities.search',
