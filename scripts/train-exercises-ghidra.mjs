@@ -156,7 +156,7 @@ export function ghidraExercises() {
       family: 'ghidra', tool: 'artifact.disassemble', workspace: 'temp',
       fixture: (dir) => {
         writeGhidraFixtures(dir);
-        fs.writeFileSync(path.join(dir, 'code.bin'), Buffer.from([0x00, 0x02, 0x7f, 0x03, 0x00]));
+        fs.writeFileSync(path.join(dir, 'code.bin'), Buffer.from([0x00, 0x02, 0x7f, 0x07, 0x00]));
       },
       plan: task('artifact.disassemble', { table: 'toy-decode.sla', path: 'code.bin', address: '0x400000', limit: 8 }),
       expect: (r) => {
@@ -204,6 +204,32 @@ export function ghidraExercises() {
         && r.results.a.instructions[0].decoded === false
         && r.results.a.instructions[0].reason === 'no_matching_constructor',
       lesson: 'artifact.disassemble distinguishes a table it cannot read from a table that matches nothing. A compiled table carrying symbol names and address spaces but no constructors loads successfully and then decodes nothing, which is reported as an undecoded position with reason no_matching_constructor rather than as a failure to read the table. The distinction matters because the two call for different actions: one means the wrong file was supplied, the other means these bytes are not instructions in this language.',
+    },
+    {
+      family: 'ghidra', tool: 'artifact.controlFlow', workspace: 'temp',
+      fixture: (dir) => writeGhidraFixtures(dir),
+      plan: task('artifact.controlFlow', { table: 'toy-decode.sla', path: 'toy-flow.bin', address: '0x0' }),
+      expect: (r) => {
+        const out = r.results.a;
+        const head = out.blocks.find((block) => block.start === '0x0');
+        const join = out.blocks.find((block) => block.start === '0x2');
+        return out.supported === true && out.counts.blocks === 3
+          && head.kind === 'conditional' && head.successors.length === 2
+          && head.successors.some((edge) => edge.kind === 'branch' && edge.to === '0x5')
+          && head.successors.some((edge) => edge.kind === 'fallthrough' && edge.to === '0x2')
+          && join.successors.length === 1 && join.successors[0].kind === 'fallthrough'
+          && out.calls.length === 1 && out.calls[0].to === '0x8'
+          && out.instructions.every((instruction) => typeof instruction.address === 'string');
+      },
+      lesson: 'artifact.controlFlow recovers basic blocks and call edges from lifted p-code, and because it reads only BRANCH, CBRANCH, BRANCHIND, CALL, CALLIND and RETURN it is one implementation for every architecture rather than one per architecture. Three of its rules come from Ghidra flow.cc and each is the opposite of a plausible guess. A call is a call edge and not a control-flow edge: it does not end a basic block and it does fall through, so treating it as a jump would split a block and lose the return after it. A branch whose target varnode sits in the constant space is not an address but a p-code-relative branch inside that single instruction, and reading it as an address would invent a jump to a tiny number. And a delay slot belongs to its branch rather than being its successor, so those bytes are attributed to the branch and flow resumes past them. A block that ends only because the next instruction is a branch target still carries its fallthrough edge, which is the join after a conditional; deciding successors while partitioning loses that edge and the block then reads as unreachable code. Reachability is followed from entry points rather than swept linearly, so an address that appears is one the analysis can explain, and an indirect branch is reported unresolved rather than omitted because a missing edge reads as dead code.',
+    },
+    {
+      family: 'ghidra', tool: 'artifact.controlFlow', workspace: 'temp',
+      fixture: (dir) => writeGhidraFixtures(dir),
+      plan: task('artifact.controlFlow', { table: 'toy-decode.sla', path: 'toy-flow.bin', address: 'not-hex' }),
+      expect: (r) => r.results.a.supported === false && r.results.a.reason === 'invalid_address'
+        && r.results.a.blocks.length === 0,
+      lesson: 'artifact.controlFlow refuses a malformed base address rather than defaulting it to zero, because a wrong base silently relocates every branch target and call edge it reports. The check lives in execute rather than in the input schema deliberately: the kernel schema subset is explicit and validateSchema refuses any keyword outside it, so declaring a pattern constraint would make every plan using the tool fail with INVALID_SCHEMA at compile time instead of producing a refusal that names what was wrong.',
     },
     {
       family: 'ghidra', tool: 'artifact.compareSleighSource', workspace: 'temp',

@@ -129,7 +129,12 @@ export function buildSla({ bigEndian = false, alignment = 1, defaultSpace = 'ram
  * the engine is also checked against real shipped tables.
  */
 const INSTRUCTION_SYMBOL = 0;
-const OPERAND_SYMBOL = 1;
+// One operand symbol per constructor that has an operand: an operand's local expression names its
+// own table, constructor and index, so constructors cannot share one.
+const OPERAND_SYMBOL = 1;      // ld, constructor 2
+const TARGET_BR = 2;           // br, constructor 4
+const TARGET_BRC = 3;          // brc, constructor 5
+const TARGET_CALL = 4;         // call, constructor 6
 // Space indices. 0 is the constant space, which sleighbase.cc re-inserts rather than serialising.
 const CONST_SPACE = 0;
 const UNIQUE_SPACE = 1;
@@ -137,6 +142,10 @@ const RAM_SPACE = 2;
 const REGISTER_SPACE = 3;
 const R0 = 0;   // register space offset, 4 bytes wide
 const OP_COPY = 1;
+const OP_BRANCH = 4;
+const OP_CBRANCH = 5;
+const OP_CALL = 7;
+const OP_RETURN = 10;
 const OP_INT_ADD = 19;
 
 // A mask/value pair over the first instruction byte, already normalized the way PatternBlock
@@ -169,6 +178,8 @@ const varnodeTpl = (space, offset, size) => [...open(ELEM.varnode_tpl), ...space
 const regTpl = (spaceIndex, offset, size) => varnodeTpl(constSpaceId(spaceIndex), constReal(offset), constReal(size));
 /** The value an operand exports, taken from its handle's offset. */
 const operandValueTpl = (index, size) => varnodeTpl(constSpaceId(CONST_SPACE), constHandle(index, 1), constReal(size));
+/** A branch target: the operand's value as an address in the code space, not a constant. */
+const targetTpl = (index) => varnodeTpl(constSpaceId(RAM_SPACE), constHandle(index, 1), constReal(4));
 const opTpl = (code, output, inputs) => [
   ...open(ELEM.op_tpl), ...attrSigned(ATTR.code, code),
   ...(output ?? [...open(ELEM.null_), ...close(ELEM.null_)]),
@@ -209,30 +220,35 @@ export function buildDecodableSla() {
     ...space(ELEM.space, { name: 'register', index: REGISTER_SPACE, size: 4 }),
     ...close(ELEM.spaces),
 
-    ...open(ELEM.symbol_table), ...attrSigned(ATTR.scopesize, 1), ...attrSigned(ATTR.symbolsize, 2),
+    ...open(ELEM.symbol_table), ...attrSigned(ATTR.scopesize, 1), ...attrSigned(ATTR.symbolsize, 5),
     ...open(ELEM.scope), ...attrUnsigned(ATTR.id, 0), ...attrUnsigned(ATTR.parent, 0), ...close(ELEM.scope),
-    // Shells first: a constructor names its operands by id, so both symbols must exist before any
+    // Shells first: a constructor names its operands by id, so every symbol must exist before any
     // content is read. SymbolTable::decode does the same in the same order.
     ...open(ELEM.subtable_sym_head), ...attrString(ATTR.name, 'instruction'),
     ...attrUnsigned(ATTR.id, INSTRUCTION_SYMBOL), ...attrSigned(ATTR.scope, 0), ...close(ELEM.subtable_sym_head),
-    ...open(ELEM.operand_sym_head), ...attrString(ATTR.name, 'imm8'),
-    ...attrUnsigned(ATTR.id, OPERAND_SYMBOL), ...attrSigned(ATTR.scope, 0), ...close(ELEM.operand_sym_head),
+    ...[[OPERAND_SYMBOL, 'imm8'], [TARGET_BR, 'target'], [TARGET_BRC, 'target'], [TARGET_CALL, 'target']]
+      .flatMap(([id, name]) => [
+        ...open(ELEM.operand_sym_head), ...attrString(ATTR.name, name),
+        ...attrUnsigned(ATTR.id, id), ...attrSigned(ATTR.scope, 0), ...close(ELEM.operand_sym_head),
+      ]),
 
-    // The immediate: one byte at constructor-relative offset 1, read as an unsigned 8-bit token.
-    // The local expression names the operand's own slot; the defining expression is what produces
-    // its value, which is the field in the second byte.
-    ...open(ELEM.operand_sym), ...attrUnsigned(ATTR.id, OPERAND_SYMBOL),
-    ...attrSigned(ATTR.index, 0), ...attrSigned(ATTR.off, 1), ...attrSigned(ATTR.base, -1),
-    ...attrSigned(ATTR.minlen, 1),
-    ...open(ELEM.operand_exp), ...attrSigned(ATTR.index, 0),
-    ...attrUnsigned(ATTR.table, INSTRUCTION_SYMBOL), ...attrUnsigned(ATTR.ct, 2), ...close(ELEM.operand_exp),
-    ...open(ELEM.tokenfield), ...attrBool(ATTR.bigendian, false), ...attrBool(ATTR.signbit, false),
-    ...attrSigned(ATTR.startbit, 0), ...attrSigned(ATTR.endbit, 7),
-    ...attrSigned(ATTR.startbyte, 0), ...attrSigned(ATTR.endbyte, 0), ...attrSigned(ATTR.shift, 0),
-    ...close(ELEM.tokenfield),
-    ...close(ELEM.operand_sym),
+    // Each operand is one byte at constructor-relative offset 1, read as an unsigned 8-bit token.
+    // The local expression names the operand's own slot — its table, its constructor and its index
+    // — and the defining expression is what produces its value, the field in the second byte.
+    ...[[OPERAND_SYMBOL, 2], [TARGET_BR, 4], [TARGET_BRC, 5], [TARGET_CALL, 6]].flatMap(([id, ct]) => [
+      ...open(ELEM.operand_sym), ...attrUnsigned(ATTR.id, id),
+      ...attrSigned(ATTR.index, 0), ...attrSigned(ATTR.off, 1), ...attrSigned(ATTR.base, -1),
+      ...attrSigned(ATTR.minlen, 1),
+      ...open(ELEM.operand_exp), ...attrSigned(ATTR.index, 0),
+      ...attrUnsigned(ATTR.table, INSTRUCTION_SYMBOL), ...attrUnsigned(ATTR.ct, ct), ...close(ELEM.operand_exp),
+      ...open(ELEM.tokenfield), ...attrBool(ATTR.bigendian, false), ...attrBool(ATTR.signbit, false),
+      ...attrSigned(ATTR.startbit, 0), ...attrSigned(ATTR.endbit, 7),
+      ...attrSigned(ATTR.startbyte, 0), ...attrSigned(ATTR.endbyte, 0), ...attrSigned(ATTR.shift, 0),
+      ...close(ELEM.tokenfield),
+      ...close(ELEM.operand_sym),
+    ]),
 
-    ...open(ELEM.subtable_sym), ...attrUnsigned(ATTR.id, INSTRUCTION_SYMBOL), ...attrSigned(ATTR.numct, 3),
+    ...open(ELEM.subtable_sym), ...attrUnsigned(ATTR.id, INSTRUCTION_SYMBOL), ...attrSigned(ATTR.numct, 7),
     // `halt` has no template at all, which is how a constructor that declares no semantics
     // appears: the lifter must say so rather than report an empty effect.
     ...constructor(['halt'], { length: 1, firstWhitespace: -1 }),
@@ -251,13 +267,31 @@ export function buildDecodableSla() {
       template: constructTpl([
         opTpl(OP_COPY, regTpl(REGISTER_SPACE, R0, 4), [operandValueTpl(0, 4)]),
       ]) }),
-    // Two bits at bits 6 and 7 — the low two bits of the opcode byte — select the branch.
+    // The control-flow instructions. A branch target is a varnode in the code space whose offset
+    // is the operand's value, which is how SLEIGH's `goto` compiles; a target in the constant
+    // space would mean a p-code-relative branch inside this instruction instead.
+    ...constructor(['ret'], { length: 1, firstWhitespace: -1,
+      template: constructTpl([opTpl(OP_RETURN, null, [regTpl(REGISTER_SPACE, R0, 4)])]) }),
+    ...constructor(['br', ' ', { operand: 0 }], { length: 1, firstWhitespace: 1, operands: [TARGET_BR],
+      template: constructTpl([opTpl(OP_BRANCH, null, [targetTpl(0)])]) }),
+    // CBRANCH takes the target first and the condition second, so it falls through as well as
+    // branching — the distinction the block builder depends on.
+    ...constructor(['brc', ' ', { operand: 0 }], { length: 1, firstWhitespace: 1, operands: [TARGET_BRC],
+      template: constructTpl([opTpl(OP_CBRANCH, null, [targetTpl(0), regTpl(REGISTER_SPACE, R0, 1)])]) }),
+    ...constructor(['call', ' ', { operand: 0 }], { length: 1, firstWhitespace: 1, operands: [TARGET_CALL],
+      template: constructTpl([opTpl(OP_CALL, null, [targetTpl(0)])]) }),
+    // Three bits at bits 5, 6 and 7 — the low three bits of the opcode byte — select the branch.
+    // The eighth is deliberately empty so an unclaimed opcode is refused rather than rounded.
     ...open(ELEM.decision), ...attrSigned(ATTR.number, 0), ...attrBool(ATTR.context, false),
-    ...attrSigned(ATTR.startbit, 6), ...attrSigned(ATTR.size, 2),
+    ...attrSigned(ATTR.startbit, 5), ...attrSigned(ATTR.size, 3),
     ...terminal(1, [{ id: 0, opcode: 0x00 }]),
     ...terminal(2, [{ id: 1, opcode: 0x01 }]),
     ...terminal(3, [{ id: 2, opcode: 0x02 }]),
-    ...terminal(4, []),
+    ...terminal(4, [{ id: 3, opcode: 0x03 }]),
+    ...terminal(5, [{ id: 4, opcode: 0x04 }]),
+    ...terminal(6, [{ id: 5, opcode: 0x05 }]),
+    ...terminal(7, [{ id: 6, opcode: 0x06 }]),
+    ...terminal(8, []),
     ...close(ELEM.decision),
     ...close(ELEM.subtable_sym),
     ...close(ELEM.symbol_table),
@@ -471,8 +505,17 @@ export function writeGhidraFixtures(dir) {
   // on the path that actually decodes rather than on its table-unreadable branch.
   writeFileSync(path.join(dir, 'toy-decode.sla'), buildDecodableSla());
   writeFileSync(path.join(dir, 'toy-code.bin'), Buffer.from([0x00, 0x01, 0x02, 0x42, 0x00]));
+  // A program with a shape worth recovering: a conditional that skips a load, a call, a return.
+  //   0x00  brc 0x05    conditional, branches to 0x05 and falls through to 0x02
+  //   0x02  ld 0x01     falls through to 0x04
+  //   0x04  halt        falls through to 0x05
+  //   0x05  call 0x08   a call edge, and falls through to 0x07
+  //   0x07  ret         ends flow
+  writeFileSync(path.join(dir, 'toy-flow.bin'),
+    Buffer.from([0x05, 0x05, 0x02, 0x01, 0x00, 0x06, 0x08, 0x03]));
   return {
     'artifact.disassemble': { table: 'toy-decode.sla', path: 'toy-code.bin' },
+    'artifact.controlFlow': { table: 'toy-decode.sla', path: 'toy-flow.bin', address: '0x0' },
     'artifact.ghidraLanguages': { path: 'toy.ldefs' },
     'artifact.ghidraProcessorSpec': { path: 'toy.pspec' },
     'artifact.ghidraCompilerSpec': { path: 'toy.cspec' },

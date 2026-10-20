@@ -5,6 +5,7 @@ import { makePlatformTools } from './platform.mjs';
 import { makeEvidenceTools } from './evidence.mjs';
 import { makeGhidraTools } from './ghidra.mjs';
 import { makeSleighTools } from './sleigh.mjs';
+import { makeControlFlowTools } from './control-flow.mjs';
 
 /**
  * One registration point for the static format readers that realize REA's `internalizable` tools.
@@ -16,5 +17,5 @@ import { makeSleighTools } from './sleigh.mjs';
  */
 export function makeReaderTools() {
   return [...makeDexTools(), ...makeManagedTools(), ...makeWebTools(), ...makePlatformTools(),
-    ...makeEvidenceTools(), ...makeGhidraTools(), ...makeSleighTools()];
+    ...makeEvidenceTools(), ...makeGhidraTools(), ...makeSleighTools(), ...makeControlFlowTools()];
 }

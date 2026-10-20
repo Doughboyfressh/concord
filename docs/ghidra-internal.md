@@ -52,8 +52,9 @@ the approval hash cannot describe; a resolved one is deterministic.
 | `artifact.sleighCompiled` | `.sla` | Endianness, alignment, address spaces, registers, userops, subtables, provenance |
 | `artifact.compareSleighSource` | `.sla` + `.slaspec` | Whether a compiled table and a source file agree |
 | `artifact.disassemble` | `.sla` + bytes | The instructions those bytes decode to, and with `pcode:true` what each one does |
+| `artifact.controlFlow` | `.sla` + bytes | Basic blocks, their edges, and the call graph, from the entry points given |
 
-All nine are `read` effects over bytes already inside the workspace. None spawns a process or
+All ten are `read` effects over bytes already inside the workspace. None spawns a process or
 reaches the network, so none needs an approval.
 
 ### The `.sla` format
@@ -264,6 +265,53 @@ reporting a successful decode — an instruction missing an operand, presented a
 raises `BadDataError` there, and so does this now: the instruction reports
 `unresolved_subtable` rather than a confident partial answer. That one change took the exception
 count from 4,137 to 3.
+
+## Control flow
+
+P-code is architecture-independent, and this is where that stops being a claim and starts being
+leverage. `src/control-flow.mjs` reads only six operations — BRANCH, CBRANCH, BRANCHIND, CALL,
+CALLIND and RETURN — so one implementation recovers basic blocks and a call graph for all 189
+language variants. The file does not mention a single architecture.
+
+The rules are Ghidra's, from `FlowInfo::processInstruction` in flow.cc:270-370, and three of them
+are the opposite of a plausible guess:
+
+- **A call is not a control-flow edge.** `flow.cc` sets `startbasic` for CBRANCH, BRANCH, BRANCHIND
+  and RETURN only, so a call neither ends a basic block nor stops fallthrough. Treating it as a
+  jump splits a block and loses the return after it.
+- **A branch into the constant space is not an address.** It is a p-code-relative branch inside
+  that one instruction — used for conditional execution and string operations — and reading it as
+  an address invents a jump to a tiny number.
+- **A delay slot belongs to its branch.** The following instruction executes before the branch
+  takes effect, so it is attributed to the branch and flow resumes past it rather than treating it
+  as the successor.
+
+A fourth rule came out of writing it rather than reading it. A block that ends only because the
+next instruction is a branch target — the join after a conditional — still has a fallthrough edge.
+Deciding successors while partitioning instructions loses that edge, and the block then reads as
+unreachable code rather than as the path into a join. Successors are therefore read off each
+block's last instruction in a second pass.
+
+Reachability is followed from entry points, not swept linearly, so an address that appears in the
+result is one the analysis can explain. An indirect branch is reported as unresolved rather than
+omitted, because reading a jump table needs the table — which Ghidra also defers to a separate pass
+— and a missing edge looks like dead code.
+
+### Checked against real code
+
+```
+x86    test/jz/mov/ret     3 blocks; the join block keeps its fallthrough into the return
+x86    dec/jnz loop + call back edge 0x2006->0x2005; the call is a call edge, block runs on to RET
+x86    jmp eax             1 block, kind indirect, reported unresolved, no invented edge
+MIPS   beq + delay slot    block spans 8 bytes; the nop is the branch's, and 0x4008 is unreachable
+ARM    sub/cmp/bne loop    back edge to 0x5000, fallthrough to the bx lr
+```
+
+`artifact.controlFlow` exposes it as a `read` effect. Its base address is validated inside
+`execute` rather than by the input schema: the kernel's schema subset is explicit and
+`validateSchema` refuses any keyword outside it, so a `pattern` constraint would make every plan
+using the tool fail with `INVALID_SCHEMA` at compile time instead of producing a refusal that names
+what was wrong.
 
 ## What this does not do
 
