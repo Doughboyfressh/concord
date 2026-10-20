@@ -203,8 +203,112 @@ function checkSampling(result) {
  * launchers serve a browser, which is not an agent that can be asked anything, so they register
  * none of this rather than offering a tool that could only ever refuse.
  */
-export function makePeerTools({ channel } = {}) {
+/**
+ * Hand a brokered question to an agent whose client cannot be sampled, and wait for its answer.
+ *
+ * The question becomes an ordinary open letter, which is what makes this work at all: the watcher
+ * in mcp.mjs already notices the mailbox changing, quotes the newest open question in the
+ * description of `concord_answer`, and notifies the client that its tools changed. So the question
+ * reaches the agent by the one route that works on a client declaring no sampling, and the agent
+ * answers it with a tool it already has.
+ *
+ * Woken two ways on purpose. `fs.watch` is the fast path and is what makes this a rendezvous rather
+ * than a poll, but it is allowed to miss events on network and virtualised filesystems, and a
+ * missed event here would hang the asker for its whole deadline. The slow sweep underneath costs
+ * one directory read a second and converts that failure into a delay.
+ *
+ * Its reach is exactly the reach of the push it rides on: the question arrives when the client next
+ * reads its tools, which is not an instant this code controls, and a client that ignores
+ * listChanged will never look. That is why the deadline is reported rather than hidden.
+ */
+function rendezvous(directory, message, client, deadlineMs) {
+  const asked = fileMessage(directory, {
+    audience: 'agent',
+    subject: `Asked through the peer hub by ${message.fromClient ?? message.from ?? 'another session'}`,
+    message: message.question,
+  });
+  return new Promise((resolve, reject) => {
+    let watcher = null;
+    let sweep = null;
+    let timer = null;
+    const stop = () => {
+      try { watcher?.close(); } catch { /* already closed */ }
+      clearInterval(sweep);
+      clearTimeout(timer);
+    };
+    const look = () => {
+      let reply;
+      try { reply = readMailbox(directory).find((record) => record.replyTo === asked.seq); }
+      catch { return; }
+      if (!reply) return;
+      stop();
+      resolve({
+        text: reply.message, role: 'assistant', model: null, stopReason: null,
+        servedBy: client.name ?? null, via: 'rendezvous',
+      });
+    };
+    timer = setTimeout(() => {
+      stop();
+      reject(new HarnessError('PEER_HUB_UNANSWERED', `The question was delivered to ${client.name ?? 'the target session'} as mailbox message ${asked.seq}, which did not answer within the deadline`, { seq: asked.seq, via: 'rendezvous' }));
+    }, deadlineMs);
+    timer.unref?.();
+    try { watcher = fs.watch(directory, look); watcher.unref?.(); }
+    catch { /* no watcher here: the sweep below is the whole mechanism */ }
+    sweep = setInterval(look, 1000);
+    sweep.unref?.();
+    look(); // in case it was answered between filing and watching
+  });
+}
+
+/**
+ * Answer a question that arrived from another session, using this session's own client.
+ *
+ * This is what makes the hub a sampling broker rather than a message queue. The question crossed a
+ * process boundary to get here, and what happens next is an ordinary `sampling/createMessage` to
+ * the client on this stdio session — the same call `peer.ask` makes. So the answer is produced by
+ * the target's real model through the real protocol primitive; Concord routed the question and did
+ * nothing else to it.
+ *
+ * A session whose client never declared sampling refuses by name. It is the one case where the
+ * broker genuinely cannot help: there is no way to put text in front of that client's model, and
+ * pretending otherwise would return something Concord invented.
+ */
+export function createHubResponder({ channel, timeoutMs = DEFAULT_TIMEOUT_MS, mailboxDir = null, rendezvousMs = DEFAULT_TIMEOUT_MS } = {}) {
+  if (!channel) fail('PEER_CONFIG', 'A hub responder needs a client channel');
+  return async (message) => {
+    const client = channel.describeClient();
+    if (!client) fail('PEER_HUB_NO_CLIENT', 'No client has completed initialize on the session that was asked');
+    if (!channel.supports('sampling')) {
+      // The asymmetry worth naming: Claude Code declares elicitation and not sampling, so it can
+      // ask another session and cannot be asked by one. Refusing here would make the bus one-way
+      // for the most common client, so fall back to the push that does work on it — park the
+      // question as a letter, let the existing watcher advertise it in the tool description, and
+      // wait for the agent to answer it. Slower by an agent turn, and reported as a different
+      // mechanism rather than passed off as sampling.
+      if (mailboxDir) return rendezvous(mailboxDir, message, client, rendezvousMs);
+      fail('PEER_HUB_NO_SAMPLING', `The client on the target session (${client.name ?? 'unnamed'}) did not declare sampling, so its model cannot be asked`, { capabilities: client.capabilities });
+    }
+    const result = await channel.request('sampling/createMessage', {
+      messages: [{ role: 'user', content: { type: 'text', text: message.question } }],
+      maxTokens: message.maxTokens ?? 1024,
+      // Same rule as peer.ask: the question stands on its own. Inheriting whatever else that agent
+      // is working on would put text Concord never saw into an exchange it is accountable for.
+      includeContext: 'none',
+      ...(message.systemPrompt ? { systemPrompt: message.systemPrompt } : {}),
+    }, { timeoutMs });
+    return { ...checkSampling(result), servedBy: client.name ?? null, via: 'sampling' };
+  };
+}
+
+export function makePeerTools({ channel, hub } = {}) {
   if (!channel) fail('PEER_CONFIG', 'Peer tools need a client channel');
+  // A function rather than a value: tools are registered before any client has sent initialize, and
+  // the hub cannot be joined until the client has said what it can do. Resolving membership at call
+  // time is what lets the registry be built once and still describe a session that joined later.
+  const membership = () => {
+    try { return typeof hub === 'function' ? hub() : hub ?? null; }
+    catch { return null; }
+  };
 
   const askSchema = {
     type: 'object', additionalProperties: false, required: ['question'],
@@ -379,6 +483,97 @@ export function makePeerTools({ channel } = {}) {
           bytes: Buffer.byteLength(input.message),
           limitations: [
             'A notification has no reply, so this records that the line was written to the session and not that the client read, showed or understood it',
+          ],
+        };
+      },
+    },
+    {
+      /**
+       * Who else is connected, and what their client actually declared.
+       *
+       * Reported before anything is asked, because the alternative is learning by failure. Whether
+       * a peer can answer a question is a property of its client, not of Concord, and a caller
+       * that can read `sampling` in this list knows the difference between a peer that will answer
+       * and one that can only be left a letter.
+       */
+      name: 'peer.peers', version: '1.0.0', effect: 'read',
+      outputKeys: ['joined', 'role', 'self', 'peers', 'counts', 'limitations'],
+      inputSchema: { type: 'object', additionalProperties: false, properties: {} },
+      execute() {
+        const joined = membership();
+        if (!joined) {
+          return {
+            joined: false, role: null, self: null, peers: [], counts: { peers: 0, canAnswer: 0 },
+            limitations: ['This session is not on the peer hub, so no other session can be named. The mailbox still reaches them'],
+          };
+        }
+        const peers = joined.peers();
+        return {
+          joined: true, role: joined.role, self: joined.peerId,
+          peers: peers.map((peer) => ({
+            peerId: peer.peerId, client: peer.client, version: peer.version,
+            capabilities: peer.capabilities, self: peer.peerId === joined.peerId,
+            canAnswer: peer.capabilities.includes('sampling'),
+          })),
+          counts: { peers: peers.length, canAnswer: peers.filter((peer) => peer.capabilities.includes('sampling')).length },
+          limitations: [
+            'Capabilities are what each client declared at its own initialize, which is a claim by that client rather than something Concord verified',
+            'A peer leaves this list the moment its session closes, so presence here is evidence about now and not a guarantee for the next call',
+          ],
+        };
+      },
+    },
+    {
+      /**
+       * Ask a different session's agent, directly.
+       *
+       * `peer.ask` reaches the client on this session and nothing else; this reaches any session on
+       * the hub. The question is routed to the session that owns the named peer, which asks its own
+       * client with a real `sampling/createMessage` and sends the answer back.
+       *
+       * A network effect for the same reasons `peer.ask` is one, and one more: the answering agent
+       * is not even the party this session connected to. The text is evidence of what that agent
+       * said. It needs its own grant and it is taken from the journal on replay, because asking the
+       * same question twice does not produce the same answer.
+       */
+      name: 'peer.askPeer', version: '1.0.0', effect: 'network',
+      outputKeys: ['text', 'role', 'model', 'stopReason', 'to', 'servedBy', 'via', 'untrusted', 'limitations'],
+      inputSchema: {
+        type: 'object', additionalProperties: false, required: ['to', 'question'],
+        properties: {
+          to: { type: 'string', minLength: 1, maxLength: 64 },
+          question: { type: 'string', minLength: 1, maxLength: MAX_TEXT },
+          systemPrompt: { type: 'string', maxLength: MAX_TEXT },
+          maxTokens: { type: 'integer', minimum: 1, maximum: MAX_TOKENS },
+          intent: { type: 'string', maxLength: 256 },
+        },
+      },
+      async execute(input, context) {
+        const joined = membership();
+        if (!joined) fail('PEER_HUB_UNJOINED', 'This session is not on the peer hub, so another session cannot be asked directly');
+        const known = joined.peers().map((peer) => peer.peerId);
+        // Refusing here rather than at the hub names the alternatives in the error, which is the
+        // difference between a caller fixing a typo and a caller guessing.
+        if (!known.includes(input.to)) fail('PEER_HUB_UNKNOWN', `No connected session is named "${input.to}"`, { peers: known });
+        const deadline = Math.min(DEFAULT_TIMEOUT_MS, context?.policy?.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+        const answer = await joined.ask(input.to, input.question, {
+          maxTokens: input.maxTokens, systemPrompt: input.systemPrompt, timeoutMs: deadline, signal: context?.signal,
+        });
+        return {
+          text: typeof answer?.text === 'string' ? answer.text : '',
+          role: typeof answer?.role === 'string' ? answer.role : null,
+          model: typeof answer?.model === 'string' ? answer.model : null,
+          stopReason: typeof answer?.stopReason === 'string' ? answer.stopReason : null,
+          to: input.to,
+          servedBy: typeof answer?.servedBy === 'string' ? answer.servedBy : null,
+          // Which mechanism carried it. One field rather than an assumption, because the paths are
+          // not equivalent and a caller reading an answer deserves to know which one it came by.
+          via: typeof answer?.via === 'string' ? answer.via : 'unknown',
+          untrusted: true,
+          limitations: [
+            'This text was written by an agent in another session that Concord does not control, and is evidence of what that agent said rather than that it is true',
+            'Concord routed the question and did not read, filter or alter it, so the target saw exactly what was sent and nothing about this session',
+            'The exchange is live and not reproducible: the same question asked again will reach whatever that agent is at that moment, which is why replay takes this answer from the journal',
           ],
         };
       },

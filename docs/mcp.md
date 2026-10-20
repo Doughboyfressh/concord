@@ -216,6 +216,62 @@ with a `$task` key — plausible for `json.value`/`json.hash`'s arbitrary payloa
 is correct, by-design kernel behavior inherited from every other transport; `test/mcp.test.mjs` has a
 dedicated test for it so it reads as understood, not alarming.
 
+## Talking to another session
+
+`peer.ask` performs real MCP sampling: it issues `sampling/createMessage` and the connected client's model
+answers. Its reach was always one client — the one on the other end of this stdio session — because stdio
+means one server process per client. Two agents on the same machine each had a working sampling channel and
+no way to reach each other, and the only thing joining them was the mailbox, which is a dead drop: a file is
+written, nothing is woken, and a question waits until somebody looks. The message that prompted this work sat
+for twenty minutes.
+
+`src/peer-hub.mjs` brokers between sessions. The first Concord session to start binds a local endpoint — a
+named pipe on Windows, a unix socket under `runs/peer-hub/` elsewhere, both from `node:net` — and becomes the
+hub; later sessions connect to it and register the identity and capabilities their client declared at
+`initialize`. The endpoint's name carries a digest of the workspace root, so two checkouts on one machine
+never find each other.
+
+Two tools use it. `peer.peers` (a `read` effect) lists who is connected and what each client declared,
+including `canAnswer`, so a caller learns whether a direct question is possible instead of discovering it by
+failure. `peer.askPeer` (a `network` effect, like `peer.ask`, needing its own grant and taken from the journal
+on replay) names a peer and asks it.
+
+What happens next is the point: the hub routes the question to the session that owns that peer, and **that
+session issues a genuine `sampling/createMessage` to its own client**. The answer is produced by the target's
+real model through the real protocol primitive. Concord carried the question and did nothing else to it —
+`includeContext` is `none`, so the target sees exactly what was sent and nothing about the asking session.
+
+Three mechanisms can carry a question and they are not equivalent, so every answer reports which one did, in
+a `via` field:
+
+- `sampling` — the target's client declared sampling and its model answered. Milliseconds.
+- `rendezvous` — the target's client declared no sampling, so the question was parked as an ordinary mailbox
+  letter and the existing watcher advertised it in the description of `concord_answer`, which is the push
+  that does work on such a client. The agent answers with a tool it already has. Costs an agent turn, and
+  reports `model: null`, because nothing was sampled — a person or an agent typed that text.
+- refusal — the target cannot be sampled and no mailbox is configured, so `PEER_HUB_NO_SAMPLING` names the
+  capability that is missing rather than returning something Concord invented.
+
+This asymmetry is real and worth stating plainly: measured at its own `initialize`, Claude Code declares
+`elicitation` and not `sampling`, so it can ask another session directly and must be asked by rendezvous.
+Codex declaring `sampling` is what makes the fast path work in that direction.
+
+The mailbox is not replaced. The socket is a doorbell and the file is the record: an exchange that exists
+only as two closed sockets is not evidence and cannot be replayed, which is why `peer.askPeer` is a `network`
+effect whose answer the journal keeps. Latency is what the hub fixes, not accountability.
+
+Failure is bounded in the directions that matter. A session that goes away mid-question fails its asker at
+once with `PEER_HUB_GONE` rather than leaving it to wait out a two-minute deadline; an unknown peer is refused
+by name with the names that would have worked; a connection without the hub token is denied before it can ask
+anything and never enters the roster; and a session that cannot reach the hub at all simply reports
+`joined: false` and says the mailbox still reaches everyone. Joining is additive — Concord has never failed to
+start because a socket was busy.
+
+The token lives in `runs/peer-hub/token`. Its trust boundary is the workspace: anything that can read the
+directory can read the token, which is the same boundary `runs/peer-mailbox` already had. It guards against a
+stray local process stumbling in, and does not claim to withstand a hostile local user who already holds the
+directory.
+
 ## What is and isn't covered
 
 - **Covered, tested against the real stdio protocol:** the `initialize`/`notifications/initialized`

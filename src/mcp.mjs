@@ -8,7 +8,8 @@ import { runPlan } from './engine.mjs';
 import { makeBuiltinTools } from './builtins.mjs';
 import { loadSourceLock, makeSourceTools } from './sources.mjs';
 import { makeCapabilityTools } from './capabilities.mjs';
-import { createClientChannel, makePeerTools, makeMailboxTools, readMailbox, fileMessage } from './peer.mjs';
+import { createClientChannel, createHubResponder, makePeerTools, makeMailboxTools, readMailbox, fileMessage } from './peer.mjs';
+import { joinHub } from './peer-hub.mjs';
 import { makeSkillStoreTools } from './skillstore.mjs';
 import { makeGovernanceTools } from './governance.mjs';
 import { makeArtifactTools } from './artifacts.mjs';
@@ -157,7 +158,7 @@ function publicChatState(snapshot) {
  * the chat harness as five `concord_*` tools. Collisions in the dotted-to-underscored name
  * map are asserted here, at construction, rather than at first call.
  */
-export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, harness, instructionModules, channel = null, uiApp = null, mailboxDir = null }) {
+export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, harness, instructionModules, channel = null, uiApp = null, mailboxDir = null, onClientReady = null }) {
   const visibleRegistry = new Map([...registry].filter(([name, tool]) => policy.allowedTools.includes(name) && policy.allowedEffects.includes(tool.effect)));
   const nameMap = new Map();
   const wrapped = new Set();
@@ -383,6 +384,11 @@ export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, h
         // What the client says it can do decides what Concord may ask it. Recorded here, and
         // reported by peer.capabilities, so an unanswerable question refuses instead of hanging.
         channel?.rememberClient(params);
+        // The first moment this session knows who it is and what it can do, which is the earliest
+        // it can usefully join the peer hub: a session registered before initialize would advertise
+        // an identity of nulls and a capability list nobody declared. Deliberately not awaited —
+        // joining is additive, and a hub that cannot be reached must delay nobody's initialize.
+        try { onClientReady?.(channel?.describeClient() ?? null); } catch { /* a hub is a convenience, never a precondition */ }
         return {
           protocolVersion: PROTOCOL_VERSION,
           // `logging` is declared because peer.tell sends notifications/message. A server that
@@ -455,7 +461,24 @@ export async function main(argv = process.argv.slice(2)) {
   // two are different processes that never meet.
   // Redirectable so a test, or a second operator, can hold an exchange of its own.
   const mailboxDir = path.resolve(flags.mailbox ?? path.join(root, 'runs', 'peer-mailbox'));
-  for (const tool of [...makePeerTools({ channel }), ...makeMailboxTools({ directory: mailboxDir })]) {
+  /**
+   * Membership of the peer hub, which is how this session reaches agents on other sessions.
+   *
+   * Held in a mutable binding and read through a function because the registry is built now and
+   * the hub cannot be joined until a client has sent initialize. Every failure here is swallowed
+   * on purpose: the hub makes an existing capability faster, and a Concord that refused to start
+   * because a socket was busy would be a worse trade than the latency it saves. When it is absent
+   * `peer.peers` reports `joined: false` and says the mailbox still reaches everyone.
+   */
+  let hubMembership = null;
+  const respond = createHubResponder({ channel, mailboxDir });
+  const joinPeerHub = (client) => {
+    if (hubMembership || !client) return;
+    joinHub({ root: workspaceRoot, identity: { name: client.name, version: client.version, capabilities: client.capabilities }, onServe: respond })
+      .then((membership) => { hubMembership = membership; })
+      .catch(() => { hubMembership = null; });
+  };
+  for (const tool of [...makePeerTools({ channel, hub: () => hubMembership }), ...makeMailboxTools({ directory: mailboxDir })]) {
     if (registry.has(tool.name)) throw new HarnessError('MCP_CONFIG', 'Peer tool name collision', { tool: tool.name });
     registry.set(tool.name, tool);
   }
@@ -479,7 +502,7 @@ export async function main(argv = process.argv.slice(2)) {
   // the source lock describe the same bytes.
   const uiAppPath = path.join(root, 'app', 'mcp-app.html');
   const uiApp = fs.existsSync(uiAppPath) ? fs.readFileSync(uiAppPath, 'utf8') : null;
-  const server = createMcpServer({ registry, policy, sourceLock, workspaceRoot, harness, instructionModules: resourceContext.instructions, channel, uiApp, mailboxDir });
+  const server = createMcpServer({ registry, policy, sourceLock, workspaceRoot, harness, instructionModules: resourceContext.instructions, channel, uiApp, mailboxDir, onClientReady: joinPeerHub });
 
   // Watch the exchange and tell the client when what it should know has changed. This is the
   // push: the question is already in the tool description by the time the client re-reads, so
