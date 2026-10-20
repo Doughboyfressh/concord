@@ -19,9 +19,16 @@ import { deflateSync } from 'node:zlib';
 
 // Element and attribute ids from Ghidra/Features/Decompiler/src/decompile/cpp/slaformat.cc.
 const ELEM = { sleigh: 33, spaces: 34, sourcefiles: 35, sourcefile: 36, space: 37, space_unique: 46,
-  symbol_table: 38, scope: 22, varnode_sym_head: 24, userop_head: 26, subtable_sym_head: 72 };
-const ATTR = { id: 3, scope: 13, index: 9, name: 12, size: 15, version: 34, bigendian: 35, align: 36,
-  uniqbase: 37, defaultspace: 41, delay: 42, physical: 44 };
+  symbol_table: 38, scope: 22, varnode_sym_head: 24, userop_head: 26, subtable_sym_head: 72,
+  subtable_sym: 71, operand_sym_head: 14, operand_sym: 13, constructor: 20, oper: 15, print: 8,
+  opprint: 17, decision: 16, pair: 9, instruct_pat: 18, pat_block: 7, mask_word: 6,
+  operand_exp: 12, tokenfield: 27 };
+const ATTR = { val: 2, id: 3, space: 4, off: 6, mask: 8, index: 9, nonzero: 10, piece: 11, name: 12,
+  scope: 13, startbit: 14, size: 15, table: 16, ct: 17, minlen: 18, base: 19, number: 20,
+  context: 21, parent: 22, line: 24, source: 25, length: 26, first: 27, shift: 29, endbit: 30,
+  signbit: 31, endbyte: 32, startbyte: 33, version: 34, bigendian: 35, align: 36, uniqbase: 37,
+  defaultspace: 41, delay: 42, wordsize: 43, physical: 44, scopesize: 45, symbolsize: 46,
+  numct: 53 };
 
 /** 7 bits of payload per byte, most significant first, with the unused bit always set. */
 const payload = (value) => {
@@ -38,7 +45,10 @@ const close = (id) => header(0x80, id);
 const attribute = (id, type, body = []) => [...header(0xc0, id), (type << 4) | body.length, ...body];
 
 const attrBool = (id, value) => [...header(0xc0, id), (1 << 4) | (value ? 1 : 0)];
-const attrSigned = (id, value) => attribute(id, 2, payload(value));
+// A negative integer has its own type code and is stored negated — marshal.hh's
+// TYPECODE_SIGNEDINT_NEGATIVE. Encoding one as a positive with an empty payload writes zero
+// instead, which is how `firstWhitespace: -1` silently became 0 and rendered an empty mnemonic.
+const attrSigned = (id, value) => (value < 0 ? attribute(id, 3, payload(-value)) : attribute(id, 2, payload(value)));
 const attrUnsigned = (id, value) => attribute(id, 4, payload(value));
 const attrString = (id, value) => {
   const bytes = [...Buffer.from(value, 'utf8')];
@@ -89,6 +99,115 @@ export function buildSla({ bigEndian = false, alignment = 1, defaultSpace = 'ram
     ...close(ELEM.sleigh),
   ];
   // "sla" plus the one byte format version, then a zlib stream — not gzip and not raw deflate.
+  return Buffer.concat([Buffer.from('sla'), Buffer.from([4]), deflateSync(Buffer.from(bytes))]);
+}
+
+/**
+ * A table that can actually be decoded, not just described.
+ *
+ * `buildSla` above carries the facts a reader reports — endianness, spaces, symbol names — but no
+ * constructors and no decision tree, so a decoder given it would correctly find nothing to match.
+ * This one is a complete miniature language, which is what it takes to exercise the engine without
+ * shipping an 876 MB distribution:
+ *
+ *   op=0x00  ->  halt            a mnemonic with no operands
+ *   op=0x01  ->  inc             a second leaf, so the decision tree must discriminate
+ *   op=0x02  ->  ld 0xNN         one immediate operand in a second byte, so length is 2
+ *
+ * The root decision reads two bits rather than scanning a list, which exercises the bit-indexed
+ * descent in `DecisionNode::resolve`; the fourth branch is deliberately empty so an unmatched
+ * opcode is reported rather than mistaken for the nearest neighbour.
+ *
+ * Bit numbering here is Ghidra's: bit 0 is the most significant bit of the first instruction byte,
+ * so the low two bits of the opcode are bits 6 and 7. Getting that backwards is the easiest way to
+ * write a fixture that passes against a decoder which is wrong in the same direction, which is why
+ * the engine is also checked against real shipped tables.
+ */
+const INSTRUCTION_SYMBOL = 0;
+const OPERAND_SYMBOL = 1;
+
+// A mask/value pair over the first instruction byte, already normalized the way PatternBlock
+// writes it: the leading mask byte is nonzero, so the offset stays 0.
+const opcodePattern = (opcode) => [
+  ...open(ELEM.instruct_pat),
+  ...open(ELEM.pat_block), ...attrSigned(ATTR.off, 0), ...attrSigned(ATTR.nonzero, 1),
+  ...open(ELEM.mask_word), ...attrUnsigned(ATTR.mask, 0xff000000), ...attrUnsigned(ATTR.val, opcode << 24), ...close(ELEM.mask_word),
+  ...close(ELEM.pat_block),
+  ...close(ELEM.instruct_pat),
+];
+const terminal = (number, pairs) => [
+  ...open(ELEM.decision), ...attrSigned(ATTR.number, number), ...attrBool(ATTR.context, false),
+  ...attrSigned(ATTR.startbit, 0), ...attrSigned(ATTR.size, 0),
+  ...pairs.flatMap(({ id, opcode }) => [
+    ...open(ELEM.pair), ...attrSigned(ATTR.id, id), ...opcodePattern(opcode), ...close(ELEM.pair),
+  ]),
+  ...close(ELEM.decision),
+];
+const constructor = (pieces, { length, firstWhitespace, operands = [] }) => [
+  ...open(ELEM.constructor), ...attrUnsigned(ATTR.parent, INSTRUCTION_SYMBOL),
+  ...attrSigned(ATTR.first, firstWhitespace), ...attrSigned(ATTR.length, length),
+  ...attrSigned(ATTR.source, 0), ...attrSigned(ATTR.line, 1),
+  ...operands.flatMap((id) => [...open(ELEM.oper), ...attrUnsigned(ATTR.id, id), ...close(ELEM.oper)]),
+  ...pieces.flatMap((piece) => (typeof piece === 'string'
+    ? [...open(ELEM.print), ...attrString(ATTR.piece, piece), ...close(ELEM.print)]
+    : [...open(ELEM.opprint), ...attrSigned(ATTR.id, piece.operand), ...close(ELEM.opprint)])),
+  ...close(ELEM.constructor),
+];
+
+export function buildDecodableSla() {
+  const bytes = [
+    ...open(ELEM.sleigh),
+    ...attrSigned(ATTR.version, 4), ...attrBool(ATTR.bigendian, false),
+    ...attrSigned(ATTR.align, 1), ...attrUnsigned(ATTR.uniqbase, 0x1000),
+    ...open(ELEM.sourcefiles),
+    ...open(ELEM.sourcefile), ...attrString(ATTR.name, 'toy.slaspec'), ...attrSigned(ATTR.index, 0), ...close(ELEM.sourcefile),
+    ...close(ELEM.sourcefiles),
+    ...open(ELEM.spaces), ...attrString(ATTR.defaultspace, 'ram'),
+    ...space(ELEM.space_unique, { name: 'unique', index: 1, size: 4 }),
+    ...space(ELEM.space, { name: 'ram', index: 2, size: 4, delay: 1 }),
+    ...close(ELEM.spaces),
+
+    ...open(ELEM.symbol_table), ...attrSigned(ATTR.scopesize, 1), ...attrSigned(ATTR.symbolsize, 2),
+    ...open(ELEM.scope), ...attrUnsigned(ATTR.id, 0), ...attrUnsigned(ATTR.parent, 0), ...close(ELEM.scope),
+    // Shells first: a constructor names its operands by id, so both symbols must exist before any
+    // content is read. SymbolTable::decode does the same in the same order.
+    ...open(ELEM.subtable_sym_head), ...attrString(ATTR.name, 'instruction'),
+    ...attrUnsigned(ATTR.id, INSTRUCTION_SYMBOL), ...attrSigned(ATTR.scope, 0), ...close(ELEM.subtable_sym_head),
+    ...open(ELEM.operand_sym_head), ...attrString(ATTR.name, 'imm8'),
+    ...attrUnsigned(ATTR.id, OPERAND_SYMBOL), ...attrSigned(ATTR.scope, 0), ...close(ELEM.operand_sym_head),
+
+    // The immediate: one byte at constructor-relative offset 1, read as an unsigned 8-bit token.
+    // The local expression names the operand's own slot; the defining expression is what produces
+    // its value, which is the field in the second byte.
+    ...open(ELEM.operand_sym), ...attrUnsigned(ATTR.id, OPERAND_SYMBOL),
+    ...attrSigned(ATTR.index, 0), ...attrSigned(ATTR.off, 1), ...attrSigned(ATTR.base, -1),
+    ...attrSigned(ATTR.minlen, 1),
+    ...open(ELEM.operand_exp), ...attrSigned(ATTR.index, 0),
+    ...attrUnsigned(ATTR.table, INSTRUCTION_SYMBOL), ...attrUnsigned(ATTR.ct, 2), ...close(ELEM.operand_exp),
+    ...open(ELEM.tokenfield), ...attrBool(ATTR.bigendian, false), ...attrBool(ATTR.signbit, false),
+    ...attrSigned(ATTR.startbit, 0), ...attrSigned(ATTR.endbit, 7),
+    ...attrSigned(ATTR.startbyte, 0), ...attrSigned(ATTR.endbyte, 0), ...attrSigned(ATTR.shift, 0),
+    ...close(ELEM.tokenfield),
+    ...close(ELEM.operand_sym),
+
+    ...open(ELEM.subtable_sym), ...attrUnsigned(ATTR.id, INSTRUCTION_SYMBOL), ...attrSigned(ATTR.numct, 3),
+    ...constructor(['halt'], { length: 1, firstWhitespace: -1 }),
+    ...constructor(['inc'], { length: 1, firstWhitespace: -1 }),
+    // "ld", then a whitespace piece, then the operand slot. firstWhitespace is the index of that
+    // separator, which is how Ghidra splits a mnemonic from its body.
+    ...constructor(['ld', ' ', { operand: 0 }], { length: 1, firstWhitespace: 1, operands: [OPERAND_SYMBOL] }),
+    // Two bits at bits 6 and 7 — the low two bits of the opcode byte — select the branch.
+    ...open(ELEM.decision), ...attrSigned(ATTR.number, 0), ...attrBool(ATTR.context, false),
+    ...attrSigned(ATTR.startbit, 6), ...attrSigned(ATTR.size, 2),
+    ...terminal(1, [{ id: 0, opcode: 0x00 }]),
+    ...terminal(2, [{ id: 1, opcode: 0x01 }]),
+    ...terminal(3, [{ id: 2, opcode: 0x02 }]),
+    ...terminal(4, []),
+    ...close(ELEM.decision),
+    ...close(ELEM.subtable_sym),
+    ...close(ELEM.symbol_table),
+    ...close(ELEM.sleigh),
+  ];
   return Buffer.concat([Buffer.from('sla'), Buffer.from([4]), deflateSync(Buffer.from(bytes))]);
 }
 
@@ -293,7 +412,12 @@ export function writeGhidraFixtures(dir) {
   writeFileSync(path.join(dir, 'toy.opinion'), OPINION);
   writeFileSync(path.join(dir, 'toy.slaspec'), SLASPEC);
   writeFileSync(path.join(dir, 'toy.sla'), buildSla());
+  // A decodable table and some bytes written in its language, so artifact.disassemble is exercised
+  // on the path that actually decodes rather than on its table-unreadable branch.
+  writeFileSync(path.join(dir, 'toy-decode.sla'), buildDecodableSla());
+  writeFileSync(path.join(dir, 'toy-code.bin'), Buffer.from([0x00, 0x01, 0x02, 0x42, 0x00]));
   return {
+    'artifact.disassemble': { table: 'toy-decode.sla', path: 'toy-code.bin' },
     'artifact.ghidraLanguages': { path: 'toy.ldefs' },
     'artifact.ghidraProcessorSpec': { path: 'toy.pspec' },
     'artifact.ghidraCompilerSpec': { path: 'toy.cspec' },

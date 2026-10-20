@@ -243,7 +243,7 @@ function valueChildren(node, names) {
  * `marshal.hh`; a header whose top two bits are 00 cannot occur in a valid stream, because every
  * byte of the encoding is non-zero and carries one of the three record headers.
  */
-function* slaEvents(bytes) {
+export function* slaEvents(bytes) {
   let position = 0;
   let steps = 0;
   while (position < bytes.length) {
@@ -286,7 +286,7 @@ function* slaEvents(bytes) {
 }
 
 /** Inflate the zlib stream a `.sla` wraps, after checking the four byte header. */
-function openSla(bytes) {
+export function openSla(bytes) {
   if (bytes.length < 6 || bytes[0] !== 0x73 || bytes[1] !== 0x6c || bytes[2] !== 0x61) {
     return { ok: false, reason: 'not_a_sla', detail: 'A compiled SLEIGH table starts with the bytes "sla"' };
   }

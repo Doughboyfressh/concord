@@ -9,7 +9,8 @@ across 59 processor families; 86 `.pspec` files describe each processor's regist
 and memory-mapped ranges; 105 `.cspec` files describe each compiler's calling conventions; 29
 `.opinion` files map a binary's header fields onto a language; and 137 `.sla` files carry the
 compiled decode tables. None of that is code. All of it is provable from bytes, so all of it is
-read natively here, by eight tools in `src/ghidra.mjs`, with no dependency of any kind.
+read natively here, by eight tools in `src/ghidra.mjs`, with no dependency of any kind — and so is
+the decoder that consumes it, in `src/sleigh.mjs`.
 
 The rest is **an engine that needs a Java runtime**, and it cannot come inside. That is the part
 worth being precise about, because it looks like it should be possible.
@@ -50,8 +51,9 @@ the approval hash cannot describe; a resolved one is deterministic.
 | `artifact.sleighSource` | `.slaspec`, `.sinc` | Declarations with their preprocessor guards intact |
 | `artifact.sleighCompiled` | `.sla` | Endianness, alignment, address spaces, registers, userops, subtables, provenance |
 | `artifact.compareSleighSource` | `.sla` + `.slaspec` | Whether a compiled table and a source file agree |
+| `artifact.disassemble` | `.sla` + bytes | The instructions those bytes decode to under that language |
 
-All eight are `read` effects over bytes already inside the workspace. None spawns a process or
+All nine are `read` effects over bytes already inside the workspace. None spawns a process or
 reaches the network, so none needs an approval.
 
 ### The `.sla` format
@@ -122,6 +124,75 @@ attribute id tables from `Ghidra/Features/Decompiler/src/decompile/cpp/slaformat
 encoding from `marshal.hh`, so it is a derivative work: preserve this attribution and the upstream
 `NOTICE` when redistributing. The entry in `sources.lock.json` records the same, pinned to release
 `ghidra_12.1.4_PUBLIC_20260921`.
+
+## The decode engine
+
+The specification corpus is half the story. The other half is the engine that turns bytes into
+instructions, and that one *is* portable: `src/sleigh.mjs` is a SLEIGH decoder in Node with no
+dependency of any kind, driven by the same 137 compiled tables the readers above decode.
+
+The reason it is worth porting is the ratio. The decode and lift layer is roughly 12,000 lines of
+Ghidra's C++ — `sleigh.cc`, `slghpattern.cc`, `context.cc`, `marshal.cc` — against ~157,000 for the
+decompiler proper. And it is table-driven, so one engine plus the shipped tables is instruction
+decode for 189 language variants across 59 processor families rather than 59 hand-written backends.
+
+The algorithms are Ghidra's, because faithfulness is the whole requirement:
+
+| Here | Ghidra |
+| --- | --- |
+| bit-indexed decision descent, linear scan at the leaf | `DecisionNode::resolve`, slghsymbol.cc:2344 |
+| `(mask & data) == value`, 32 bits at a time | `PatternBlock::isInstructionMatch`, slghpattern.cc:464 |
+| the iterative operand walk | `Sleigh::resolve`, sleigh.cc:609 |
+| absolute offsets, relative lengths | `ParserWalkerChange::calcCurrentLength`, context.cc |
+| big-endian read then byte-swap if little | `TokenField::getValue`, slghpatexpress.cc |
+
+Two facts about the format shape everything else. The instruction buffer is filled with raw memory
+bytes and never byte-swapped — `loadFill` does no swapping — so pattern matching always reads the
+stream big-endian-wise and a language's endianness lives entirely in token field extraction. And
+operand offsets are absolute from the start of the instruction while lengths are relative to their
+constructor; conflating those is the standard way to get variable-length decode subtly wrong.
+
+`artifact.disassemble` exposes it as a `read` effect over two workspace files, the table and the
+bytes. It needs no approval and is a pure function of its input, so a recorded run replays. Each
+line reports the constructors that matched, so a disassembly can be traced back to the SLEIGH that
+produced it instead of being taken on trust, and addresses leave as hex strings because a 64-bit
+address exceeds the safe integer range and `canonical` rejects a BigInt outright.
+
+### Context is not in the table
+
+The one input the compiled table does not carry is the initial context, and it is not optional.
+x86 selects its operand size from the `opsize` and `addrsize` context fields, so a table decoded
+with context left at zero reports `PUSH BP` where the 32-bit language means `PUSH EBP` — correct
+for the bits it was given and wrong about the program. Those defaults are declared in the `.pspec`
+`context_data` block, which `artifact.ghidraProcessorSpec` already reads, so the caller supplies
+them by name and a name the language does not declare is refused rather than ignored.
+
+### What the engine was checked against
+
+Twenty-nine instruction encodings whose disassembly is known independently, across ten
+architectures, all decoding correctly:
+
+```
+6502      ea -> NOP            a942 -> LDA #0x42       4c3412 -> JMP 0x1234
+x86-32    55 -> PUSH EBP       89e5 -> MOV EBP,ESP     b878563412 -> MOV EAX,0x12345678
+x86-64    4889e5 -> MOV RBP,RSP                        0f05 -> SYSCALL
+ARM7      1eff2fe1 -> bx lr    010080e2 -> add r0,r0,#0x1
+AARCH64   1f2003d5 -> nop      c0035fd6 -> ret
+MIPS32    00000000 -> nop      03e00008 -> jr ra
+PowerPC   4e800020 -> blr      60000000 -> ori r0,r0,0x0
+JVM, 8051, Z80                 nop, RET, iadd
+```
+
+Two of those answers corrected the expectation rather than the code. PowerPC declares no `nop`
+constructor anywhere in its module, so `ori r0,r0,0x0` is what the table really says; and ARM's
+`ARMinstructions.sinc:2695` defines `:cpy^COND Rd,rm` for `E1A00000` under `VERSION_6`, which ARM7
+defines, with a comment calling `cpy` a pre-UAL synonym for `mov`. Both times the engine was right
+and the reference was wrong.
+
+All 137 shipped tables also load and probe without a single failure or exception — 130,872
+constructors, 15,139 subtables, 83,339 register varnodes and 24,794 userops, at 22 ms per table.
+The constructor total equals the count the reader reports from element frequencies alone, which
+checks the engine's symbol table walk against the reader's independent one.
 
 ## What this does not do
 

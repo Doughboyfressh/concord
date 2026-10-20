@@ -153,6 +153,53 @@ export function ghidraExercises() {
           && out.unstated.find((entry) => entry.field === 'endian').reason === 'unresolved_macro'
           && out.agreements.some((entry) => entry.field === 'alignment');
       },
+      family: 'ghidra', tool: 'artifact.disassemble', workspace: 'temp',
+      fixture: (dir) => {
+        writeGhidraFixtures(dir);
+        fs.writeFileSync(path.join(dir, 'code.bin'), Buffer.from([0x00, 0x02, 0x7f, 0x03, 0x00]));
+      },
+      plan: task('artifact.disassemble', { table: 'toy-decode.sla', path: 'code.bin', address: '0x400000', limit: 8 }),
+      expect: (r) => {
+        const out = r.results.a;
+        const texts = out.instructions.map((instruction) => instruction.text);
+        return out.supported === true
+          && texts[0] === 'halt' && texts[1] === 'ld 0x7f'
+          && out.instructions[1].length === 2
+          && out.instructions[1].address === '0x400001'
+          && out.instructions[2].decoded === false
+          && out.counts.decoded === 2 && out.counts.undecoded === 1
+          && out.counts.bytesDecoded === 3 && out.counts.bytesSelected === 5
+          && out.limitations.some((line) => /No initial context was supplied/.test(line));
+      },
+      lesson: 'artifact.disassemble decodes instructions from a compiled SLEIGH table and a byte range, as a read effect over two files already in the workspace: it needs no approval and is a pure function of its input, so a recorded run replays. Each line reports the constructors that matched, which is what lets a disassembly be traced back to the SLEIGH that produced it rather than taken on trust. Addresses leave as hex strings because a 64-bit address exceeds the safe integer range and canonical rejects a BigInt outright, so a numeric address would either round silently or fail the kernel encoding check. Decoding stops at the first position no constructor claims rather than resynchronising at a guessed boundary, and the byte counts make that visible. Supplying no initial context is disclosed, because a language whose decode depends on context decodes in whatever its zeroed context selects: x86 without opsize from the .pspec reports PUSH BP where the 32-bit language means PUSH EBP, which is correct for the bits it was given and wrong about the program.',
+    },
+    {
+      family: 'ghidra', tool: 'artifact.disassemble', workspace: 'temp',
+      fixture: (dir) => {
+        writeGhidraFixtures(dir);
+        fs.writeFileSync(path.join(dir, 'described.sla'), buildSla());
+      },
+      plan: task('artifact.disassemble', { table: 'described.sla', path: 'toy-code.bin' }),
+      // A table with symbol names and spaces but no decision tree has nothing to match. Reporting
+      // a decode would be inventing one.
+      expect: (r) => r.results.a.supported === true && r.results.a.counts.decoded === 0
+        && r.results.a.instructions[0].decoded === false
+        && r.results.a.instructions[0].reason === 'no_matching_constructor',
+      lesson: 'artifact.disassemble distinguishes a table it cannot read from a table that matches nothing. A compiled table carrying symbol names and address spaces but no constructors loads successfully and then decodes nothing, which is reported as an undecoded position with reason no_matching_constructor rather than as a failure to read the table. The distinction matters because the two call for different actions: one means the wrong file was supplied, the other means these bytes are not instructions in this language.',
+    },
+    {
+      family: 'ghidra', tool: 'artifact.compareSleighSource', workspace: 'temp',
+      fixture: (dir) => {
+        writeGhidraFixtures(dir);
+        fs.writeFileSync(path.join(dir, 'macro.slaspec'), 'define endian=$(ENDIAN);\ndefine alignment=1;\n');
+      },
+      plan: task('artifact.compareSleighSource', { compiled: 'toy.sla', source: 'macro.slaspec' }),
+      expect: (r) => {
+        const out = r.results.a;
+        return out.disagreements.length === 0
+          && out.unstated.find((entry) => entry.field === 'endian').reason === 'unresolved_macro'
+          && out.agreements.some((entry) => entry.field === 'alignment');
+      },
       lesson: 'artifact.compareSleighSource has three outcomes rather than two, and the third is the point: a source file that writes its endianness as an unresolved macro has not disagreed with the compiled table, it has not spoken. Recording that as a mismatch would manufacture a finding out of the preprocessor, so it lands in unstated with the reason it could not be compared, while a fact the source does state unconditionally is still compared normally in the same call. Across the 137 shipped table and source pairs this reports agreements and no disagreements at all, which is a joint check: the binary decoder and the text reader are verified against each other rather than each only against its own format.',
     },
   ];
