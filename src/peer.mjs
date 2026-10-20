@@ -222,9 +222,11 @@ function checkSampling(result) {
  * listChanged will never look. That is why the deadline is reported rather than hidden.
  */
 function rendezvous(directory, message, client, deadlineMs) {
+  // The subject names both ends, because the mailbox is shared by every session and a letter that
+  // names only its sender does not tell a reader whether it was meant for them.
   const asked = fileMessage(directory, {
     audience: 'agent',
-    subject: `Asked through the peer hub by ${message.fromClient ?? message.from ?? 'another session'}`,
+    subject: `Asked through the peer hub by ${message.fromClient ?? message.from ?? 'another session'} for ${client.name ?? 'the target session'}`,
     message: message.question,
   });
   return new Promise((resolve, reject) => {
@@ -242,9 +244,15 @@ function rendezvous(directory, message, client, deadlineMs) {
       catch { return; }
       if (!reply) return;
       stop();
+      // servedBy is null on purpose, and it was wrong before this: the mailbox is shared by every
+      // session, the letter names no recipient the kernel can enforce, and a reply records no
+      // author. So the first agent to answer wins even when it is not the peer the question was
+      // routed to — observed live, with a question addressed to one Claude answered by a different
+      // one. Naming the target here would attribute text to a party that may not have written it,
+      // which is the one thing this layer must never do.
       resolve({
         text: reply.message, role: 'assistant', model: null, stopReason: null,
-        servedBy: client.name ?? null, via: 'rendezvous',
+        servedBy: null, via: 'rendezvous', answeredSeq: reply.seq, askedSeq: asked.seq,
       });
     };
     timer = setTimeout(() => {
@@ -537,7 +545,7 @@ export function makePeerTools({ channel, hub } = {}) {
        * same question twice does not produce the same answer.
        */
       name: 'peer.askPeer', version: '1.0.0', effect: 'network',
-      outputKeys: ['text', 'role', 'model', 'stopReason', 'to', 'servedBy', 'via', 'untrusted', 'limitations'],
+      outputKeys: ['text', 'role', 'model', 'stopReason', 'to', 'servedBy', 'via', 'askedSeq', 'answeredSeq', 'untrusted', 'limitations'],
       inputSchema: {
         type: 'object', additionalProperties: false, required: ['to', 'question'],
         properties: {
@@ -569,11 +577,22 @@ export function makePeerTools({ channel, hub } = {}) {
           // Which mechanism carried it. One field rather than an assumption, because the paths are
           // not equivalent and a caller reading an answer deserves to know which one it came by.
           via: typeof answer?.via === 'string' ? answer.via : 'unknown',
+          // Present and null on the sampling path rather than absent, so a caller never has to
+          // branch on whether a key exists. They identify the two mailbox letters a rendezvous
+          // used, which is the only handle a caller has on who actually answered.
+          askedSeq: Number.isInteger(answer?.askedSeq) ? answer.askedSeq : null,
+          answeredSeq: Number.isInteger(answer?.answeredSeq) ? answer.answeredSeq : null,
           untrusted: true,
           limitations: [
             'This text was written by an agent in another session that Concord does not control, and is evidence of what that agent said rather than that it is true',
             'Concord routed the question and did not read, filter or alter it, so the target saw exactly what was sent and nothing about this session',
             'The exchange is live and not reproducible: the same question asked again will reach whatever that agent is at that moment, which is why replay takes this answer from the journal',
+            ...(answer?.via === 'rendezvous'
+              // Not a caveat about trust but about identity. A rendezvous rides the shared mailbox,
+              // which has no recipient the kernel enforces and records no author on a reply, so the
+              // first agent to answer wins even if it is not the one named in `to`.
+              ? ['Delivered by rendezvous through the shared mailbox rather than by sampling, so the answer came from whichever agent answered that letter first and is not proven to be the peer named in `to`. servedBy is null for that reason, and askedSeq and answeredSeq identify the exchange in the mailbox']
+              : []),
           ],
         };
       },

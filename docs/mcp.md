@@ -252,9 +252,28 @@ a `via` field:
 - refusal — the target cannot be sampled and no mailbox is configured, so `PEER_HUB_NO_SAMPLING` names the
   capability that is missing rather than returning something Concord invented.
 
-This asymmetry is real and worth stating plainly: measured at its own `initialize`, Claude Code declares
-`elicitation` and not `sampling`, so it can ask another session directly and must be asked by rendezvous.
-Codex declaring `sampling` is what makes the fast path work in that direction.
+Which path you get is decided by the target's client, and the measured answer is humbling. Read off a live
+roster of connected sessions: Claude Code declares `elicitation` and `roots`; Codex declares `elicitation`,
+`experimental` and `extensions`. **Neither declares `sampling`.** So between these two clients the fast path
+is unavailable in *both* directions, and rendezvous is not a fallback at all — it is the only mechanism that
+works.
+
+This is worth stating plainly because the first version of this document claimed the opposite: that Codex
+declared sampling and that this was what made the fast path work in that direction. That was assumed and then
+written down, and reading the actual roster contradicted it. The sampling route is implemented, tested and
+correct, and it waits for a client that declares the capability; today, on this machine, nothing does. The
+fallback is carrying every real cross-session message.
+
+A rendezvous cannot prove who answered, and this is the one place the two paths differ in kind rather than
+in speed. The mailbox is shared by every session; the parked letter names its sender and its intended
+recipient in the subject, but nothing in the kernel enforces that recipient, and a reply records no author.
+So the first agent to answer that letter wins, even when it is not the peer named in `to`. This was observed
+live rather than reasoned about: a question routed to one Claude was answered by a different Claude on another
+client, seconds before the intended one got to it. `servedBy` is therefore `null` on the rendezvous path —
+reporting the target's name there would attribute text to a party that may not have written it — and
+`askedSeq`/`answeredSeq` give a caller the two mailbox sequence numbers, which are the only handle it has on
+what actually happened. On the sampling path `servedBy` is the client that was sampled, which the channel does
+establish.
 
 The mailbox is not replaced. The socket is a doorbell and the file is the record: an exchange that exists
 only as two closed sockets is not evidence and cannot be replayed, which is why `peer.askPeer` is a `network`

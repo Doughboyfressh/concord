@@ -183,9 +183,16 @@ test('a target that cannot be sampled is reached through the mailbox, and says s
 
   const answer = await pending;
   assert.equal(answer.text, 'yes it did');
-  // The distinction that must not be lost: nothing was sampled, so no model is claimed.
+  // The distinctions that must not be lost. Nothing was sampled, so no model is claimed. And the
+  // mailbox is shared with no enforced recipient and no recorded author, so the answer is not proven
+  // to come from the peer named in `to` - servedBy must be null rather than the target name.
   assert.equal(answer.via, 'rendezvous');
   assert.equal(answer.model, null);
+  assert.equal(answer.servedBy, null);
+  assert.equal(answer.askedSeq, asked.seq);
+  assert.ok(answer.answeredSeq > asked.seq);
+  assert.match(answer.limitations.join(' '), /not proven to be the peer named/);
+  assert.match(asked.subject, /for claude-code/);
   assert.equal(claude.sampled.length, 0);
 });
 
