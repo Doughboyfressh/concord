@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadLanguage, decodeInstruction, decodeRange, contextFields } from '../src/sleigh.mjs';
+import { loadLanguage, decodeInstruction, decodeRange, contextFields, liftInstruction } from '../src/sleigh.mjs';
 import { canonical } from '../src/value.mjs';
 import { buildDecodableSla, buildSla } from './ghidra-fixtures.mjs';
 
@@ -28,7 +28,11 @@ test('a compiled table becomes a language with its root table and spaces', () =>
   assert.equal(toy.root.constructors.length, 3);
   // The root is found by name, as sleighbase.cc does after decoding, rather than by assuming an id.
   assert.equal(toy.root.kind, 'subtable');
-  assert.deepEqual(toy.spaces.map((space) => space.name), ['unique', 'ram']);
+  assert.deepEqual(toy.spaces.map((space) => space.name), ['unique', 'ram', 'register']);
+  // The constant space is index 0 and is never serialised: sleighbase.cc re-inserts it before
+  // reading, so a template naming space 0 means a literal rather than an unknown space.
+  assert.equal(toy.spaceByIndex.get(0).name, 'const');
+  assert.equal(toy.spaceByIndex.get(3).name, 'register');
   assert.deepEqual(toy.sourceFiles, ['toy.slaspec']);
 });
 
@@ -140,6 +144,85 @@ test('a file that is not a compiled table is refused by code, not by crashing', 
   // the ids would be read against a table that may have been renumbered.
   const wrongVersion = Buffer.concat([Buffer.from('sla'), Buffer.from([9]), buildDecodableSla().subarray(4)]);
   assert.throws(() => loadLanguage(wrongVersion), (error) => error.code === 'SLEIGH_TABLE');
+});
+
+test('an instruction lifts to the p-code its template declares', () => {
+  const toy = language();
+  const lifted = liftInstruction(toy, bytes(0x01), { address: 0x1000n });
+  assert.equal(lifted.lifted, true);
+  assert.equal(lifted.text, 'inc');
+  // r0 = r0 + 1. The space names come from the table's own space list, and a literal lands in the
+  // constant space, which is index 0 because sleighbase.cc re-inserts it rather than serialising it.
+  assert.deepEqual(lifted.pcode, [{
+    op: 'INT_ADD', code: 19,
+    output: { space: 'register', offset: '0x0', size: 4 },
+    inputs: [{ space: 'register', offset: '0x0', size: 4 }, { space: 'const', offset: '0x1', size: 4 }],
+    synthetic: null,
+  }]);
+});
+
+test('an operand value reaches p-code through the handle its constructor exported', () => {
+  const toy = language();
+  // This is the whole reason lifting needs a second pass: the COPY's input names operand 0's
+  // handle, and that handle is only known once the operand itself has been resolved.
+  const lifted = liftInstruction(toy, bytes(0x02, 0x42), { address: 0n });
+  assert.equal(lifted.text, 'ld 0x42');
+  assert.equal(lifted.pcode.length, 1);
+  assert.equal(lifted.pcode[0].op, 'COPY');
+  assert.deepEqual(lifted.pcode[0].output, { space: 'register', offset: '0x0', size: 4 });
+  assert.deepEqual(lifted.pcode[0].inputs, [{ space: 'const', offset: '0x42', size: 4 }]);
+  // The value really came from the instruction bytes rather than a fixed constant.
+  assert.deepEqual(liftInstruction(toy, bytes(0x02, 0x07), {}).pcode[0].inputs,
+    [{ space: 'const', offset: '0x7', size: 4 }]);
+});
+
+test('a constructor with no semantics is reported as unimplemented, not as doing nothing', () => {
+  const toy = language();
+  const lifted = liftInstruction(toy, bytes(0x00), { address: 0n });
+  assert.equal(lifted.lifted, true);
+  assert.deepEqual(lifted.pcode, []);
+  // An empty p-code list and an absent template mean different things: one is an instruction with
+  // no effect, the other is an effect this table does not model. Only the directive distinguishes them.
+  assert.deepEqual(lifted.directives, [{ directive: 'UNIMPLEMENTED', detail: 'This constructor declares no semantics' }]);
+  assert.ok(lifted.liftLimitations.some((line) => /incomplete rather than complete/.test(line)));
+});
+
+test('a delay slot is reported as part of the effect that is missing', () => {
+  const toy = language();
+  const lifted = liftInstruction(toy, bytes(0x01), { address: 0n });
+  // `inc` declares a delay slot, so the following instruction executes as part of it. The p-code
+  // here is therefore not the whole effect, and saying so is the difference between a partial
+  // answer and a wrong one.
+  assert.equal(lifted.delaySlotBytes, 1);
+  assert.ok(lifted.liftLimitations.some((line) => /delay slot/.test(line)));
+});
+
+test('lifting an undecodable instruction reports why instead of returning empty p-code', () => {
+  const toy = language();
+  const lifted = liftInstruction(toy, bytes(0x03), { address: 0n });
+  assert.equal(lifted.lifted, false);
+  assert.equal(lifted.liftReason, 'no_matching_constructor');
+  assert.deepEqual(lifted.pcode, []);
+  assert.deepEqual(lifted.directives, []);
+});
+
+test('a lift is canonical and repeatable, and never leaks the parse tree', () => {
+  const toy = language();
+  const once = liftInstruction(toy, bytes(0x02, 0x42), { address: 0x1000n });
+  const twice = liftInstruction(toy, bytes(0x02, 0x42), { address: 0x1000n });
+  // The walker is an internal object with parent cycles; if it escaped into the result, canonical
+  // would reject it and every lifted run would be unrepresentable rather than merely unequal.
+  assert.equal(Object.hasOwn(once, 'walker'), false);
+  assert.equal(canonical({ ...once, address: String(once.address) }),
+    canonical({ ...twice, address: String(twice.address) }));
+});
+
+test('a sequence can be lifted instruction by instruction', () => {
+  const toy = language();
+  const run = decodeRange(toy, bytes(0x01, 0x02, 0x7f, 0x00), { address: 0x500n, pcode: true });
+  assert.deepEqual(run.instructions.map((instruction) => instruction.text), ['inc', 'ld 0x7f', 'halt']);
+  assert.deepEqual(run.instructions.map((instruction) => instruction.pcode.length), [1, 1, 0]);
+  assert.equal(run.instructions[1].pcode[0].inputs[0].offset, '0x7f');
 });
 
 test('context fields are named by the language, and an unknown name is refused', () => {

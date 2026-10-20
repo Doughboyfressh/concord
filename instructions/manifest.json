@@ -31,9 +31,9 @@
       "sourceId": "ego-lite"
     },
     {
-      "bytes": 4760,
+      "bytes": 5528,
       "file": "ghidra.md",
-      "sha256": "b7f3e93032889805d9ee78a70c9e81b7ae36829c61c0d3c84b121a4b8e797556",
+      "sha256": "004bfd614027a331ef38797f44f3b23cd1b01623cced2967d59a63e3ba05e71e",
       "sourceId": "ghidra"
     },
     {

@@ -37,7 +37,45 @@ import { readWorkspaceFile } from './workspace-fs.mjs';
  * Ghidra is Apache 2.0; this file is a derivative work of its decoder. See docs/ghidra-internal.md.
  */
 
+/**
+ * P-code operations, indexed by the value a template stores.
+ *
+ * Index 0 is unused. Five slots carry a different meaning inside a compiled table than they do in
+ * the decompiler's own IR, and `semantics.hh:26-30` is why:
+ *
+ *   #define BUILD      CPUI_MULTIEQUAL   // 60
+ *   #define DELAY_SLOT CPUI_INDIRECT     // 61
+ *   #define MACROBUILD CPUI_CAST         // 64
+ *   #define LABELBUILD CPUI_PTRADD       // 65
+ *   #define CROSSBUILD CPUI_PTRSUB       // 66
+ *
+ * So in a `.sla`, opcode 60 is "build this operand's p-code here", not a phi node. Taking the
+ * names from the OpCode enum instead would emit MULTIEQUAL and INDIRECT operations that no
+ * instruction ever performs, and the output would look like p-code while describing nothing. The
+ * directives are consumed by the builder and never appear in a result.
+ */
+const OPCODES = [
+  null, 'COPY', 'LOAD', 'STORE', 'BRANCH', 'CBRANCH', 'BRANCHIND', 'CALL', 'CALLIND', 'CALLOTHER',
+  'RETURN', 'INT_EQUAL', 'INT_NOTEQUAL', 'INT_SLESS', 'INT_SLESSEQUAL', 'INT_LESS',
+  'INT_LESSEQUAL', 'INT_ZEXT', 'INT_SEXT', 'INT_ADD', 'INT_SUB', 'INT_CARRY', 'INT_SCARRY',
+  'INT_SBORROW', 'INT_2COMP', 'INT_NEGATE', 'INT_XOR', 'INT_AND', 'INT_OR', 'INT_LEFT',
+  'INT_RIGHT', 'INT_SRIGHT', 'INT_MULT', 'INT_DIV', 'INT_SDIV', 'INT_REM', 'INT_SREM',
+  'BOOL_NEGATE', 'BOOL_XOR', 'BOOL_AND', 'BOOL_OR', 'FLOAT_EQUAL', 'FLOAT_NOTEQUAL', 'FLOAT_LESS',
+  'FLOAT_LESSEQUAL', 'UNUSED1', 'FLOAT_NAN', 'FLOAT_ADD', 'FLOAT_DIV', 'FLOAT_MULT', 'FLOAT_SUB',
+  'FLOAT_NEG', 'FLOAT_ABS', 'FLOAT_SQRT', 'FLOAT_INT2FLOAT', 'FLOAT_FLOAT2FLOAT', 'FLOAT_TRUNC',
+  'FLOAT_CEIL', 'FLOAT_FLOOR', 'FLOAT_ROUND',
+  'BUILD', 'DELAY_SLOT', 'PIECE', 'SUBPIECE', 'MACROBUILD', 'LABELBUILD', 'CROSSBUILD',
+  'SEGMENTOP', 'CPOOLREF', 'NEW', 'INSERT', 'ZPULL', 'POPCOUNT', 'LZCOUNT', 'SPULL',
+];
+const OP_BUILD = 60;
+const OP_DELAY_SLOT = 61;
+const OP_LABELBUILD = 65;
+const OP_CROSSBUILD = 66;
+const OP_LOAD = 2;
+const OP_STORE = 3;
+
 const MAX_INSTRUCTION_BYTES = 16; // ParserContext::buf is 16 bytes and throws past it.
+const MAX_PCODE_OPS = 4096;
 const MAX_CONTEXT_WORDS = 16;
 const MAX_WALK_STEPS = 4096;      // A malformed table must terminate rather than recurse forever.
 const MAX_OPERAND_DEPTH = 32;     // ParserWalker::breadcrumb is 32 deep.
@@ -197,6 +235,84 @@ function buildPattern(node) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Semantic templates
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * A ConstTpl: one slot of a varnode template, which may be a literal or a reference.
+ *
+ * `handle` is the interesting case. It names one of the constructor's operands and which part of
+ * that operand's resolved handle to take — its space, its offset, its size, or its offset shifted
+ * or adjusted by a truncation amount. That indirection is why lifting needs a second pass: an
+ * operand's handle is not known until its own constructor has been resolved.
+ */
+const CONST_SELECT = ['space', 'offset', 'size', 'offset_plus'];
+
+function buildConstTpl(node) {
+  switch (node.name) {
+    case 'const_real': return { kind: 'real', value: asBig(node.attributes.val) };
+    case 'const_handle': return { kind: 'handle', index: asNumber(node.attributes.val),
+      select: CONST_SELECT[asNumber(node.attributes.s)] ?? 'space',
+      plus: asBig(node.attributes.plus, 0n) };
+    case 'const_spaceid': return { kind: 'spaceid', space: node.attributes.space ?? null };
+    case 'const_relative': return { kind: 'relative', value: asBig(node.attributes.val) };
+    case 'const_start': return { kind: 'start' };
+    case 'const_next': return { kind: 'next' };
+    case 'const_next2': return { kind: 'next2' };
+    case 'const_curspace': return { kind: 'curspace' };
+    case 'const_curspace_size': return { kind: 'curspace_size' };
+    case 'const_flowref': return { kind: 'flowref' };
+    case 'const_flowref_size': return { kind: 'flowref_size' };
+    case 'const_flowdest': return { kind: 'flowdest' };
+    case 'const_flowdest_size': return { kind: 'flowdest_size' };
+    default:
+      fail('SLEIGH_TABLE', 'Unsupported constant template element', { element: node.name });
+      return null;
+  }
+}
+
+/** A varnode template: space, offset and size, in that order. */
+const buildVarnodeTpl = (node) => ({
+  space: buildConstTpl(node.children[0]),
+  offset: buildConstTpl(node.children[1]),
+  size: buildConstTpl(node.children[2]),
+});
+
+/** What a constructor exports to its parent operand: seven slots, in HandleTpl::decode order. */
+const buildHandleTpl = (node) => ({
+  space: buildConstTpl(node.children[0]),
+  size: buildConstTpl(node.children[1]),
+  ptrSpace: buildConstTpl(node.children[2]),
+  ptrOffset: buildConstTpl(node.children[3]),
+  ptrSize: buildConstTpl(node.children[4]),
+  tempSpace: buildConstTpl(node.children[5]),
+  tempOffset: buildConstTpl(node.children[6]),
+});
+
+function buildOpTpl(node) {
+  const code = asNumber(node.attributes.code);
+  // The first child is the output, and a `null` element means there is none. The remaining
+  // children are the inputs, in order.
+  const [first, ...rest] = node.children;
+  return {
+    code, name: OPCODES[code] ?? `OP${code}`,
+    output: first && first.name === 'varnode_tpl' ? buildVarnodeTpl(first) : null,
+    inputs: (first && first.name === 'null' ? rest : rest).map(buildVarnodeTpl),
+  };
+}
+
+const buildConstructTpl = (node) => {
+  const result = node.children.find((child) => child.name === 'handle_tpl');
+  return {
+    delaySlot: asNumber(node.attributes.delay, 0),
+    labelCount: asNumber(node.attributes.labels, 0),
+    section: asNumber(node.attributes.section, -1),
+    result: result ? buildHandleTpl(result) : null,
+    ops: childrenNamed(node, 'op_tpl').map(buildOpTpl),
+  };
+};
+
+// ---------------------------------------------------------------------------------------------
 // The language model
 // ---------------------------------------------------------------------------------------------
 
@@ -242,6 +358,13 @@ function buildConstructor(node) {
       symbolId: asNumber(commit.attributes.id), word: asNumber(commit.attributes.number),
       mask: asNumber(commit.attributes.mask) >>> 0, flow: commit.attributes.flow === true,
     })),
+    // The main semantic section, and any named sections. A constructor with no template has no
+    // p-code at all, which is normal for one that only exports a value.
+    template: (() => {
+      const main = node.children.filter((child) => child.name === 'construct_tpl')
+        .map(buildConstructTpl).find((tpl) => tpl.section < 0);
+      return main ?? null;
+    })(),
   };
 }
 
@@ -385,7 +508,14 @@ export function loadLanguage(bytes) {
   }
   if (contextWords > MAX_CONTEXT_WORDS) fail('SLEIGH_TABLE', 'The compiled table addresses more context words than this decoder allocates', { contextWords });
 
+  // A space attribute on the wire is an index, and the constant space is index 0 because
+  // sleighbase.cc re-inserts it before reading rather than serialising it. The special spaces —
+  // stack, join, fspec, iop, spacebase — arrive as names instead of indices.
+  const spaceByIndex = new Map([[0, { name: 'const', index: 0, size: 8, wordSize: 1, kind: 'constant' }]]);
+  for (const space of spaces) spaceByIndex.set(space.index, space);
+
   return Object.freeze({
+    spaceByIndex,
     bigEndian: sleigh.attributes.bigendian === true,
     alignment: asNumber(sleigh.attributes.align, 1),
     uniqueBase: sleigh.attributes.uniqbase ?? null,
@@ -814,15 +944,20 @@ export function decodeInstruction(language, bytes, options = {}) {
       const defining = operand.definingSymbolId === null ? null : language.symbols.get(operand.definingSymbolId);
       if (defining && defining.kind === 'subtable') {
         const sub = resolveConstructor(defining.decision, walker, defining);
-        if (sub) {
-          walker.point.constructor = sub.constructor;
-          walker.point.symbolId = defining.id;
-          applyContext(sub.constructor, walker, language);
-          matched.push({ table: defining.name, constructorIndex: sub.id,
-            source: sub.constructor.sourceIndex, line: sub.constructor.lineNumber });
-          descended = true;
-          break;
-        }
+        // A subtable operand that resolves to nothing fails the whole instruction, as Ghidra's
+        // DecisionNode::resolve does by raising BadDataError. Carrying on with the operand's
+        // minimum length would drop it from the display and still report a successful decode —
+        // an instruction missing an operand, presented as if it were complete.
+        if (!sub) return { ...EMPTY, decoded: false, reason: 'unresolved_subtable',
+          detail: `No constructor in subtable ${defining.name ?? defining.id} matches these bytes`,
+          address, length: 0 };
+        walker.point.constructor = sub.constructor;
+        walker.point.symbolId = defining.id;
+        applyContext(sub.constructor, walker, language);
+        matched.push({ table: defining.name, constructorIndex: sub.id,
+          source: sub.constructor.sourceIndex, line: sub.constructor.lineNumber });
+        descended = true;
+        break;
       }
       walker.point.length = operand.minimumLength;
       walker.popOperand();
@@ -830,6 +965,10 @@ export function decodeInstruction(language, bytes, options = {}) {
     }
     if (descended) continue;
     walker.calcCurrentLength(constructor.minimumLength, operandCount);
+    // A constructor that declares a delay slot says how many bytes of the following instruction
+    // execute as part of this one. Sleigh::resolve records it the same way, and it is a fact about
+    // the instruction's effect: reporting a length without it would understate what runs.
+    if (constructor.template?.delaySlot > 0) delaySlotBytes = constructor.template.delaySlot;
     const isRoot = walker.point === walker.root;
     walker.popOperand();
     if (isRoot) break;
@@ -851,24 +990,29 @@ export function decodeInstruction(language, bytes, options = {}) {
   const mnemonic = mnemonicText.trim();
   const body = fullText.slice(mnemonicText.length).trim();
 
-  return {
+  const result = {
     decoded: true, reason: null, address, length,
     mnemonic, body: body || null, text: body ? `${mnemonic} ${body}` : mnemonic,
     constructors: matched, delaySlotBytes, commits: walker.commits,
   };
+  // The lifter needs the parse tree, and nothing else does. It is handed back only when asked
+  // for, so an ordinary decode stays a plain data result with no live object hanging off it.
+  if (options.keepWalker) result.walker = walker;
+  return result;
 }
 
 /** Decode instructions in sequence until the bytes run out, the limit is hit, or a decode fails. */
 export function decodeRange(language, bytes, options = {}) {
   const limit = options.limit ?? 256;
   const start = options.address === undefined ? 0n : BigInt(options.address);
+  const step = options.pcode ? liftInstruction : decodeInstruction;
   const instructions = [];
   let offset = 0;
   while (offset < bytes.length && instructions.length < limit) {
     const window = bytes.subarray(offset, Math.min(bytes.length, offset + MAX_INSTRUCTION_BYTES));
     let decoded;
     try {
-      decoded = decodeInstruction(language, window, { address: start + BigInt(offset), context: options.context, contextValues: options.contextValues });
+      decoded = step(language, window, { address: start + BigInt(offset), context: options.context, contextValues: options.contextValues });
     } catch (error) {
       instructions.push({ ...EMPTY, decoded: false, reason: 'decode_failed', detail: error?.code ?? 'unknown',
         address: start + BigInt(offset), length: 0, offset });
@@ -879,6 +1023,314 @@ export function decodeRange(language, bytes, options = {}) {
     offset += decoded.length;
   }
   return { instructions, bytesDecoded: offset };
+}
+
+// ---------------------------------------------------------------------------------------------
+// P-code lifting
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Resolve the handles each operand exports, in a second pass over the parse tree.
+ *
+ * `Sleigh::resolveHandles`, and it has to be a separate pass for a structural reason: a varnode
+ * template can name another operand's space, offset or size, and that operand's handle is not
+ * known until its own constructor has finished. So decode resolves the tree, this fills in what
+ * each node exports, and only then can the templates be built.
+ */
+function resolveHandles(walker, language) {
+  const constSpace = language.spaceByIndex.get(0);
+  const curSpace = language.spaceByIndex.get(0) && language.spaces.find((space) => space.name === language.defaultSpace);
+  walker.point = walker.root;
+  walker.depth = 0;
+  walker.breadcrumb[0] = 0;
+
+  let steps = 0;
+  while (walker.point) {
+    if (++steps > MAX_WALK_STEPS) fail('SLEIGH_DECODE', 'Handle resolution did not terminate');
+    const constructor = walker.point.constructor;
+    // Every state reached here was resolved during decode, because an operand whose subtable did
+    // not resolve fails the instruction outright. A null here would mean the two walks disagree,
+    // which is worth a named refusal rather than a TypeError from the next property read.
+    if (!constructor) fail('SLEIGH_DECODE', 'A parse state reached handle resolution without a constructor');
+    const operandCount = constructor.operandIds.length;
+    let index = walker.breadcrumb[walker.depth];
+    let descended = false;
+    while (index < operandCount) {
+      const operand = language.symbols.get(constructor.operandIds[index]);
+      walker.pushOperand(index);
+      const defining = operand.definingSymbolId === null ? null : language.symbols.get(operand.definingSymbolId);
+      if (defining && defining.kind === 'subtable') { descended = true; break; }
+      if (defining) walker.point.handle = fixedHandleFor(defining, walker, language, constSpace, curSpace);
+      else {
+        // No defining symbol means the operand is an expression, and the result of an expression
+        // is a constant. Size 0 records that the expression cannot say how wide its value is.
+        const value = evaluate(operand.definingExpression ?? operand.localExpression, walker, language);
+        walker.point.handle = { space: constSpace, offsetSpace: null, offsetOffset: value & MASK64, size: 0 };
+      }
+      walker.popOperand();
+      index += 1;
+    }
+    if (descended) continue;
+    // A finished constructor exports its result into the operand slot that holds it.
+    const template = constructor.template;
+    if (template?.result) {
+      const exported = fixHandleTemplate(template.result, walker, language, constSpace, curSpace);
+      walker.point.handle = exported;
+    }
+    const isRoot = walker.point === walker.root;
+    walker.popOperand();
+    if (isRoot) break;
+  }
+}
+
+/** A handle for an operand whose defining symbol is not a table. */
+function fixedHandleFor(symbol, walker, language, constSpace, curSpace) {
+  const constant = (value, size = 0) => ({ space: constSpace, offsetSpace: null, offsetOffset: value & MASK64, size });
+  switch (symbol.kind) {
+    case 'varnode':
+      return { space: language.spaceByIndex.get(symbol.space) ?? { name: String(symbol.space), index: -1 },
+        offsetSpace: null, offsetOffset: symbol.offset, size: symbol.size };
+    case 'varlist': {
+      const index = Number(evaluate(symbol.expression, walker, language));
+      const id = symbol.varnodeIds?.[index];
+      const target = id === undefined || id === null ? null : language.symbols.get(id);
+      if (!target) return constant(0n);
+      return { space: language.spaceByIndex.get(target.space) ?? { name: String(target.space), index: -1 },
+        offsetSpace: null, offsetOffset: target.offset, size: target.size };
+    }
+    case 'valuemap': {
+      const index = Number(evaluate(symbol.expression, walker, language));
+      return constant(symbol.values?.[index] ?? 0n);
+    }
+    // NameSymbol extends ValueSymbol in Ghidra and does not override getFixedHandle, so a name
+    // resolves to the value of its pattern rather than to its text.
+    case 'value':
+    case 'name':
+    case 'context':
+      return constant(evaluate(symbol.expression, walker, language));
+    case 'start': return { space: curSpace, offsetSpace: null, offsetOffset: walker.address, size: curSpace?.size ?? 0 };
+    case 'end':
+    case 'next2':
+      return { space: curSpace, offsetSpace: null, offsetOffset: walker.address + BigInt(walker.root.length), size: curSpace?.size ?? 0 };
+    case 'epsilon': return constant(0n);
+    default: return constant(0n);
+  }
+}
+
+/** ConstTpl::fix — the value of one template slot in context. */
+function fixConst(slot, walker, language, constSpace, curSpace) {
+  switch (slot.kind) {
+    case 'real':
+    case 'relative':
+      return slot.value;
+    case 'start': return walker.address;
+    case 'next':
+    case 'next2':
+      return walker.address + BigInt(walker.root.length);
+    case 'curspace_size': return BigInt(curSpace?.size ?? 0);
+    case 'curspace': return BigInt(curSpace?.index ?? 0);
+    case 'spaceid': return BigInt(resolveSpace(slot.space, language)?.index ?? 0);
+    case 'handle': {
+      const handle = walker.point.resolved[slot.index]?.handle;
+      if (!handle) return 0n;
+      switch (slot.select) {
+        case 'space': return BigInt((handle.offsetSpace ? handle.tempSpace?.index : handle.space?.index) ?? 0);
+        case 'offset': return handle.offsetSpace ? (handle.tempOffset ?? 0n) : handle.offsetOffset;
+        case 'size': return BigInt(handle.size ?? 0);
+        case 'offset_plus': {
+          const base = handle.offsetSpace ? (handle.tempOffset ?? 0n) : handle.offsetOffset;
+          // A constant is shifted; anything else is adjusted by a truncation amount. The two cases
+          // pack different things into the same field, which is why the space is checked first.
+          if (handle.space === constSpace) return base >> BigInt(8 * Number(slot.plus >> 16n));
+          return base + (slot.plus & 0xffffn);
+        }
+        default: return 0n;
+      }
+    }
+    // A flow reference only has a value inside an injection, where a call or jump supplied it.
+    // There is no such context in a plain decode, so it is zero and the caller is told.
+    default: return 0n;
+  }
+}
+
+const resolveSpace = (value, language) => (typeof value === 'number'
+  ? language.spaceByIndex.get(value) ?? null
+  : { name: String(value), index: -1, size: 0, wordSize: 1, kind: 'special' });
+
+/** ConstTpl::fixSpace — the same slot, when it must name a space. */
+function fixSpace(slot, walker, language, curSpace) {
+  switch (slot.kind) {
+    case 'curspace': return curSpace;
+    case 'spaceid': return resolveSpace(slot.space, language);
+    case 'handle': {
+      const handle = walker.point.resolved[slot.index]?.handle;
+      if (!handle) return null;
+      return slot.select === 'space' ? (handle.offsetSpace ? handle.tempSpace : handle.space) : null;
+    }
+    default: return null;
+  }
+}
+
+/** HandleTpl::fix — what a constructor exports, resolved. */
+function fixHandleTemplate(template, walker, language, constSpace, curSpace) {
+  const size = Number(fixConst(template.size, walker, language, constSpace, curSpace));
+  if (template.ptrSpace.kind === 'real') {
+    // An unstarred export. The space and offset come straight through, but the offset may still
+    // be dynamic, which fillinOffset carries over from the handle it refers to.
+    const space = fixSpace(template.space, walker, language, curSpace);
+    const handle = { space, size, offsetSpace: null, offsetOffset: 0n };
+    if (template.ptrOffset.kind === 'handle') {
+      const other = walker.point.resolved[template.ptrOffset.index]?.handle;
+      if (other) {
+        handle.offsetSpace = other.offsetSpace;
+        handle.offsetOffset = other.offsetOffset;
+        handle.offsetSize = other.offsetSize;
+        handle.tempSpace = other.tempSpace;
+        handle.tempOffset = other.tempOffset;
+      }
+    } else handle.offsetOffset = fixConst(template.ptrOffset, walker, language, constSpace, curSpace) & MASK64;
+    return handle;
+  }
+  const space = fixSpace(template.space, walker, language, curSpace);
+  const offsetSpace = fixSpace(template.ptrSpace, walker, language, curSpace);
+  const handle = { space, size, offsetSpace, offsetOffset: fixConst(template.ptrOffset, walker, language, constSpace, curSpace) & MASK64 };
+  if (!offsetSpace || offsetSpace.kind === 'constant') {
+    // The handle could have been dynamic and was not. Ghidra converts the address to bytes by the
+    // space's word size here, which matters for a word-addressed space.
+    handle.offsetSpace = null;
+    handle.offsetOffset = handle.offsetOffset * BigInt(space?.wordSize ?? 1);
+  } else {
+    handle.offsetSize = Number(fixConst(template.ptrSize, walker, language, constSpace, curSpace));
+    handle.tempSpace = fixSpace(template.tempSpace, walker, language, curSpace);
+    handle.tempOffset = fixConst(template.tempOffset, walker, language, constSpace, curSpace) & MASK64;
+  }
+  return handle;
+}
+
+const renderVarnode = (varnode) => ({
+  space: varnode.space?.name ?? null,
+  offset: `0x${(varnode.offset & MASK64).toString(16)}`,
+  size: varnode.size,
+});
+
+/** Resolve one varnode template to a concrete varnode. */
+function fixVarnode(template, walker, language, constSpace, curSpace) {
+  return {
+    space: fixSpace(template.space, walker, language, curSpace),
+    offset: fixConst(template.offset, walker, language, constSpace, curSpace),
+    size: Number(fixConst(template.size, walker, language, constSpace, curSpace)),
+    dynamic: template.offset.kind === 'handle'
+      && Boolean(walker.point.resolved[template.offset.index]?.handle?.offsetSpace),
+    template,
+  };
+}
+
+/**
+ * Lift one instruction to p-code.
+ *
+ * `PcodeBuilder::build` walks the constructor's template; a BUILD directive recurses into an
+ * operand's own template, which is how a nested constructor's semantics are spliced in at the
+ * point the parent asked for them. A dynamic varnode — one whose offset lives in another address
+ * space — becomes an explicit LOAD before the operation, or a STORE after it, exactly as
+ * `SleighBuilder::dump` generates them.
+ */
+export function liftInstruction(language, bytes, options = {}) {
+  const decoded = decodeInstruction(language, bytes, { ...options, keepWalker: true });
+  if (!decoded.decoded) return { ...decoded, pcode: [], lifted: false, liftReason: decoded.reason, directives: [] };
+  const walker = decoded.walker;
+  delete decoded.walker;
+
+  const constSpace = language.spaceByIndex.get(0);
+  const curSpace = language.spaces.find((space) => space.name === language.defaultSpace) ?? null;
+  resolveHandles(walker, language);
+
+  const pcode = [];
+  const directives = [];
+  const limitations = [];
+  let steps = 0;
+
+  const emit = (op) => {
+    if (pcode.length >= MAX_PCODE_OPS) fail('SLEIGH_DECODE', 'The instruction lifts to more p-code than this decoder emits');
+    pcode.push(op);
+  };
+
+  const dump = (op) => {
+    const inputs = op.inputs.map((input) => fixVarnode(input, walker, language, constSpace, curSpace));
+    const output = op.output ? fixVarnode(op.output, walker, language, constSpace, curSpace) : null;
+    const resolved = [];
+    for (const input of inputs) {
+      if (!input.dynamic) { resolved.push(renderVarnode(input)); continue; }
+      // The operand is really a pointer into another space, so the value has to be loaded first.
+      const handle = walker.point.resolved[input.template.offset.index].handle;
+      const temporary = { space: handle.tempSpace?.name ?? 'unique', offset: `0x${(handle.tempOffset ?? 0n).toString(16)}`, size: input.size };
+      emit({ op: 'LOAD', code: OP_LOAD, output: temporary,
+        inputs: [{ space: 'const', offset: `0x${BigInt(handle.offsetSpace?.index ?? 0).toString(16)}`, size: 8 },
+          { space: handle.offsetSpace?.name ?? null, offset: `0x${handle.offsetOffset.toString(16)}`, size: handle.offsetSize ?? 0 }],
+        synthetic: 'dynamic-input' });
+      resolved.push(temporary);
+    }
+    if (output?.dynamic) {
+      const handle = walker.point.resolved[output.template.offset.index].handle;
+      const temporary = { space: handle.tempSpace?.name ?? 'unique', offset: `0x${(handle.tempOffset ?? 0n).toString(16)}`, size: output.size };
+      emit({ op: op.name, code: op.code, output: temporary, inputs: resolved, synthetic: null });
+      emit({ op: 'STORE', code: OP_STORE, output: null,
+        inputs: [{ space: 'const', offset: `0x${BigInt(handle.offsetSpace?.index ?? 0).toString(16)}`, size: 8 },
+          { space: handle.offsetSpace?.name ?? null, offset: `0x${handle.offsetOffset.toString(16)}`, size: handle.offsetSize ?? 0 },
+          temporary],
+        synthetic: 'dynamic-output' });
+      return;
+    }
+    emit({ op: op.name, code: op.code, output: output ? renderVarnode(output) : null, inputs: resolved, synthetic: null });
+  };
+
+  const build = (template) => {
+    if (++steps > MAX_WALK_STEPS) fail('SLEIGH_DECODE', 'The template build did not terminate');
+    if (!template) { directives.push({ directive: 'UNIMPLEMENTED', detail: 'This constructor declares no semantics' }); return; }
+    for (const op of template.ops) {
+      if (op.code === OP_BUILD) {
+        const index = Number(op.inputs[0] ? fixConst(op.inputs[0].offset, walker, language, constSpace, curSpace) : 0n);
+        const operand = language.symbols.get(walker.point.constructor.operandIds[index]);
+        const defining = operand?.definingSymbolId === null ? null : language.symbols.get(operand.definingSymbolId);
+        if (!defining || defining.kind !== 'subtable') continue;
+        walker.pushOperand(index);
+        build(walker.point.constructor?.template ?? null);
+        walker.popOperand();
+        continue;
+      }
+      if (op.code === OP_DELAY_SLOT) {
+        // A delay slot splices in the p-code of the instruction that follows, which needs that
+        // instruction parsed. One instruction in isolation cannot supply it, so the directive is
+        // reported and the gap is explicit rather than silently absent.
+        directives.push({ directive: 'DELAY_SLOT', detail: 'The following instruction executes in this slot and is not lifted here' });
+        continue;
+      }
+      if (op.code === OP_LABELBUILD) {
+        directives.push({ directive: 'LABEL', detail: `Branch target label ${Number(op.inputs[0] ? fixConst(op.inputs[0].offset, walker, language, constSpace, curSpace) : 0n)}` });
+        continue;
+      }
+      if (op.code === OP_CROSSBUILD) {
+        directives.push({ directive: 'CROSSBUILD', detail: 'Semantics are woven in from an instruction at another address, which is not lifted here' });
+        continue;
+      }
+      dump(op);
+    }
+  };
+
+  walker.point = walker.root;
+  walker.depth = 0;
+  walker.breadcrumb[0] = 0;
+  build(walker.root.constructor.template);
+
+  // A delay slot is recorded two ways — the template's `delay` attribute and a DELAY_SLOT op — and
+  // a real table carries both. Either one is enough to make the omission worth stating, because
+  // the p-code below is then not the whole effect of this instruction.
+  if (decoded.delaySlotBytes > 0 || directives.some((entry) => entry.directive === 'DELAY_SLOT')) {
+    limitations.push('This instruction has a delay slot, so the p-code of the following instruction is part of its effect and is not included');
+  }
+  if (directives.some((entry) => entry.directive === 'UNIMPLEMENTED')) {
+    limitations.push('A constructor involved in this instruction declares no semantics, so the p-code below is incomplete rather than complete');
+  }
+  return { ...decoded, lifted: true, liftReason: null, pcode, directives, liftLimitations: limitations };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -915,6 +1367,7 @@ export function makeSleighTools() {
       address: string,
       limit: { type: 'integer', minimum: 1, maximum: MAX_INSTRUCTIONS },
       context: { type: 'object', additionalProperties: { type: 'integer' } },
+      pcode: { type: 'boolean' },
     }, ['table', 'path']),
     execute(input, context) {
       const limitations = [];
@@ -952,12 +1405,15 @@ export function makeSleighTools() {
 
       let run;
       try {
-        run = decodeRange(language, slice, { address, limit: input.limit ?? 64, contextValues: input.context });
+        run = decodeRange(language, slice, { address, limit: input.limit ?? 64, contextValues: input.context, pcode: input.pcode === true });
       } catch (error) {
         return { ...base, supported: false, reason: 'context_rejected', detail: error?.message ?? null, ...empty, limitations };
       }
 
       const instructions = run.instructions.map((instruction) => ({
+        ...(input.pcode === true
+          ? { pcode: instruction.pcode ?? [], directives: instruction.directives ?? [] }
+          : {}),
         offset: offset + instruction.offset,
         address: `0x${instruction.address.toString(16)}`,
         length: instruction.length,
@@ -978,7 +1434,21 @@ export function makeSleighTools() {
       }
       if (undecoded) limitations.push(`${undecoded} position(s) matched no constructor and decoding stopped there rather than resynchronising at a guessed boundary`);
       if (run.bytesDecoded < slice.length) limitations.push(`${slice.length - run.bytesDecoded} of ${slice.length} selected bytes were not reached`);
-      limitations.push('This is instruction decode only: a mnemonic and its operands, not lifted p-code and not decompiled source');
+      if (input.pcode === true) {
+        const delayed = run.instructions.filter((instruction) => instruction.delaySlotBytes > 0).length;
+        if (delayed) {
+          limitations.push(`${delayed} instruction(s) have a delay slot, so the p-code of the instruction that follows is part of their effect and is reported as a DELAY_SLOT directive rather than included`);
+        }
+        if (run.instructions.some((instruction) => (instruction.directives ?? []).some((entry) => entry.directive === 'CROSSBUILD'))) {
+          limitations.push('A CROSSBUILD directive weaves in semantics from an instruction at another address, which decoding one range cannot supply, so that p-code is named and not included');
+        }
+        if (run.instructions.some((instruction) => (instruction.directives ?? []).some((entry) => entry.directive === 'UNIMPLEMENTED'))) {
+          limitations.push('A constructor involved here declares no semantics, so its p-code is absent rather than empty: the instruction does something this table does not model');
+        }
+        limitations.push('P-code is the lifted meaning of each instruction and nothing further: no dataflow, no type inference, no control-flow structuring, and not decompiled source');
+      } else {
+        limitations.push('This is instruction decode only: a mnemonic and its operands. Pass pcode:true for the lifted p-code of each instruction');
+      }
       limitations.push('A disassembly is an interpretation of bytes under one chosen language; selecting the wrong table produces confident output about the wrong machine');
 
       return { ...base, supported: true, reason: null,

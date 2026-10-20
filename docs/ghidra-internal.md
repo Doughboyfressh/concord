@@ -51,7 +51,7 @@ the approval hash cannot describe; a resolved one is deterministic.
 | `artifact.sleighSource` | `.slaspec`, `.sinc` | Declarations with their preprocessor guards intact |
 | `artifact.sleighCompiled` | `.sla` | Endianness, alignment, address spaces, registers, userops, subtables, provenance |
 | `artifact.compareSleighSource` | `.sla` + `.slaspec` | Whether a compiled table and a source file agree |
-| `artifact.disassemble` | `.sla` + bytes | The instructions those bytes decode to under that language |
+| `artifact.disassemble` | `.sla` + bytes | The instructions those bytes decode to, and with `pcode:true` what each one does |
 
 All nine are `read` effects over bytes already inside the workspace. None spawns a process or
 reaches the network, so none needs an approval.
@@ -193,6 +193,77 @@ All 137 shipped tables also load and probe without a single failure or exception
 constructors, 15,139 subtables, 83,339 register varnodes and 24,794 userops, at 22 ms per table.
 The constructor total equals the count the reader reports from element frequencies alone, which
 checks the engine's symbol table walk against the reader's independent one.
+
+## P-code lifting
+
+Decode says what an instruction is called. Lifting says what it does, and that is where the value
+is, because p-code is architecture-independent: one analysis written against ~70 operations works
+on every one of the 189 variants.
+
+`PcodeBuilder::build` walks a constructor's semantic template. A BUILD directive recurses into an
+operand's own template, which is how a nested constructor's semantics are spliced in at the point
+the parent asked for them. A varnode whose offset lives in another address space becomes an
+explicit LOAD before the operation or a STORE after it, exactly as `SleighBuilder::dump` generates
+them.
+
+Lifting needs a second pass over the same parse, and that is structural rather than a convenience:
+a varnode template can name another operand's handle — its space, its offset, its size, or its
+offset adjusted by a truncation amount — and that handle is not known until the operand's own
+constructor has been resolved. `Sleigh::resolveHandles` does the same pass for the same reason.
+
+### The slot reuse that would have made the output nonsense
+
+Five opcode values mean one thing in a compiled table and another in the decompiler's own IR.
+`semantics.hh:26-30`:
+
+```c
+#define BUILD      CPUI_MULTIEQUAL   // 60
+#define DELAY_SLOT CPUI_INDIRECT     // 61
+#define MACROBUILD CPUI_CAST         // 64
+#define LABELBUILD CPUI_PTRADD       // 65
+#define CROSSBUILD CPUI_PTRSUB       // 66
+```
+
+So opcode 60 inside a `.sla` is "build this operand's p-code here", not a phi node. Taking the
+names from the `OpCode` enum would emit MULTIEQUAL and INDIRECT operations that no instruction
+performs — output that looks like p-code while describing nothing. The directives are consumed by
+the builder and never appear in a result, which is asserted across every shipped table.
+
+### Two things lifting reports rather than invents
+
+A **delay slot** means the following instruction executes as part of this one. Decoding one range
+cannot splice that in, so the directive is reported and the limitation says the p-code is not the
+whole effect. A **constructor with no template** is not an instruction that does nothing — it is an
+effect the table does not model, and the two are distinguished by an UNIMPLEMENTED directive.
+Collapsing them would report a halt as a no-op.
+
+### Checked against real instructions
+
+```
+6502    LDA #0x42   A = COPY 0x42 ; Z = INT_EQUAL A,0 ; N = INT_SLESS A,0
+x86     PUSH EBP    tmp = COPY EBP ; ESP = INT_SUB ESP,4 ; STORE ram,ESP,tmp
+x86     SUB ESP,16  CF/OF/SF/ZF, then PF via POPCOUNT — Ghidra's own x86 idiom
+x86     RET         EIP = LOAD ram,ESP ; ESP = INT_ADD ESP,4 ; RETURN EIP
+ARM     bx lr       INT_AND lr,1 ; CALLOTHER ; INT_AND lr,0xfffffffe ; RETURN
+MIPS    jal 0x1000  ra = COPY 0x1004 ; CALL ram:0x1000   + DELAY_SLOT
+```
+
+The 6502 flag registers land at `0x30` and `0x35`, which is exactly where
+`define register offset=0x30 [N V B D I Z C]` puts N and Z. The MIPS return address is `inst_next`,
+computed after the length is known.
+
+Across all 137 tables, sweeping the leading byte of every language: **27,886 instructions lifted,
+183,419 p-code operations, 57 distinct opcodes, zero directives leaked into output**, and three
+refusals — a Dalvik probe reading past Ghidra's own 16-byte instruction window, and two JVM switch
+probes exceeding its 32-deep operand nesting. All three are the bounds Ghidra enforces, reported as
+named refusals.
+
+That sweep also found a real defect. A subtable operand that resolved to nothing used to leave the
+decode running with the operand's minimum length, dropping it from the display while still
+reporting a successful decode — an instruction missing an operand, presented as complete. Ghidra
+raises `BadDataError` there, and so does this now: the instruction reports
+`unresolved_subtable` rather than a confident partial answer. That one change took the exception
+count from 4,137 to 3.
 
 ## What this does not do
 

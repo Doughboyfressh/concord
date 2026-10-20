@@ -175,6 +175,24 @@ export function ghidraExercises() {
     },
     {
       family: 'ghidra', tool: 'artifact.disassemble', workspace: 'temp',
+      fixture: (dir) => writeGhidraFixtures(dir),
+      plan: task('artifact.disassemble', { table: 'toy-decode.sla', path: 'toy-code.bin', pcode: true, limit: 4 }),
+      expect: (r) => {
+        const out = r.results.a;
+        const [halt, inc, ld] = out.instructions;
+        return halt.text === 'halt' && halt.pcode.length === 0
+          && halt.directives[0].directive === 'UNIMPLEMENTED'
+          && inc.text === 'inc' && inc.pcode[0].op === 'INT_ADD'
+          && inc.pcode[0].output.space === 'register'
+          && inc.pcode[0].inputs[1].space === 'const'
+          && ld.text === 'ld 0x42' && ld.pcode[0].op === 'COPY'
+          && ld.pcode[0].inputs[0].offset === '0x42'
+          && out.limitations.some((line) => /no dataflow/.test(line));
+      },
+      lesson: 'artifact.disassemble with pcode:true lifts each instruction to p-code, which is Ghidra own intermediate representation of what the instruction does: an operation, an optional output varnode and its input varnodes, each naming an address space, an offset and a size. A literal lands in the constant space, which is index 0 because the decoder re-inserts it rather than reading it from the file. The lift is a second pass over the same parse, and it has to be: a varnode template can name another operand handle space, offset or size, and that handle is only known once the operand own constructor has resolved. Two distinctions in the output carry real weight. An empty p-code list with an UNIMPLEMENTED directive is not an instruction that does nothing; it is an effect the table does not model, and conflating them would report a halt as a no-op. And a delay slot means the following instruction executes as part of this one, so the p-code shown is not the whole effect and the omission is stated rather than left to be noticed.',
+    },
+    {
+      family: 'ghidra', tool: 'artifact.disassemble', workspace: 'temp',
       fixture: (dir) => {
         writeGhidraFixtures(dir);
         fs.writeFileSync(path.join(dir, 'described.sla'), buildSla());

@@ -19,11 +19,13 @@ import { deflateSync } from 'node:zlib';
 
 // Element and attribute ids from Ghidra/Features/Decompiler/src/decompile/cpp/slaformat.cc.
 const ELEM = { sleigh: 33, spaces: 34, sourcefiles: 35, sourcefile: 36, space: 37, space_unique: 46,
-  symbol_table: 38, scope: 22, varnode_sym_head: 24, userop_head: 26, subtable_sym_head: 72,
-  subtable_sym: 71, operand_sym_head: 14, operand_sym: 13, constructor: 20, oper: 15, print: 8,
-  opprint: 17, decision: 16, pair: 9, instruct_pat: 18, pat_block: 7, mask_word: 6,
-  operand_exp: 12, tokenfield: 27 };
-const ATTR = { val: 2, id: 3, space: 4, off: 6, mask: 8, index: 9, nonzero: 10, piece: 11, name: 12,
+  symbol_table: 38, scope: 22, varnode_sym_head: 24, varnode_sym: 23, userop_head: 26,
+  subtable_sym_head: 72, subtable_sym: 71, operand_sym_head: 14, operand_sym: 13,
+  constructor: 20, oper: 15, print: 8, opprint: 17, decision: 16, pair: 9, instruct_pat: 18,
+  pat_block: 7, mask_word: 6, operand_exp: 12, tokenfield: 27,
+  construct_tpl: 21, op_tpl: 5, varnode_tpl: 2, handle_tpl: 30, null_: 11,
+  const_real: 1, const_spaceid: 3, const_handle: 4 };
+const ATTR = { val: 2, id: 3, space: 4, s: 5, off: 6, code: 7, mask: 8, index: 9, nonzero: 10, piece: 11, name: 12,
   scope: 13, startbit: 14, size: 15, table: 16, ct: 17, minlen: 18, base: 19, number: 20,
   context: 21, parent: 22, line: 24, source: 25, length: 26, first: 27, shift: 29, endbit: 30,
   signbit: 31, endbyte: 32, startbyte: 33, version: 34, bigendian: 35, align: 36, uniqbase: 37,
@@ -50,6 +52,9 @@ const attrBool = (id, value) => [...header(0xc0, id), (1 << 4) | (value ? 1 : 0)
 // instead, which is how `firstWhitespace: -1` silently became 0 and rendered an empty mnemonic.
 const attrSigned = (id, value) => (value < 0 ? attribute(id, 3, payload(-value)) : attribute(id, 2, payload(value)));
 const attrUnsigned = (id, value) => attribute(id, 4, payload(value));
+// An address space travels as its index under its own type code, which is how a decoder knows to
+// look the value up in the space table rather than treat it as a number.
+const attrSpace = (id, index) => attribute(id, 5, payload(index));
 const attrString = (id, value) => {
   const bytes = [...Buffer.from(value, 'utf8')];
   return [...attribute(id, 7, payload(bytes.length)), ...bytes];
@@ -125,6 +130,14 @@ export function buildSla({ bigEndian = false, alignment = 1, defaultSpace = 'ram
  */
 const INSTRUCTION_SYMBOL = 0;
 const OPERAND_SYMBOL = 1;
+// Space indices. 0 is the constant space, which sleighbase.cc re-inserts rather than serialising.
+const CONST_SPACE = 0;
+const UNIQUE_SPACE = 1;
+const RAM_SPACE = 2;
+const REGISTER_SPACE = 3;
+const R0 = 0;   // register space offset, 4 bytes wide
+const OP_COPY = 1;
+const OP_INT_ADD = 19;
 
 // A mask/value pair over the first instruction byte, already normalized the way PatternBlock
 // writes it: the leading mask byte is nonzero, so the offset stays 0.
@@ -143,7 +156,34 @@ const terminal = (number, pairs) => [
   ]),
   ...close(ELEM.decision),
 ];
-const constructor = (pieces, { length, firstWhitespace, operands = [] }) => [
+// --- semantic templates ------------------------------------------------------------------------
+// A ConstTpl is one slot of a varnode template. `real` is a literal, `handle` names an operand's
+// resolved handle and which part of it to take, and `spaceid` names an address space.
+const constReal = (value) => [...open(ELEM.const_real), ...attrUnsigned(ATTR.val, value), ...close(ELEM.const_real)];
+const constSpaceId = (index) => [...open(ELEM.const_spaceid), ...attrSpace(ATTR.space, index), ...close(ELEM.const_spaceid)];
+const constHandle = (index, select) => [
+  ...open(ELEM.const_handle), ...attrSigned(ATTR.val, index), ...attrSigned(ATTR.s, select), ...close(ELEM.const_handle),
+];
+const varnodeTpl = (space, offset, size) => [...open(ELEM.varnode_tpl), ...space, ...offset, ...size, ...close(ELEM.varnode_tpl)];
+/** A register varnode: a literal space, offset and size. */
+const regTpl = (spaceIndex, offset, size) => varnodeTpl(constSpaceId(spaceIndex), constReal(offset), constReal(size));
+/** The value an operand exports, taken from its handle's offset. */
+const operandValueTpl = (index, size) => varnodeTpl(constSpaceId(CONST_SPACE), constHandle(index, 1), constReal(size));
+const opTpl = (code, output, inputs) => [
+  ...open(ELEM.op_tpl), ...attrSigned(ATTR.code, code),
+  ...(output ?? [...open(ELEM.null_), ...close(ELEM.null_)]),
+  ...inputs.flat(),
+  ...close(ELEM.op_tpl),
+];
+const constructTpl = (ops, { delay = 0 } = {}) => [
+  ...open(ELEM.construct_tpl),
+  ...(delay ? attrSigned(ATTR.delay, delay) : []),
+  ...open(ELEM.null_), ...close(ELEM.null_), // exports nothing
+  ...ops.flat(),
+  ...close(ELEM.construct_tpl),
+];
+
+const constructor = (pieces, { length, firstWhitespace, operands = [], template = null }) => [
   ...open(ELEM.constructor), ...attrUnsigned(ATTR.parent, INSTRUCTION_SYMBOL),
   ...attrSigned(ATTR.first, firstWhitespace), ...attrSigned(ATTR.length, length),
   ...attrSigned(ATTR.source, 0), ...attrSigned(ATTR.line, 1),
@@ -151,6 +191,7 @@ const constructor = (pieces, { length, firstWhitespace, operands = [] }) => [
   ...pieces.flatMap((piece) => (typeof piece === 'string'
     ? [...open(ELEM.print), ...attrString(ATTR.piece, piece), ...close(ELEM.print)]
     : [...open(ELEM.opprint), ...attrSigned(ATTR.id, piece.operand), ...close(ELEM.opprint)])),
+  ...(template ?? []),
   ...close(ELEM.constructor),
 ];
 
@@ -163,8 +204,9 @@ export function buildDecodableSla() {
     ...open(ELEM.sourcefile), ...attrString(ATTR.name, 'toy.slaspec'), ...attrSigned(ATTR.index, 0), ...close(ELEM.sourcefile),
     ...close(ELEM.sourcefiles),
     ...open(ELEM.spaces), ...attrString(ATTR.defaultspace, 'ram'),
-    ...space(ELEM.space_unique, { name: 'unique', index: 1, size: 4 }),
-    ...space(ELEM.space, { name: 'ram', index: 2, size: 4, delay: 1 }),
+    ...space(ELEM.space_unique, { name: 'unique', index: UNIQUE_SPACE, size: 4 }),
+    ...space(ELEM.space, { name: 'ram', index: RAM_SPACE, size: 4, delay: 1 }),
+    ...space(ELEM.space, { name: 'register', index: REGISTER_SPACE, size: 4 }),
     ...close(ELEM.spaces),
 
     ...open(ELEM.symbol_table), ...attrSigned(ATTR.scopesize, 1), ...attrSigned(ATTR.symbolsize, 2),
@@ -191,11 +233,24 @@ export function buildDecodableSla() {
     ...close(ELEM.operand_sym),
 
     ...open(ELEM.subtable_sym), ...attrUnsigned(ATTR.id, INSTRUCTION_SYMBOL), ...attrSigned(ATTR.numct, 3),
+    // `halt` has no template at all, which is how a constructor that declares no semantics
+    // appears: the lifter must say so rather than report an empty effect.
     ...constructor(['halt'], { length: 1, firstWhitespace: -1 }),
-    ...constructor(['inc'], { length: 1, firstWhitespace: -1 }),
+    // `inc` is r0 = r0 + 1, with a delay slot so the directive and the byte count are exercised.
+    ...constructor(['inc'], { length: 1, firstWhitespace: -1,
+      template: constructTpl([
+        opTpl(OP_INT_ADD, regTpl(REGISTER_SPACE, R0, 4), [
+          regTpl(REGISTER_SPACE, R0, 4),
+          varnodeTpl(constSpaceId(CONST_SPACE), constReal(1), constReal(4)),
+        ]),
+      ], { delay: 1 }) }),
     // "ld", then a whitespace piece, then the operand slot. firstWhitespace is the index of that
-    // separator, which is how Ghidra splits a mnemonic from its body.
-    ...constructor(['ld', ' ', { operand: 0 }], { length: 1, firstWhitespace: 1, operands: [OPERAND_SYMBOL] }),
+    // separator, which is how Ghidra splits a mnemonic from its body. Its semantics copy the
+    // operand's exported value into r0, which only works if the operand's handle resolved.
+    ...constructor(['ld', ' ', { operand: 0 }], { length: 1, firstWhitespace: 1, operands: [OPERAND_SYMBOL],
+      template: constructTpl([
+        opTpl(OP_COPY, regTpl(REGISTER_SPACE, R0, 4), [operandValueTpl(0, 4)]),
+      ]) }),
     // Two bits at bits 6 and 7 — the low two bits of the opcode byte — select the branch.
     ...open(ELEM.decision), ...attrSigned(ATTR.number, 0), ...attrBool(ATTR.context, false),
     ...attrSigned(ATTR.startbit, 6), ...attrSigned(ATTR.size, 2),
