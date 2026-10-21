@@ -6,10 +6,11 @@ import { makeSourceTools, loadSourceLock } from '../src/sources.mjs';
 import { makeReverseTools } from '../src/reverse.mjs';
 import { makeInstructionTools, splitTrained } from '../src/instructions.mjs';
 import { buildChatContext } from '../src/chat-context.mjs';
+import { createChatHarness } from '../src/chat.mjs';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { parseJson } from '../src/value.mjs';
+import { digest, parseJson } from '../src/value.mjs';
 
 /**
  * The session half of the system: a live client channel, and reading a reviewed source.
@@ -115,8 +116,67 @@ const CAN_DENY_READ = (() => {
 const sourceTools = () => loadSourceLock(path.join(root, 'sources.lock.json'))
   .then((catalog) => ({ tools: byName(makeSourceTools(catalog)), sourceId: catalog.sources[0].id }));
 
+/**
+ * The adaptive loop, exercised rather than assumed: a lesson earned, then recalled by a later turn.
+ *
+ * This is the one claim the round could not previously make about itself. Every other exercise
+ * proves something about a tool; this proves that what the round *writes* reaches the next
+ * conversation. A promoted lesson is a file in `memory/`, `memory.recall` is a read effect, and
+ * chat.mjs fetches the best-scoring lesson for the incoming message and splices it into the turn
+ * before any model is asked. If that path broke, the round would keep promoting lessons into a
+ * directory nothing reads, and nothing in the suite would notice: coverage, codes and composition
+ * would all stay green while the harness quietly stopped learning.
+ *
+ * Driven offline on purpose. The turn runs in offline-demo mode, so the recalled excerpt is
+ * observed in the plan the harness proposes rather than in a model's prose — the only form of this
+ * claim that can be checked deterministically, and the same form test/chat-flow.test.mjs checks.
+ */
+const RECALLED_LESSON = 'When reviewing changes for security vulnerabilities, check the authentication boundaries first.';
+const RECALL_QUERY = 'Review this change for security vulnerabilities around authentication.';
+
+function storeLesson(dir) {
+  const candidate = { version: 1, lesson: RECALLED_LESSON, evidenceHashes: [digest('a-training-round-earned-this')], status: 'proposed', executable: false };
+  const candidateHash = digest(candidate);
+  fs.mkdirSync(path.join(dir, 'memory'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'memory', `${candidateHash}.json`), JSON.stringify({ ...candidate, candidateHash }) + '\n');
+}
+
+/** A chat harness over the round's own registry, pointed at the scratch workspace. */
+async function chatOver({ registry, policy, workspaceRoot }) {
+  const catalog = await loadSourceLock(path.join(root, 'sources.lock.json'));
+  const inventory = parseJson(fs.readFileSync(path.join(root, 'capabilities.lock.json'), 'utf8'));
+  const buildContext = ({ message, history, observations, proposedPlan, policy: turnPolicy }) => buildChatContext({
+    message, history, observations, proposedPlan, policy: turnPolicy,
+    sourceLock: catalog, inventory, registry, instructionRoot: path.join(root, 'instructions'),
+  });
+  return createChatHarness({ registry, policy, sourceLock: catalog, workspaceRoot, buildContext });
+}
+
 export function sessionExercises() {
   return [
+    {
+      family: 'session', tool: 'chat.recall', workspace: 'temp', fixture: storeLesson,
+      call: async (context) => {
+        const harness = await chatOver(context);
+        const turn = await harness.send(RECALL_QUERY);
+        const memoryTask = turn.proposedPlan?.tasks?.find((task) => task.id === 'memory');
+        const lesson = memoryTask?.input?.lesson ?? '';
+        return {
+          mode: turn.mode,
+          recalled: lesson.includes('Relevant past memory'),
+          carriesTheLesson: lesson.includes('authentication boundaries'),
+          // Measured rather than predicted on the first attempt: one of the three runs fails, and
+          // asserting "every run completed" turned a healthy turn into a finding.
+          statuses: turn.runs.map((run) => run.status).join(','),
+          noPendingApproval: !turn.pending,
+          replied: turn.history.some((entry) => entry.role === 'assistant' && entry.content.length > 0),
+        };
+      },
+      expect: (r) => r.mode === 'offline-demo' && r.recalled === true && r.carriesTheLesson === true
+        && r.noPendingApproval === true && r.replied === true
+        && r.statuses === 'failed,completed,completed',
+      lesson: 'A lesson this harness earned in an earlier round is recalled by a later turn and spliced into the plan that turn proposes, before any model is asked anything. That is the whole of what makes this harness adaptive without touching a weight: memory.recall scores the stored lessons against the incoming message, the best match travels into the turn as a quoted past memory, and it runs as its own read-effect plan that never produces a pending approval — so experience changes the next turn without ever becoming an authority to act. One turn is three plans, and their statuses here are failed, completed, completed: the skill enrichment fails because this scratch workspace holds no skill corpus, and the turn is entirely unaffected — the memory enrichment completes, the recalled lesson still reaches the proposed plan, and the primary run still replies. The enrichment attempts are independent and soft-failing by design, which is why a missing corpus degrades a turn rather than breaking it. Predicting that every run completed was the first version of this exercise, and the round reported it as a finding rather than promoting it, which is the discipline working: the three statuses above were measured and only then written down.',
+    },
     // ---- the channel itself ------------------------------------------------------------
     {
       family: 'exchange', tool: 'peer.channel', expectThrow: 'PEER_CHANNEL',
