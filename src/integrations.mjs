@@ -9,6 +9,9 @@ import { canonical, deepFreeze, parseJson as strictParseJson, validateSchema, Ha
 const DEFAULT_TIMEOUT = 30_000;
 const DEFAULT_OUTPUT = 1_048_576;
 const MAX_INPUT = 32 * 1_048_576;
+// A floor for the derived token ceiling, so a tightly attenuated policy cannot shrink a reply to
+// the point where every answer is cut off mid-sentence. Low enough to stay a brake and not a budget.
+const MIN_MODEL_TOKENS = 256;
 const objectSchema = { type: 'object' };
 const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const toolName = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
@@ -256,7 +259,25 @@ function model(value) {
       const messages = [];
       if (input.system !== undefined) messages.push({ role: 'system', content: input.system });
       messages.push({ role: 'user', content: input.prompt });
-      const response = await postJson(config, { model: config.model, messages, response_format: { type: 'json_object' }, temperature: 0 }, context);
+      /**
+       * Tell the provider where to stop, instead of only judging it after it has stopped.
+       *
+       * maxOutputBytes was already the bound, and postJson still enforces it on the response, but
+       * it was enforced only on the way back: nothing told the model about it. On an open-ended
+       * prompt that is the difference between a bounded answer and a runaway that spends the whole
+       * budget and then fails the turn for exceeding it. Measured, not theorised — asked to list
+       * everything it cannot do, Concord produced a correct first page, ran out of real limits,
+       * kept generating, and collapsed into cycling synonyms. Greedy decoding aggravates this,
+       * because temperature 0 is the setting most prone to repetition loops, and temperature stays
+       * at 0 because a proposal that varied between identical runs would cost more than it buys.
+       *
+       * Four bytes per token is an approximation for English and is deliberately low. It is a
+       * brake, never the thing that decides correctness: a reply that would still exceed the byte
+       * bound is rejected by the check in postJson exactly as before.
+       */
+      const bound = limits(config, context, config.name, 'network');
+      const maxTokens = Math.max(MIN_MODEL_TOKENS, Math.floor(bound.maxOutputBytes / 4));
+      const response = await postJson(config, { model: config.model, messages, response_format: { type: 'json_object' }, temperature: 0, max_tokens: maxTokens }, context);
       if (response?.model !== undefined && (typeof response.model !== 'string' || !response.model)) fail('INTEGRATION_OUTPUT', 'Model response has an invalid model identity');
       const content = response?.choices?.[0]?.message?.content;
       if (typeof content !== 'string') fail('INTEGRATION_OUTPUT', 'Model response is missing JSON message content');

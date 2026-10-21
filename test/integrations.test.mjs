@@ -196,6 +196,26 @@ test('model adapter returns a JSON proposal and never executes its proposed comm
   assert.equal(received.model, 'local-model-revision-1');
   assert.equal(received.temperature, 0);
   assert.deepEqual(received.messages.map(message => message.role), ['system', 'user']);
+  // The provider is told where to stop. Without this the byte budget was enforced only on the way
+  // back, so an open-ended prompt could spend all of it and then fail the turn for exceeding it —
+  // which is how a request to list every limitation became a page of cycling synonyms.
+  assert.equal(received.max_tokens, Math.floor(1048576 / 4));
+});
+
+test('a narrowed output budget lowers the model token ceiling but never to nothing', async () => {
+  let received;
+  await httpFixture(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    received = JSON.parse(Buffer.concat(chunks));
+    response.end(JSON.stringify({ model: 'local-model-revision-1', choices: [{ message: { content: '{}' } }] }));
+  }, async origin => {
+    const tool = makeIntegrationTools({ model: { origin, model: 'local-model-revision-1', apiKeyEnv: credentialName } })[0];
+    await tool.execute({ prompt: 'Propose a plan' }, networkContext(origin, { maxOutputBytes: 100 }));
+  });
+  // Derived from the attenuated policy, then floored: a budget this small would otherwise cut off
+  // every reply mid-sentence, and a ceiling of twenty-five tokens is not a brake but a gag.
+  assert.equal(received.max_tokens, 256);
 });
 
 test('subprocess sends one JSON document and receives one JSON document with isolated environment', async () => {
