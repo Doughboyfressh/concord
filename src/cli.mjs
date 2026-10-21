@@ -15,6 +15,7 @@ import { makeReaderTools } from './readers.mjs';
 import { makeForeignTools } from './foreign.mjs';
 import { makeArtifactTools } from './artifacts.mjs';
 import { makeBrowserTools } from './browser.mjs';
+import { makeDecompilerTools } from './decompiler.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const usage = `Concord — evidence-bound AI harness
@@ -23,7 +24,7 @@ const usage = `Concord — evidence-bound AI harness
   node src/cli.mjs replay RUN --plan PLAN --policy POLICY [options]
   node src/cli.mjs validate PLAN --policy POLICY [options]
   node src/cli.mjs inspect RUN
-  node src/cli.mjs tools [--integrations CONFIG] [--workers CONFIG] [--browser CONFIG]
+  node src/cli.mjs tools [--integrations CONFIG] [--workers CONFIG] [--browser CONFIG] [--decompiler CONFIG]
   node src/cli.mjs sources
 
 Options:
@@ -31,6 +32,7 @@ Options:
   --integrations FILE Reviewed HTTP/process adapter configuration
   --workers FILE      Reviewed DeepSeek/Hermes worker configuration
   --browser FILE      Reviewed browser.snapshot configuration (executable, etc.)
+  --decompiler FILE   Reviewed artifact.decompile configuration (executable, etc.)
   --approvals FILE    JSON array of exact request hashes (run only)
   --journal FILE      Exclusive, fsynced JSONL intent/receipt log (run only)
   --root SHA256       Independent terminal commitment (replay only)
@@ -60,7 +62,7 @@ function readJson(filename) {
 function parseArgs(argv) {
   const [command = 'help', ...rest] = argv;
   const positional = [], flags = {};
-  const allowed = new Set(['policy', 'out', 'workspace', 'integrations', 'workers', 'browser', 'reverse', 'foreign', 'approvals', 'journal', 'plan', 'root']);
+  const allowed = new Set(['policy', 'out', 'workspace', 'integrations', 'workers', 'browser', 'decompiler', 'reverse', 'foreign', 'approvals', 'journal', 'plan', 'root']);
   for (let i = 0; i < rest.length; i++) {
     if (!rest[i].startsWith('--')) { positional.push(rest[i]); continue; }
     const name = rest[i].slice(2);
@@ -83,6 +85,7 @@ function registryFor(catalog, flags) {
     ...makeIntegrationTools(flags.integrations ? readJson(flags.integrations) : {}),
     ...makeAgentTools(flags.workers ? readJson(flags.workers) : {}),
     ...makeBrowserTools(flags.browser ? readJson(flags.browser) : undefined),
+    ...makeDecompilerTools(flags.decompiler ? readJson(flags.decompiler) : undefined),
     ...makeReverseTools(readJson(path.join(root, 'reverse-tools.json')), flags.reverse ? readJson(flags.reverse) : {}),
     ...makeReaderTools(),
     ...makeForeignTools(fs.existsSync(path.join(root, 'foreign-capabilities.json'))
@@ -113,11 +116,11 @@ export async function main(argv = process.argv.slice(2)) {
   }
   const registry = registryFor(catalog, flags);
   if (command === 'tools') {
-    if (positional.length || Object.keys(flags).some(k => !['integrations', 'workers', 'browser'].includes(k))) throw new HarnessError('CLI_USAGE', 'tools accepts adapter configuration flags only');
+    if (positional.length || Object.keys(flags).some(k => !['integrations', 'workers', 'browser', 'decompiler'].includes(k))) throw new HarnessError('CLI_USAGE', 'tools accepts adapter configuration flags only');
     console.log(JSON.stringify(registryManifest(registry), null, 2)); return 0;
   }
   if (!['run', 'replay', 'validate'].includes(command) || positional.length !== 1 || !flags.policy || (command === 'run' && !flags.out) || (command === 'replay' && !flags.plan)) throw new HarnessError('CLI_USAGE', usage);
-  const commandFlags = { run: ['policy','out','workspace','integrations','workers','browser','approvals','journal'], replay: ['plan','policy','workspace','integrations','workers','browser','root'], validate: ['policy','workspace','integrations','workers','browser'] };
+  const commandFlags = { run: ['policy','out','workspace','integrations','workers','browser','decompiler','approvals','journal'], replay: ['plan','policy','workspace','integrations','workers','browser','decompiler','root'], validate: ['policy','workspace','integrations','workers','browser','decompiler'] };
   if (Object.keys(flags).some(k => !commandFlags[command].includes(k))) throw new HarnessError('CLI_USAGE', 'Flag does not apply to this command');
   const workspaceRoot = fs.realpathSync(path.resolve(flags.workspace ?? process.cwd()));
   const options = { plan: readJson(command === 'replay' ? flags.plan : positional[0]), policy: readJson(flags.policy), registry, sourceLock: runtimeLock(catalog), workspaceRoot };

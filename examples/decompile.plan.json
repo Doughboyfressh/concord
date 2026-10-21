@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "name": "Decompile one function from a binary in the workspace",
+  "tasks": [
+    { "id": "code", "tool": "artifact.decompile", "input": {
+        "path": "program.exe",
+        "table": "x86/data/languages/x86-64.sla",
+        "processorSpec": "x86/data/languages/x86-64.pspec",
+        "compilerSpec": "x86/data/languages/x86-64-win.cspec",
+        "address": "0x1401bb85c",
+        "context": { "addrsize": 2, "opsize": 1, "rexprefix": 0, "longMode": 1 }
+      } }
+  ]
+}

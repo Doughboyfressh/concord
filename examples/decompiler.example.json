@@ -1,0 +1,5 @@
+{
+  "executable": "C:/ghidra/Ghidra/Features/Decompiler/os/win_x86_64/decompile.exe",
+  "timeoutMs": 120000,
+  "maxOutputBytes": 33554432
+}

@@ -1,4 +1,12 @@
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { readFile, realpath, stat } from 'node:fs/promises';
+import { isAbsolute, resolve as resolvePath } from 'node:path';
 import { HarnessError } from './value.mjs';
+import { readWorkspaceFile } from './workspace-fs.mjs';
+import { loadLanguage, liftInstruction } from './sleigh.mjs';
+import { recoverCallGraph } from './control-flow.mjs';
+import { makeArtifactTools } from './artifacts.mjs';
 
 /**
  * Speaking to Ghidra's decompiler directly.
@@ -938,6 +946,271 @@ export function createSession({ spawn, callbacks, timeoutMs = 120_000, onWarning
 
     close() { try { child.stdin.end(); } catch { /* already closed */ } },
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The kernel tool
+// ---------------------------------------------------------------------------------------------
+
+const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+
+const DEFAULT_TIMEOUT = 120_000;
+const DEFAULT_OUTPUT = 33_554_432;
+const DEFAULT_WINDOW = 0x8000;
+const TOOL_NAME = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
+const HEX_ADDRESS = /^0x[0-9a-fA-F]{1,16}$/;
+
+const positive = (value, fallback, label) => {
+  const result = value ?? fallback;
+  if (!Number.isSafeInteger(result) || result < 1 || result > 2_147_483_647) {
+    fail('DECOMPILE_CONFIG', `${label} must be a positive bounded integer`);
+  }
+  return result;
+};
+
+/**
+ * Reviewed configuration, shaped exactly like the browser tool's.
+ *
+ * The executable is an absolute path from configuration an operator reviewed, never from a plan,
+ * and `executableSha256` pins which build runs. That matters more here than for most process
+ * tools: this one hands a decompiler bytes from an untrusted binary and then treats what comes
+ * back as program structure, so which binary is doing the parsing is part of what the receipt
+ * attests to.
+ */
+function decompilerSettings(value) {
+  const config = { ...value };
+  config.name = config.name ?? 'artifact.decompile';
+  if (typeof config.name !== 'string' || !TOOL_NAME.test(config.name)) fail('DECOMPILE_CONFIG', 'Invalid decompiler tool name');
+  if (typeof config.executable !== 'string' || !config.executable || config.executable.includes('\0')) {
+    fail('DECOMPILE_CONFIG', 'Decompiler executable must be a nonempty string');
+  }
+  if (!isAbsolute(config.executable)) fail('DECOMPILE_CONFIG', 'Decompiler executable must be an absolute path');
+  if (config.executableSha256 !== undefined && !/^[a-f0-9]{64}$/.test(config.executableSha256)) {
+    fail('DECOMPILE_CONFIG', 'Invalid decompiler executable digest');
+  }
+  config.timeoutMs = positive(config.timeoutMs, DEFAULT_TIMEOUT, 'timeoutMs');
+  config.maxOutputBytes = positive(config.maxOutputBytes, DEFAULT_OUTPUT, 'maxOutputBytes');
+  const allowed = ['name', 'executable', 'executableSha256', 'timeoutMs', 'maxOutputBytes'];
+  if (Object.keys(value).some((key) => !allowed.includes(key))) fail('DECOMPILE_CONFIG', 'Unsupported decompiler configuration field');
+  return config;
+}
+
+/** Policy narrows configuration and never widens it, as everywhere else. */
+function limits(config, context, name) {
+  const policy = context?.policy ?? {};
+  if (Array.isArray(policy.allowedTools) && !policy.allowedTools.includes(name)) fail('DECOMPILE_POLICY', 'Decompiler tool is not allowlisted');
+  if (Array.isArray(policy.allowedEffects) && !policy.allowedEffects.includes('process')) fail('DECOMPILE_POLICY', 'Decompiler effect is not allowlisted');
+  if (context?.signal?.aborted) fail('DECOMPILE_ABORTED', 'Decompilation was cancelled');
+  return {
+    timeoutMs: Math.min(config.timeoutMs, positive(policy.timeoutMs, config.timeoutMs, 'policy timeoutMs')),
+    maxOutputBytes: Math.min(config.maxOutputBytes, positive(policy.maxOutputBytes, config.maxOutputBytes, 'policy maxOutputBytes')),
+  };
+}
+
+/**
+ * The stripped-down SLEIGH spec, generated from the language rather than written by hand.
+ *
+ * The constant space is omitted deliberately: `AddrSpaceManager::decodeSpaces` inserts it before
+ * reading any declared space, so listing it produces two.
+ */
+function sleighSpecFor(language) {
+  const element = { other: 'space_other', unique: 'space_unique', addressable: 'space' };
+  const spaces = (language.spaces ?? []).map((space) => `    <${element[space.kind] ?? 'space'} name="${space.name}"`
+    + ` index="${space.index}" size="${space.size}" wordsize="${space.wordSize}"`
+    + ` bigendian="${Boolean(language.bigEndian)}" delay="${space.name === 'ram' ? 1 : 0}"/>`).join('\n');
+  return `<sleigh bigendian="${Boolean(language.bigEndian)}" uniqbase="0x100000" uniqmask="${language.uniqueMask ?? 0}">\n`
+    + `  <spaces defaultspace="ram">\n${spaces}\n  </spaces>\n</sleigh>`;
+}
+
+/**
+ * Decompilation as a kernel tool.
+ *
+ * A `process` effect, so a plan cannot reach it without an approval hash bound to the exact
+ * resolved input, and the C it returns is journaled and replayed from the receipt rather than
+ * re-derived. Unconfigured, it registers nothing at all — an operator who has not reviewed a
+ * decompiler binary gets no tool, not a tool that always refuses.
+ *
+ * The function list comes from this harness's own region discovery, never from the decompiler's
+ * curiosity. Claiming a function wherever it happens to ask would invent them in data, and every
+ * name in the output would then be evidence of nothing.
+ */
+export function makeDecompilerTools(config) {
+  if (config === undefined) return [];
+  const settings = decompilerSettings(config);
+  const inspect = makeArtifactTools().find((tool) => tool.name === 'artifact.inspect');
+
+  const inputSchema = {
+    type: 'object', additionalProperties: false,
+    required: ['path', 'table', 'processorSpec', 'compilerSpec', 'address'],
+    properties: {
+      path: { type: 'string', minLength: 1, maxLength: 4096, description: 'The binary to decompile, in the workspace' },
+      table: { type: 'string', minLength: 1, maxLength: 4096, description: 'The compiled SLEIGH table (.sla) for its language' },
+      processorSpec: { type: 'string', minLength: 1, maxLength: 4096, description: 'The .pspec for that language' },
+      compilerSpec: { type: 'string', minLength: 1, maxLength: 4096, description: 'The .cspec for the calling convention' },
+      // Validated in execute rather than here: the kernel's schema subset has no pattern keyword,
+      // and declaring one fails every plan using this tool with INVALID_SCHEMA at compile time.
+      address: { type: 'string', minLength: 3, maxLength: 18, description: 'Loaded virtual address, as 0x-prefixed hex' },
+      window: { type: 'integer', minimum: 256, maximum: 1048576, description: 'Bytes of code analysed to discover functions' },
+      context: { type: 'object', additionalProperties: { type: 'integer' }, description: 'Initial SLEIGH context values from the .pspec' },
+    },
+  };
+
+  return [{
+    name: settings.name, version: '1', effect: 'process', config: settings, inputSchema,
+    outputKeys: ['supported', 'reason', 'source', 'address', 'functionName', 'counts', 'warnings', 'path', 'sha256', 'untrusted', 'limitations'],
+
+    async execute(input, context) {
+      const bound = limits(settings, context, settings.name);
+      if (!HEX_ADDRESS.test(input.address)) fail('DECOMPILE_INPUT', 'address must be 0x-prefixed hexadecimal');
+      const target = BigInt(input.address);
+
+      const limitations = [
+        'The C below was produced by a decompiler this harness does not implement, from p-code this harness lifted. It is an interpretation of bytes under one chosen language, and selecting the wrong table produces confident nonsense rather than a refusal',
+        'Function names are generated from the addresses this harness discovered, not read from the binary. A name is a label for a region, not a claim about what the code was called',
+        'Only functions reachable from the given address were discovered, so a call to an address outside that set is reported by address and is not evidence that nothing is there',
+      ];
+      const refuse = (reason, bytes) => ({
+        supported: false, reason, source: '', address: input.address, functionName: null,
+        counts: {}, warnings: [], path: input.path, sha256: bytes ? sha256(bytes) : null, untrusted: true, limitations,
+      });
+
+      const image = readWorkspaceFile(context.workspaceRoot, input.path, bound.maxOutputBytes);
+      // The header comes from artifact.inspect rather than a private copy of the section logic, so
+      // the mapping this tool uses is the same one every other caller sees.
+      const header = inspect.execute({ path: input.path }, context);
+      const layout = header.pe ?? header.elf ?? null;
+      if (!layout) return refuse('unsupported_format', image);
+      const sections = layout.sections ?? layout.segments ?? [];
+      const base = BigInt(layout.imageBase ?? 0);
+      if (!sections.length) return refuse('no_section_table', image);
+
+      const sectionOf = (address) => {
+        const relative = Number(BigInt(address) - base);
+        return sections.find((entry) => {
+          const start = entry.virtualAddress ?? entry.vaddr;
+          const size = Math.max(entry.virtualSize ?? 0, entry.fileSize ?? 0);
+          return relative >= start && relative < start + size;
+        }) ?? null;
+      };
+      const fileOffsetOf = (address) => {
+        const section = sectionOf(address);
+        if (!section) return null;
+        return Number(BigInt(address) - base) - (section.virtualAddress ?? section.vaddr) + section.fileOffset;
+      };
+      if (fileOffsetOf(target) === null) return refuse('address_not_mapped', image);
+
+      let language;
+      try { language = loadLanguage(readWorkspaceFile(context.workspaceRoot, input.table, bound.maxOutputBytes)); }
+      catch (error) { return { ...refuse('table_unreadable', image), reason: 'table_unreadable', warnings: [error?.message ?? 'unreadable'] }; }
+
+      const spaceIndex = (name) => (name === 'const' || name === 'constant' ? 0
+        : (language.spaces ?? []).find((space) => space.name === (typeof name === 'string' ? name : name?.name))?.index ?? 0);
+      const ram = spaceIndex('ram');
+      const readImage = (offset, size) => {
+        const at = fileOffsetOf(offset);
+        if (at === null || at < 0 || at + size > image.length) return null;
+        return image.subarray(at, at + size);
+      };
+      const lift = (offset) => {
+        const at = fileOffsetOf(offset);
+        if (at === null) return null;
+        try { return liftInstruction(language, image.subarray(at, Math.min(image.length, at + 16)), { address: BigInt(offset), contextValues: input.context ?? {} }); }
+        catch { return null; }
+      };
+
+      // Region discovery, bounded by the window, over the section holding the target.
+      const section = sectionOf(target);
+      const window = input.window ?? DEFAULT_WINDOW;
+      const start = Math.max(section.fileOffset, fileOffsetOf(target) - Math.floor(window / 8));
+      const startAddress = base + BigInt(start - section.fileOffset + (section.virtualAddress ?? section.vaddr));
+      let discovered;
+      try {
+        discovered = recoverCallGraph(language, image.subarray(start, Math.min(image.length, start + window)), {
+          address: startAddress, entries: [target], contextValues: input.context ?? {}, limit: 4096, regionLimit: 128,
+        });
+      } catch (error) { return { ...refuse('flow_failed', image), warnings: [error?.message ?? 'flow failed'] }; }
+
+      const functions = new Map();
+      for (const region of discovered.regions ?? []) {
+        const entry = BigInt(region.entry);
+        functions.set(entry.toString(), {
+          name: `FUN_${entry.toString(16)}`, entry,
+          size: Math.max(1, Number(BigInt(region.end) - BigInt(region.start))),
+        });
+      }
+      const ordered = [...functions.values()].map((entry) => entry.entry).sort((a, b) => (a < b ? -1 : 1));
+      if (!functions.has(target.toString())) return refuse('no_function_at_address', image);
+
+      /** The true gap between two discovered functions, or a whole non-code section. */
+      const holeAround = (offset, space) => {
+        const at = BigInt(offset);
+        if (space !== ram) return { first: 0n, last: 0xffffffffn };
+        if (functions.has(at.toString())) return null;
+        const holding = sectionOf(at);
+        if (!holding) return { first: at, last: at };
+        const low = base + BigInt(holding.virtualAddress ?? holding.vaddr);
+        const high = low + BigInt(Math.max(holding.virtualSize ?? 0, holding.fileSize ?? 0)) - 1n;
+        if (holding !== section) return { first: low, last: high };
+        let first = low;
+        let last = high;
+        for (const entry of ordered) {
+          if (entry <= at && entry > first) first = entry;
+          if (entry > at && entry - 1n < last) last = entry - 1n;
+        }
+        return { first, last };
+      };
+
+      const callbacks = createCallbacks({
+        language, spaceIndex, readImage, lift, holeAround,
+        findFunction: (offset, space) => (space === ram ? functions.get(BigInt(offset).toString()) ?? null : null),
+      });
+
+      let executable;
+      try {
+        executable = await realpath(settings.executable);
+        if (resolvePath(executable) !== resolvePath(settings.executable) || !(await stat(executable)).isFile()) {
+          fail('DECOMPILE_EXECUTABLE', 'Decompiler executable must be an existing regular file without path aliases');
+        }
+        if (settings.executableSha256 && createHash('sha256').update(await readFile(executable)).digest('hex') !== settings.executableSha256) {
+          fail('DECOMPILE_EXECUTABLE', 'Decompiler executable digest does not match');
+        }
+      } catch (error) {
+        if (error instanceof HarnessError) throw error;
+        fail('DECOMPILE_PATH', 'Decompiler executable is unavailable');
+      }
+
+      const warnings = [];
+      const session = createSession({
+        spawn: () => spawn(executable, [], { env: {}, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }),
+        callbacks, timeoutMs: bound.timeoutMs, onWarning: (warning) => warnings.push(warning),
+      });
+      try {
+        const registered = await session.registerProgram({
+          processorSpec: readWorkspaceFile(context.workspaceRoot, input.processorSpec, bound.maxOutputBytes).toString('latin1'),
+          compilerSpec: readWorkspaceFile(context.workspaceRoot, input.compilerSpec, bound.maxOutputBytes).toString('latin1'),
+          sleighSpec: sleighSpecFor(language), coreTypes: CORE_TYPES,
+        });
+        // Without this the decompiler completes and returns nothing: rawAction emits C only when
+        // getSendCCode() holds and the current action is named decompile.
+        await session.setAction({ archId: registered.archId, action: 'decompile', print: 'c' });
+        const result = await session.decompileAt({ archId: registered.archId, space: ram, offset: target });
+        const source = extractSource(Buffer.from(result.text, 'latin1'));
+        if (!source) return { ...refuse('analysis_incomplete', image), warnings: [...warnings, ...result.warnings] };
+        if (Buffer.byteLength(source) > bound.maxOutputBytes) return { ...refuse('output_limit', image), warnings };
+        return {
+          supported: true, reason: null, source, address: input.address,
+          functionName: functions.get(target.toString()).name,
+          counts: {
+            functions: functions.size,
+            queries: callbacks.asked().reduce((total, entry) => total + entry.count, 0),
+            sourceBytes: Buffer.byteLength(source),
+          },
+          warnings: [...warnings, ...result.warnings].filter((entry) => entry.trim()),
+          path: input.path, sha256: sha256(image), untrusted: true, limitations,
+        };
+      } finally { session.close(); }
+    },
+  }];
 }
 
 export const protocol = {

@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createCallbacks, createSession, extractSource, protocol, CORE_TYPES } from '../src/decompiler.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import { createCallbacks, createSession, extractSource, makeDecompilerTools, protocol, CORE_TYPES } from '../src/decompiler.mjs';
+import { canonical } from '../src/value.mjs';
+import { tempDir } from './temp-workspace.mjs';
 
 /**
  * Speaking to Ghidra's decompiler.
@@ -591,6 +595,147 @@ test('only a content attribute is source text, and only inside break is indent a
   const elsewhere = new P.PackedWriter();
   elsewhere.openElement(P.ELEM.OP).writeSignedInteger(P.ATTRIB.INDENT, 4).closeElement(P.ELEM.OP);
   assert.equal(extractSource(elsewhere.toBuffer()), '');
+});
+
+// ---------------------------------------------------------------------------------------------
+// The kernel tool
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Registration, configuration and the refusal paths.
+ *
+ * Nothing here launches a decompiler. What a process-effect tool must get right before it ever
+ * spawns anything is the part that can be checked without one: that it registers only when an
+ * operator configured it, that a plan cannot supply the executable, that policy narrows it, and
+ * that every refusal still returns the keys it declared.
+ */
+
+const EXECUTABLE = process.platform === 'win32' ? 'C:\\Windows\\System32\\cmd.exe' : '/bin/sh';
+const toolFor = (config = { executable: EXECUTABLE }) => makeDecompilerTools(config)[0];
+const toolContext = (root, extra = {}) => ({
+  workspaceRoot: fs.realpathSync(root),
+  policy: { allowedTools: ['artifact.decompile'], allowedEffects: ['read', 'process'], timeoutMs: 5000, maxOutputBytes: 1048576, ...extra },
+});
+const minimalInput = (overrides = {}) => ({
+  path: 'target.bin', table: 'lang.sla', processorSpec: 'lang.pspec', compilerSpec: 'lang.cspec',
+  address: '0x401000', ...overrides,
+});
+
+test('an unconfigured decompiler registers no tool at all', () => {
+  // Not a tool that always refuses: an operator who has reviewed no decompiler binary should see
+  // the capability absent from the registry, the same way the browser tool behaves.
+  assert.deepEqual(makeDecompilerTools(undefined), []);
+});
+
+test('the tool is a process effect, so a plan cannot reach it without a grant', () => {
+  const tool = toolFor();
+  assert.equal(tool.name, 'artifact.decompile');
+  assert.equal(tool.effect, 'process');
+  assert.equal(tool.inputSchema.type, 'object');
+  assert.equal(tool.inputSchema.additionalProperties, false);
+  assert.deepEqual(tool.inputSchema.required, ['path', 'table', 'processorSpec', 'compilerSpec', 'address']);
+  // The executable is never an input. It comes only from reviewed configuration, so a plan cannot
+  // choose which binary parses an untrusted file.
+  assert.ok(!Object.keys(tool.inputSchema.properties).includes('executable'));
+  assert.equal(tool.config.executable, EXECUTABLE);
+});
+
+test('the declared schema uses only keywords the kernel validator supports', () => {
+  // validateSchema refuses any keyword outside its subset, and a pattern here would fail every
+  // plan using this tool with INVALID_SCHEMA at compile time rather than refusing at run time.
+  const supported = new Set(['type', 'properties', 'required', 'additionalProperties', 'items', 'enum',
+    'const', 'minimum', 'maximum', 'minLength', 'maxLength', 'minItems', 'maxItems', 'description',
+    'title', '$schema', 'anyOf', 'oneOf']);
+  const walk = (schema) => {
+    for (const key of Object.keys(schema)) assert.ok(supported.has(key), `unsupported schema keyword: ${key}`);
+    for (const child of Object.values(schema.properties ?? {})) walk(child);
+    if (schema.additionalProperties && typeof schema.additionalProperties === 'object') walk(schema.additionalProperties);
+  };
+  walk(toolFor().inputSchema);
+});
+
+test('configuration is refused rather than repaired', () => {
+  for (const [config, why] of [
+    [{}, 'no executable'],
+    [{ executable: 'relative/decompile.exe' }, 'a relative path'],
+    [{ executable: EXECUTABLE, executableSha256: 'not-a-digest' }, 'a malformed digest'],
+    [{ executable: EXECUTABLE, name: 'Not A Tool Name' }, 'a name no transport can map'],
+    [{ executable: EXECUTABLE, timeoutMs: 0 }, 'a non-positive timeout'],
+    [{ executable: EXECUTABLE, unexpected: true }, 'a field this tool does not define'],
+  ]) {
+    assert.throws(() => makeDecompilerTools(config), (error) => error.code === 'DECOMPILE_CONFIG', why);
+  }
+  // A digest is optional, but a well-formed one is accepted and kept on the descriptor, which is
+  // what makes the receipt attest to which build produced the C.
+  const pinned = toolFor({ executable: EXECUTABLE, executableSha256: 'a'.repeat(64) });
+  assert.equal(pinned.config.executableSha256, 'a'.repeat(64));
+});
+
+test('policy narrows the tool and never widens it', async () => {
+  const root = tempDir('decompile');
+  const tool = toolFor();
+  await assert.rejects(() => tool.execute(minimalInput(), toolContext(root, { allowedTools: ['files.read'] })),
+    (error) => error.code === 'DECOMPILE_POLICY');
+  await assert.rejects(() => tool.execute(minimalInput(), toolContext(root, { allowedEffects: ['read'] })),
+    (error) => error.code === 'DECOMPILE_POLICY');
+  // An abort that arrived before the spawn is a refusal, not a half-done decompilation.
+  const aborted = { ...toolContext(root), signal: { aborted: true } };
+  await assert.rejects(() => tool.execute(minimalInput(), aborted), (error) => error.code === 'DECOMPILE_ABORTED');
+});
+
+test('a malformed address is refused before anything is read or spawned', async () => {
+  // The schema cannot express this, so execute does. It happens before the first file read, which
+  // is why this needs no fixtures: a wrong address would otherwise relocate every byte requested.
+  const tool = toolFor();
+  for (const address of ['1401bb85c', '0x', 'not-hex', '0xZZ']) {
+    await assert.rejects(() => tool.execute(minimalInput({ address }), toolContext(tempDir('decompile'))),
+      (error) => error.code === 'DECOMPILE_INPUT', address);
+  }
+});
+
+test('a file that is not an executable image is refused with every declared key present', async () => {
+  const root = tempDir('decompile');
+  fs.writeFileSync(path.join(root, 'target.bin'), 'this is not a program');
+  const tool = toolFor();
+  const result = await tool.execute(minimalInput(), toolContext(root));
+
+  assert.equal(result.supported, false);
+  assert.equal(result.reason, 'unsupported_format');
+  // The contract the whole reader family keeps: a refusal returns the keys it declares, so a
+  // caller never branches on whether a key exists, and it reports the digest of what it examined.
+  for (const key of tool.outputKeys) assert.ok(key in result, `missing declared key: ${key}`);
+  assert.equal(result.untrusted, true);
+  assert.match(result.sha256, /^[a-f0-9]{64}$/);
+  assert.ok(result.limitations.length >= 1);
+  assert.equal(typeof canonical(result), 'string', 'a refusal still has to survive the journal');
+});
+
+test('an address outside every mapped section is refused, not decompiled from nowhere', async () => {
+  const root = tempDir('decompile');
+  // A minimal PE whose only section covers 0x1000..0x3000, so 0x900000 is mapped by nothing.
+  const image = Buffer.alloc(512);
+  image.write('MZ', 0, 'latin1');
+  image.writeInt32LE(64, 0x3c);
+  image.write('PE\u0000\u0000', 64, 'latin1');
+  image.writeUInt16LE(0x8664, 68);
+  image.writeUInt16LE(1, 70);
+  image.writeUInt16LE(240, 84);
+  image.writeUInt16LE(0x20b, 88);
+  image.writeUInt32LE(0x1000, 104);
+  image.writeBigUInt64LE(0x140000000n, 112);
+  const section = 64 + 24 + 240;
+  image.write('.text', section, 'latin1');
+  image.writeUInt32LE(0x2000, section + 8);
+  image.writeUInt32LE(0x1000, section + 12);
+  image.writeUInt32LE(0x2000, section + 16);
+  image.writeUInt32LE(0x400, section + 20);
+  fs.writeFileSync(path.join(root, 'target.bin'), image);
+
+  const tool = toolFor();
+  const result = await tool.execute(minimalInput({ address: '0x140900000' }), toolContext(root));
+  assert.equal(result.supported, false);
+  assert.equal(result.reason, 'address_not_mapped');
+  for (const key of tool.outputKeys) assert.ok(key in result, `missing declared key: ${key}`);
 });
 
 test('the core types are a real type system, because an empty one is fatal', () => {

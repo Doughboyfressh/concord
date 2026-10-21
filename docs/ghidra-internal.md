@@ -478,11 +478,32 @@ cover. The two layers now agree instead of one being quietly weaker.
 
 ## What this does not do
 
-It does not decompile. Lifting p-code to C is the other ~157,000 lines of the decompiler, and
-`ruleaction.cc` alone is 11,000 lines of accumulated simplification rules — institutional knowledge
-rather than architecture, which cannot be shortened and does not degrade gracefully. A
-half-implemented version produces confidently wrong C, which in a reverse-engineering tool is worse
-than producing none. For decompiled C, run the gated provider.
+It does not *reimplement* decompilation, and that judgement has not changed: lifting p-code to C is
+the other ~157,000 lines, and `ruleaction.cc` alone is 11,000 lines of accumulated simplification
+rules — institutional knowledge rather than architecture, which cannot be shortened and does not
+degrade gracefully. A half-implemented version produces confidently wrong C, which in a
+reverse-engineering tool is worse than producing none.
+
+What changed is that it no longer has to. An earlier version of this section said simply "it does
+not decompile", which was true of this code and false about what was reachable. `decompile.exe` is
+a native C++ binary that imports only KERNEL32 and links no JVM; `main()` in `ghidra_process.cc`
+loops on `readCommand(cin, cout)` and never speaks first. The Java side was only ever the one thing
+that had spoken to it. `src/decompiler.mjs` is the other speaker, and `artifact.decompile` is that
+speaker as a kernel tool.
+
+The leverage is that `ArchitectureGhidra::buildTranslator` returns a `GhidraTranslate`, a *callback*
+translator: the decompiler never loads a `.sla` and never decodes an instruction itself, but asks
+the master for p-code one instruction at a time. So its inputs are exactly what the layers above
+already compute — bytes through the section mapping, and lifted p-code — and the function list comes
+from this harness's own region discovery rather than from the decompiler's curiosity, because
+claiming a function wherever it happens to ask would invent them in data.
+
+It is a `process` effect, so a plan cannot reach it without an approval hash bound to the exact
+resolved input, and the C is replayed from the receipt rather than re-derived. Repointing the
+configured executable breaks replay with `REPLAY_CONTEXT`, which is the property worth having: the
+receipt attests to *which* decompiler binary produced that C, and the kernel enforces it rather than
+the tool promising it. Unconfigured it registers nothing, so an operator who has reviewed no
+decompiler binary sees the capability absent rather than present and always refusing.
 
 It also does not follow `@include`. A fact declared in an included file is reported as unstated
 rather than as a disagreement, and the includes are listed so a caller can follow them.

@@ -19,6 +19,7 @@ import { makeReaderTools } from './readers.mjs';
 import { makeForeignTools } from './foreign.mjs';
 import { makeAgentTools } from './workers.mjs';
 import { makeBrowserTools } from './browser.mjs';
+import { makeDecompilerTools } from './decompiler.mjs';
 import { buildChatContext } from './chat-context.mjs';
 import { createChatHarness } from './chat.mjs';
 
@@ -69,11 +70,11 @@ function readJsonFile(file, maxBytes = 33554432) {
 
 function parseArgs(argv) {
   const flags = {};
-  const allowed = ['workspace', 'policy', 'integrations', 'workers', 'browser', 'reverse', 'foreign', 'mailbox'];
+  const allowed = ['workspace', 'policy', 'integrations', 'workers', 'browser', 'decompiler', 'reverse', 'foreign', 'mailbox'];
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i]?.replace(/^--/, '');
     if (!argv[i]?.startsWith('--') || !allowed.includes(key) || !argv[i + 1] || Object.hasOwn(flags, key)) {
-      throw new HarnessError('MCP_USAGE', 'Usage: node src/mcp.mjs [--workspace DIR] [--policy FILE] [--integrations FILE] [--workers FILE] [--browser FILE] [--reverse FILE] [--foreign FILE] [--mailbox DIR]');
+      throw new HarnessError('MCP_USAGE', 'Usage: node src/mcp.mjs [--workspace DIR] [--policy FILE] [--integrations FILE] [--workers FILE] [--browser FILE] [--decompiler FILE] [--reverse FILE] [--foreign FILE] [--mailbox DIR]');
     }
     flags[key] = argv[i + 1];
   }
@@ -86,6 +87,7 @@ async function buildRegistry(flags) {
   const integrations = flags.integrations ? readJsonFile(flags.integrations) : {};
   const workers = flags.workers ? readJsonFile(flags.workers) : {};
   const browser = flags.browser ? readJsonFile(flags.browser) : undefined;
+  const decompiler = flags.decompiler ? readJsonFile(flags.decompiler) : undefined;
   const reverseTable = readJsonFile(path.join(root, 'reverse-tools.json'));
   const reverse = flags.reverse ? readJsonFile(flags.reverse) : {};
   const foreignPath = path.join(root, 'foreign-capabilities.json');
@@ -93,7 +95,7 @@ async function buildRegistry(flags) {
   const foreign = flags.foreign ? readJsonFile(flags.foreign) : {};
   const descriptors = [
     ...makeBuiltinTools(), ...makeSourceTools(catalog), ...makeCapabilityTools(inventory), ...makeArtifactTools(),
-    ...makeIntegrationTools(integrations), ...makeAgentTools(workers), ...makeBrowserTools(browser),
+    ...makeIntegrationTools(integrations), ...makeAgentTools(workers), ...makeBrowserTools(browser), ...makeDecompilerTools(decompiler),
     ...makeReverseTools(reverseTable, reverse), ...makeReaderTools(),
     ...makeForeignTools(foreignManifest, foreign),
     ...makeSkillStoreTools(inventory),
