@@ -197,9 +197,18 @@ async function formFixture(fn) {
   finally { await new Promise((resolve) => server.close(resolve)); }
 }
 
+/**
+ * The popup page, with a probe recording what `window.open` actually returned.
+ *
+ * The probe is the whole point. Without it this fixture asserted only that the session still read
+ * `#status` after the click, which it would also do if the session re-discovered its target —
+ * because a synthetic `el.click()` carries no user activation, Chrome refuses the popup, and no
+ * second target is ever created. Measured: `window.open` returns null here. So the assertion could
+ * not fail for the reason the test was named after.
+ */
 async function popupFixture(fn) {
   const server = createServer((request, response) => {
-    response.end('<!doctype html><html><body><button id="open" onclick="window.open(\'about:blank\')">Open</button><div id="status">original</div></body></html>');
+    response.end('<!doctype html><html><body><button id="open" onclick="document.getElementById(\'probe\').textContent = \'returned: \' + String(Boolean(window.open(\'about:blank\')))">Open</button><div id="status">original</div><div id="probe">not clicked</div></body></html>');
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   try { return await fn(`http://127.0.0.1:${server.address().port}/`); }
@@ -248,13 +257,22 @@ test('a crafted selector cannot break out of the fixed Runtime.callFunctionOn bo
   });
 });
 
-test('a window.open() popup triggered mid-sequence does not pull the session onto a different target', { skip: realBrowser ? false : 'no configured or auto-detected browser binary on this host' }, async () => {
+test('a mid-sequence window.open() is refused by the browser, so no second target exists and the session reads the original page', { skip: realBrowser ? false : 'no configured or auto-detected browser binary on this host' }, async () => {
   await popupFixture(async (url) => {
     const result = await automateTool().execute({ url, actions: [
       { type: 'click', selector: '#open' },
+      { type: 'extract', selector: '#probe' },
       { type: 'extract', selector: '#status' },
     ] }, context);
-    assert.equal(result.actions[1].text, 'original');
+    // Asserted first, and deliberately self-invalidating: a synthetic click carries no user
+    // activation, so Chrome's popup blocker returns null and this sequence cannot create a second
+    // target at all. That is the useful guarantee for this tool — a page cannot get another target
+    // opened through these actions — but it is a *weaker* claim than "the session would stay put if
+    // one existed", and this test must not be read as having proven the stronger one. If a future
+    // browser starts allowing the popup, this line fails loudly and someone has to write the real
+    // two-target test rather than inheriting a green one that proves nothing.
+    assert.equal(result.actions[1].text, 'returned: false');
+    assert.equal(result.actions[2].text, 'original');
     assert.equal(result.url, url);
   });
 });

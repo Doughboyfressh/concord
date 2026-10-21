@@ -230,6 +230,45 @@ const INSTALLED_BROWSER = (() => {
   try { return findAppBrowser(); } catch { return null; }
 })();
 
+/**
+ * One page that every browsing exercise acts on, and the probe that makes the defence checkable.
+ *
+ * The filled value is shaped to close a function call and assign a global. The page echoes back
+ * whatever arrived and separately reports whether that global exists at the moment the input
+ * event fired, so "the value was passed as data" is observed on the page rather than asserted
+ * from outside it.
+ */
+const PAYLOAD = "'); window.__pwned = 1; //";
+const ACTING_PAGE = [
+  '<html><body><h1>the original target</h1>',
+  '<form id="shape"><input id="name" name="name" value="">',
+  '<input name="hidden-note" type="hidden" value="a hidden field is read back too"></form>',
+  '<p id="echo">nothing typed yet</p><p id="probe">clean</p><p id="opened">not clicked</p>',
+  '<a id="pop" href="#">open a popup</a>',
+  '<script>',
+  'document.getElementById("name").addEventListener("input", function (event) {',
+  '  document.getElementById("echo").textContent = "typed: " + event.target.value;',
+  '  document.getElementById("probe").textContent = window.__pwned ? "pwned" : "clean";',
+  '});',
+  'document.getElementById("pop").addEventListener("click", function (event) {',
+  '  event.preventDefault();',
+  '  var popup = null;',
+  '  try { popup = window.open("about:blank", "_blank"); } catch (error) { popup = null; }',
+  '  document.getElementById("opened").textContent = "open called: " + String(Boolean(popup));',
+  '});',
+  '</script></body></html>',
+].join('\n');
+
+/** browser.automate against a real installed browser, with one bounded action list. */
+function automateWith(workspaceRoot, url, actions, timeoutMs = 45000) {
+  const tools = makeBrowserTools({ executable: INSTALLED_BROWSER.executable, timeoutMs, maxOutputBytes: 262144 });
+  const automate = tools.find((tool) => tool.name === 'browser.automate');
+  return automate.execute({ url, actions }, {
+    workspaceRoot,
+    policy: policyFor({ allowedTools: ['browser.automate'], maxOutputBytes: 262144, timeoutMs }),
+  });
+}
+
 export function processExercises() {
   return [
     // ---- the DevTools target list, which is the first thing a browser is believed about --
@@ -706,5 +745,60 @@ export function processExercises() {
       ),
       lesson: 'A snapshot whose result exceeds the output budget is refused BROWSER_OUTPUT_LIMIT after the page has been read and before the result is returned, and the browser process and its temporary profile are still cleaned up. This is the only browser refusal that needs a real CDP session: the page is served from loopback, loaded by a headless browser this machine actually has, and the whole round trip takes about three hundred milliseconds. The budget is checked against the serialised result rather than the page, because what matters is what would enter the journal.',
     }] : []),
+
+    // ---- browsing: acting on a page, in one session, against a real browser --------------
+    ...(INSTALLED_BROWSER ? [
+      {
+        family: 'process', tool: 'browser.automate', workspace: 'temp',
+        call: ({ workspaceRoot }) => againstPage(ACTING_PAGE, async (url) => {
+          const result = await automateWith(workspaceRoot, url, [
+            { type: 'wait', selector: '#name' },
+            { type: 'fill', selector: '#name', value: PAYLOAD },
+            { type: 'extract', selector: '#echo' },
+            { type: 'extract', selector: '#probe' },
+            { type: 'extractForm', selector: '#shape' },
+          ]);
+          return {
+            types: result.actions.map((action) => action.type).join(','),
+            echo: result.actions[2].text, probe: result.actions[3].text,
+            fields: result.actions[4].fields,
+          };
+        }),
+        expect: (r) => r.types === 'wait,fill,extract,extract,extractForm'
+          && r.echo === `typed: ${PAYLOAD}`
+          && r.probe === 'clean'
+          && r.fields.name === PAYLOAD
+          && r.fields['hidden-note'] === 'a hidden field is read back too',
+        lesson: 'browser.automate runs a whole wait/fill/extract/extractForm sequence inside one CDP session against a real headless browser, and the page receives a selector and a value as data rather than as script. The value here is shaped to close a function call and assign a global — the page echoes it back verbatim through an input event while its own probe still reads clean — because click and fill pass the caller\'s strings only as Runtime.callFunctionOn arguments, which CDP serialises as JSON and never as source text. The one place the browser module interpolates into an expression is a server-controlled integer, and that distinction is the whole defence. extractForm reads every named field in the container including a hidden one, which is also the disclosure: whatever is typed or read back through this tool is journaled as ordinary task input, in plaintext, so credentials do not belong here.',
+      },
+      {
+        family: 'process', tool: 'browser.automate', workspace: 'temp',
+        call: ({ workspaceRoot }) => againstPage(ACTING_PAGE, async (url) => {
+          const result = await automateWith(workspaceRoot, url, [
+            { type: 'click', selector: '#pop' },
+            { type: 'extract', selector: '#opened' },
+            { type: 'extract', selector: 'h1' },
+          ]);
+          return { opened: result.actions[1].text, heading: result.actions[2].text };
+        }),
+        expect: (r) => r.heading === 'the original target' && r.opened === 'open called: false',
+        lesson: 'A page cannot get a second browser target opened through browser.automate: measured, a window.open called from a click handler that el.click() triggered returns null, because a synthetic click carries no user activation and Chrome refuses the popup. The page reports that itself rather than being assumed, and the exercise asserts it, which is what keeps the claim honest — the extract after the click reading the original page would read the same whether or not the session re-discovered its target, since there is only ever one. So this proves that these actions cannot create another target, not the stronger "the session would stay put if one existed". That stronger property is held by construction (one attach, never re-discovered mid-script) and is stated in the code rather than demonstrated here. The test this exercise came from asserted only the weaker half while being named after the stronger one, and could not have failed for the reason it claimed.',
+      },
+      {
+        family: 'process', tool: 'browser.automate', expectThrow: 'BROWSER_ACTION', workspace: 'temp',
+        call: ({ workspaceRoot }) => againstPage(ACTING_PAGE, (url) => automateWith(workspaceRoot, url, [
+          { type: 'click', selector: '#nothing-matches-this' },
+        ])),
+        lesson: 'An action whose selector matches nothing is refused BROWSER_ACTION, carrying the error the page-side function threw, rather than reported as a click that happened to do nothing. A silently successful no-op is the worst outcome for an automation step: the sequence would continue as though the page were in a state it never reached.',
+      },
+      {
+        family: 'process', tool: 'browser.automate', expectThrow: 'BROWSER_TIMEOUT', workspace: 'temp',
+        call: ({ workspaceRoot }) => againstPage(
+          '<html><body><h1>a page that never finishes loading</h1><script>while (true) {}</script></body></html>',
+          (url) => automateWith(workspaceRoot, url, [{ type: 'extract', selector: 'h1' }], 4000),
+        ),
+        lesson: 'A page whose script blocks the renderer forever is refused BROWSER_TIMEOUT, and the deadline covers the whole session rather than only the launch: every in-flight CDP call is rejected by one stop() so the call cannot hang waiting for a response that will never arrive, and the browser process and its temporary profile are still torn down. Without that single choke point the surrounding cleanup would never run, leaking a live browser and its open unauthenticated debugging port for as long as the host process lived.',
+      },
+    ] : []),
   ];
 }

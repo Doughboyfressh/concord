@@ -63,6 +63,14 @@ break out of the function body — it just fails to match any element, or throws
 "selector not found" inside the function, surfaced as a clean `BROWSER_ACTION` error. The session
 attaches to exactly one CDP target for the whole sequence and never re-discovers mid-script, so a
 page that opens a popup via `window.open()` cannot pull the automation onto a different target.
+That last sentence is a property of the code, not a tested one, and the difference is worth
+stating: measured on this machine, a `window.open()` reached from a synthetic `el.click()`
+returns null, because the click carries no user activation and Chrome refuses the popup. So no
+second target is ever created through these actions — which is the useful guarantee, and a
+weaker claim than the one the code makes. `test/browser.test.mjs` now asserts the measured
+behaviour (`window.open` returning null, and the session reading the original page) and fails
+loudly if a future browser starts allowing the popup, instead of staying green while proving
+nothing.
 
 `extract` returns the `innerText` of the matched selector (or the whole page body if `selector` is
 omitted), bounded per call and contributing to the same `maxOutputBytes` ceiling as everything
@@ -99,7 +107,9 @@ for named credential environment variables elsewhere in this codebase.
   navigation, text extraction, timeout/abort mid-session, teardown, independent profiles across
   sequential calls (`browser.snapshot`); a click→fill→extract round trip, a crafted
   injection-shaped selector proving `Runtime.callFunctionOn` argument-passing prevents script
-  breakout, a `window.open()` popup leaving the session attached to the original target, the same
+  breakout, a `window.open()` popup being refused by the browser so that no second target is
+  created and the session reads the original page (see above for what that does and does not
+  prove), the same
   hang/timeout/cleanup guarantee mid-sequence, and `extractForm` reading every named field —
   including one filled earlier in the same sequence — its no-matching-container failure mode, a
   reserved field name (`__proto__`) being skipped rather than hanging the call, and an oversized
