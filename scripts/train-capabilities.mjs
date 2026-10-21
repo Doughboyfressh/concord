@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -17,10 +18,14 @@ import { makeMailboxTools } from '../src/peer.mjs';
 import { makeSkillStoreTools } from '../src/skillstore.mjs';
 import { makeGovernanceTools } from '../src/governance.mjs';
 import { makeInstructionTools } from '../src/instructions.mjs';
+import { makeWebTools } from '../src/web.mjs';
+import { makeBuildTools } from '../src/build.mjs';
 import { exercises } from './train-exercises.mjs';
 import { updateInstructions, verifyCorpus } from './train-consolidate.mjs';
 import { analyseGaps, renderGaps, observeAssertedKeys } from './train-gaps.mjs';
 import { CONTRACTS } from './train-exercises-derived.mjs';
+import { webFixtureHandler, enginesOn } from './train-exercises-web.mjs';
+import { targetFor as buildTargetFor } from './train-exercises-build.mjs';
 
 /**
  * Fast training: exercise every capability, keep what the runs prove.
@@ -46,7 +51,32 @@ const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
 const readJson = (file) => parseJson(fs.readFileSync(file, 'utf8'));
 
-async function buildRegistry() {
+/**
+ * A loopback server for the length of the round, so the write side can be composed in a plan.
+ *
+ * Until now the network and process tools could only be exercised by direct calls: they exist only
+ * where an operator configured them, and an exercise may narrow the round's policy but never widen
+ * it, so with allowedOrigins empty no plan could have reached an engine however it was written.
+ * Serving the fixture here and allowlisting exactly its origin is what moves those tools from
+ * "proven by calling twice" to "ran in a plan, through the gate, and replayed" — the strongest
+ * evidence class this harness has, and the axis its own gap report keeps naming.
+ *
+ * The port is ephemeral and therefore absent from every composed plan: web.search takes a query
+ * and the engine origins live in configuration, and the build tools never touch a socket. A plan
+ * carrying a port would change digest every round and mint a fresh copy of an identical lesson,
+ * which is the duplication this round already learned to avoid once.
+ */
+function startWebFixture() {
+  const server = http.createServer(webFixtureHandler);
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve({
+      origin: `http://127.0.0.1:${server.address().port}`,
+      close: () => new Promise((done) => server.close(done)),
+    }));
+  });
+}
+
+async function buildRegistry(webOrigin) {
   const catalog = await loadSourceLock(path.join(root, 'sources.lock.json'));
   const inventory = readJson(path.join(root, 'capabilities.lock.json'));
   const reverseTable = readJson(path.join(root, 'reverse-tools.json'));
@@ -57,6 +87,10 @@ async function buildRegistry() {
     ...makeMailboxTools({ directory: path.join(root, 'runs', 'peer-mailbox') }),
     ...makeSkillStoreTools(inventory),
     ...makeInstructionTools({ directory: path.join(root, 'instructions') }),
+    // The write side, configured exactly as the direct-call families configure it, so a composed
+    // lesson and a direct one cannot disagree about what the engines said or what the target built.
+    ...makeWebTools({ timeoutMs: 8000, maxOutputBytes: 262_144, engines: enginesOn(webOrigin) }),
+    ...makeBuildTools({ timeoutMs: 20_000, maxOutputBytes: 262_144, targets: [buildTargetFor()] }),
   ];
   const registry = new Map(descriptors.map((tool) => [tool.name, tool]));
   const runtimeFiles = fs.readdirSync(path.join(root, 'src')).filter((f) => f.endsWith('.mjs')).map((f) => 'src/' + f).sort();
@@ -67,7 +101,9 @@ async function buildRegistry() {
   for (const tool of makeGovernanceTools({ registry, sourceLock })) registry.set(tool.name, tool);
   const policy = {
     version: 1, allowedTools: [...registry.keys()].sort(),
-    allowedEffects: ['pure', 'read', 'write', 'network', 'process'], allowedOrigins: [],
+    // Exactly the fixture origin, and nothing else: the round can reach its own loopback server
+    // and no other host, which is the same statement any operator's policy makes.
+    allowedEffects: ['pure', 'read', 'write', 'network', 'process'], allowedOrigins: [webOrigin],
     maxTasks: 32, maxOutputBytes: 1048576, maxJournalBytes: 16777216, timeoutMs: 60000,
   };
   return { registry, policy, sourceLock, inventory };
@@ -117,7 +153,8 @@ async function main() {
   const outFlag = process.argv.indexOf('--out');
   const outPath = outFlag > 0 && process.argv[outFlag + 1] ? path.resolve(root, process.argv[outFlag + 1]) : null;
 
-  const { registry, policy, sourceLock, inventory } = await buildRegistry();
+  const fixture = await startWebFixture();
+  const { registry, policy, sourceLock, inventory } = await buildRegistry(fixture.origin);
   const temp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'concord-train-')));
   const learned = [];
   const findings = [];
@@ -480,6 +517,9 @@ async function main() {
   let scratchRetained = null;
   try { fs.rmSync(temp, { recursive: true, force: true }); }
   catch (error) { scratchRetained = error?.code ?? 'unknown'; }
+  // Same rule for the fixture server: every measurement above is already computed, so a socket
+  // that will not close is worth nothing more than not throwing here.
+  try { await fixture.close(); } catch { /* the process is about to exit anyway */ }
   const seconds = ((Date.now() - started) / 1000).toFixed(1);
   const stored = fs.readdirSync(path.join(root, 'memory')).filter((name) => name.endsWith('.json')).length;
   const coverage = `${exercisedTools.size}/${registry.size}`;
@@ -487,6 +527,50 @@ async function main() {
   const contractsHeld = [...contracts.values()].filter((tally) => tally.held.size === tally.applicable.size).length;
   // Derived, so the round names its own frontier rather than waiting for someone to notice it.
   const gaps = analyseGaps({ root, exercises: exercises(inventory, registry), registry, observedCodes, assertedByTool, returnedByTool });
+
+  /**
+   * What moved since the last round, which is the only number that says whether training works.
+   *
+   * Every figure above is a snapshot, and a snapshot cannot distinguish a harness that is learning
+   * from one that is merely large. The trend file is one line per round, appended only when a
+   * report is written, so re-running a round while developing it does not invent history. The
+   * deltas are computed against the previous line before this one is appended.
+   *
+   * Deliberately not scored. "Better" would have to weigh a proven refusal against a composed
+   * plan against a key some prediction finally read, and inventing that exchange rate would hide
+   * exactly the axis that stalled - which is the mistake this round's own gap report exists to
+   * avoid making.
+   */
+  const metrics = {
+    round: outPath ? path.basename(outPath, '.md') : 'unsaved',
+    exercises: attempted, promoted, findings: findings.length,
+    tools: registry.size, toolsExercised: exercisedTools.size,
+    codesObserved: gaps.codes.observed, codesUnproven: gaps.codes.unproven,
+    outputKeysAsserted: gaps.outputKeys.asserted, outputKeysDeclared: gaps.outputKeys.declared,
+    composed: gaps.composition.composed, storedLessons: stored,
+  };
+  const trendPath = path.join(root, 'docs', 'training-trend.jsonl');
+  let previous = null;
+  try {
+    const lines = fs.readFileSync(trendPath, 'utf8').split('\n').filter((line) => line.trim());
+    if (lines.length) previous = parseJson(lines[lines.length - 1]);
+  } catch { previous = null; }
+  const movement = (key, { better = 'up' } = {}) => {
+    if (!previous || typeof previous[key] !== 'number') return null;
+    const delta = metrics[key] - previous[key];
+    if (delta === 0) return `${key} held at ${metrics[key]}`;
+    const direction = (delta > 0) === (better === 'up') ? 'improved' : 'regressed';
+    return `${key} ${direction} by ${Math.abs(delta)} to ${metrics[key]}`;
+  };
+  const trendLine = previous
+    ? 'Since **' + previous.round + '**: ' + [
+      movement('exercises'), movement('composed'), movement('codesObserved'),
+      movement('codesUnproven', { better: 'down' }), movement('outputKeysAsserted'),
+      movement('toolsExercised'), movement('storedLessons'),
+      movement('findings', { better: 'down' }),
+    ].filter(Boolean).join('; ') + '.'
+    : 'No previous round is recorded in `docs/training-trend.jsonl`, so there is no trend to report yet.';
+  if (outPath) fs.appendFileSync(trendPath, canonical(metrics) + '\n');
 
   const report = [
     '# Capability training round',
@@ -496,6 +580,8 @@ async function main() {
     `Of those exercises, **${contractChecks}** were generated from the tools' own declarations rather than written by hand, across **${contracts.size}** derived contracts, **${contractsHeld}** of which held for every tool they apply to. A generated check cannot discover that a declaration is wrong, only that a tool and its declaration disagree, so each contract earns one lesson rather than one per tool.`,
     '',
     `Instruction modules deepened: **${instructionsUpdated.length}** (${instructionsUpdated.map((entry) => entry.sourceId).join(', ') || 'none'}). Skill corpus verified against its index: **${corpus.verified}** files match, **${corpus.mismatched.length}** drifted, **${corpus.absent}** not in this workspace.`,
+    '',
+    trendLine,
     '',
     'Every lesson below came from a plan that ran through the real kernel, behaved exactly as predicted, and then replayed. A prediction that did not hold wrote nothing to memory and is listed as a finding instead: a surprise is something to investigate, not something to memorise.',
     '',

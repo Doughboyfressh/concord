@@ -24,7 +24,7 @@ const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const NODE = process.execPath;
 // Digested once per round: the executable is around a hundred megabytes and every target needs it.
 let nodeDigest = null;
-const digestOfNode = () => (nodeDigest ??= sha256(fs.readFileSync(NODE)));
+export const digestOfNode = () => (nodeDigest ??= sha256(fs.readFileSync(NODE)));
 
 const ROOT = 'build-fixture';
 const BUILDS = 'import fs from "node:fs";\nfs.writeFileSync("build-fixture/out.txt", "built");\nconsole.log("build ok");\n';
@@ -33,8 +33,11 @@ const SLEEPS = 'setTimeout(() => {}, 5000);\n';
 const PACKAGE = JSON.stringify({ name: 'fixture', scripts: { build: 'node .', test: 'node --test' } }, null, 2);
 const MAKEFILE = 'all: dist\n\ndist:\n\techo building\n\nclean:\n\trm -rf dist\n';
 
-/** Write the fixture tree. Called by the runner before the exercise that declares it. */
-function fixture(dir) {
+/**
+ * Write the fixture tree. Called by the runner before the exercise that declares it, and by the
+ * round itself for the composed plans, which need the same tree in the same scratch workspace.
+ */
+export function fixture(dir) {
   fs.mkdirSync(path.join(dir, ROOT, 'src'), { recursive: true });
   fs.writeFileSync(path.join(dir, ROOT, 'src', 'builds.mjs'), BUILDS);
   fs.writeFileSync(path.join(dir, ROOT, 'src', 'fails.mjs'), FAILS);
@@ -52,7 +55,7 @@ const policyFor = (over = {}) => ({
   allowedOrigins: [], maxTasks: 32, maxOutputBytes: 262_144, maxJournalBytes: 16_777_216, timeoutMs: 20_000, ...over,
 });
 
-const targetFor = (over = {}) => ({
+export const targetFor = (over = {}) => ({
   name: 'main', system: 'npm', executable: NODE, executableSha256: digestOfNode(),
   args: [`${ROOT}/src/builds.mjs`], diagnostics: 'node-uncaught-v1',
   inputs: [`${ROOT}/src`], artifacts: [`${ROOT}/out.txt`], ...over,
@@ -290,6 +293,57 @@ export function buildExercises() {
       },
       expect: (r) => r.bothFoundNothing && r.digestsDiffer,
       lesson: 'The declared path list is part of the inputs and artifacts digest, not only the files found under it. Without that, a target asked for an artifact it never produced and a target asked for no artifacts at all both hash the empty list and compare as identical — so a build that produced nothing would look perfectly reproducible against one that was never asked to produce anything.',
+    },
+
+    // ---- composed: the whole chain in one plan, each process effect approved separately --
+    {
+      family: 'composition', tool: 'build.run', grant: true, expectApprovals: 2, workspace: 'temp', fixture,
+      plan: { version: 1, name: 'build-twice-and-compare', tasks: [
+        { id: 'present', tool: 'build.detect', input: { directory: ROOT } },
+        { id: 'before', tool: 'build.run', input: { target: 'main' } },
+        { id: 'after', tool: 'build.run', dependsOn: ['before'], input: { target: 'main' } },
+        { id: 'verdict', tool: 'build.compare', dependsOn: ['before', 'after'], input: {
+          left: { $task: 'before' }, right: { $task: 'after' },
+        } },
+      ] },
+      expect: (r) => r.results.present.runnable.includes('npm')
+        && r.results.present.systems.some((entry) => entry.system === 'npm' && entry.targets.includes('main'))
+        && r.results.before.ok === true && r.results.after.ok === true
+        && r.results.before.receipt === r.results.after.receipt
+        && r.results.verdict.verdict === 'identical'
+        && r.results.verdict.transition === 'still-succeeding'
+        && r.results.verdict.sameReceipt === true,
+      lesson: 'The whole build chain composes in one plan: detect what the tree contains, build the reviewed target twice, and compare the two receipts by reference. Each build is its own process effect and takes its own approval hash - two grants for two runs, not one grant for the plan - because the gate binds a resolved input rather than an intention. build.compare reads both receipts as {$task} references, which is why it accepts a whole build.run result instead of four projected fields, and the comparison reports identical with the same receipt because nothing between the two runs touched a declared input. The run replays from the journal without building anything again.',
+    },
+    {
+      family: 'composition', tool: 'artifact.inspect', grant: true, expectApprovals: 1, workspace: 'temp', fixture,
+      plan: { version: 1, name: 'build-then-read-what-was-built', tasks: [
+        { id: 'built', tool: 'build.run', input: { target: 'main' } },
+        { id: 'read', tool: 'artifact.inspect', dependsOn: ['built'], input: {
+          path: { $task: 'built', path: '/artifacts/0/path' },
+        } },
+      ] },
+      expect: (r) => r.results.built.artifacts.length === 1
+        && r.results.read.sha256 === r.results.built.artifacts[0].sha256
+        && r.results.read.bytes === r.results.built.artifacts[0].bytes
+        && r.results.read.untrusted === true,
+      lesson: 'A build hands its own output to a reader by reference, and the two agree about the bytes: the path comes from the receipt rather than from the plan, and the digest artifact.inspect computes independently equals the one build.run attested. That equality is the point of the receipt - it is the difference between a harness that says a build succeeded and one that can show which bytes it produced - and it closes the loop between the write side and the sixty-five readers, since whatever a build emits is immediately an artifact the rest of the harness can inspect.',
+    },
+
+    // ---- what a plan can and cannot reach, now that the target is in the registry --------
+    {
+      family: 'build', tool: 'build.run', expectCode: 'BUILD_INPUT', grant: true, expectApprovals: 1, workspace: 'temp', fixture,
+      plan: { version: 1, name: 'claim-a-malformed-digest', tasks: [
+        { id: 'a', tool: 'build.run', input: { target: 'main', expectArtifactsSha256: 'Z'.repeat(64) } },
+      ] },
+      lesson: 'A claimed artifact digest that is the right length but not hexadecimal is refused BUILD_INPUT by the tool, and only after the process effect has been granted — the approval gate sits in front of the tool, so a build that could never have satisfied its own claim still blocks first. The schema can bound the length of that field but not its alphabet, because the kernel\'s schema subset has no pattern keyword, which is exactly why the check exists inside execute rather than in the declaration.',
+    },
+    {
+      family: 'build', tool: 'build.run', expectThrow: 'SCHEMA_MISMATCH', workspace: 'temp', fixture,
+      plan: { version: 1, name: 'ask-for-an-unreviewed-target', tasks: [
+        { id: 'a', tool: 'build.run', input: { target: 'no-such-target' } },
+      ] },
+      lesson: 'A plan naming a target that was never reviewed is refused SCHEMA_MISMATCH while compiling, not BUILD_UNKNOWN_TARGET at run time: the input schema\'s enum is generated from the configured target names, so the kernel rejects the plan before the tool is ever called. The tool keeps its own BUILD_UNKNOWN_TARGET guard for a direct call, which means that code is unreachable from any plan — and that is an improvement rather than a coverage gap. A declaration tight enough to make a tool\'s own refusal unnecessary is the better place for the check, because it fails at compile time for free and names the names that would have worked.',
     },
 
     // ---- the matcher trap worth remembering --------------------------------------------

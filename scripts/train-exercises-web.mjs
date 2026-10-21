@@ -48,8 +48,15 @@ const BETA_SHAPE = { resultsPath: ['data', 'hits'], urlKey: 'link', titleKey: 'h
 const TOKEN_ENV = 'CONCORD_TRAINING_SEARCH_TOKEN';
 const TOKEN = 'tok-training-search-credential';
 
-/** The one server every web exercise runs against, and the only thing it is honest about. */
-function handler(request, response) {
+/**
+ * The one server every web exercise runs against, and the only thing it is honest about.
+ *
+ * Exported because the round itself now serves it for the length of a round and registers
+ * web.search against it, so a plan can compose a search with the rest of the registry. One
+ * fixture, two consumers: a second copy would let a direct-call lesson and a composed one
+ * disagree about what the engines said.
+ */
+export function webFixtureHandler(request, response) {
   const { pathname } = new URL(request.url, 'http://loopback');
   const json = (body) => { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify(body)); };
   if (pathname === '/page') { response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); response.end(PAGE); return; }
@@ -69,7 +76,7 @@ function handler(request, response) {
 
 /** Start a loopback server, run one call against it, and always shut it down. */
 async function againstServer(run, { token = TOKEN } = {}) {
-  const server = http.createServer(handler);
+  const server = http.createServer(webFixtureHandler);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
   const previous = process.env[TOKEN_ENV];
@@ -89,7 +96,7 @@ const policyFor = (origin, over = {}) => ({
 
 const fetchTool = (over = {}) => makeWebTools({ timeoutMs: 5000, maxOutputBytes: 262_144, ...over })[0];
 const searchTool = (engines, over = {}) => makeWebTools({ timeoutMs: 5000, maxOutputBytes: 262_144, engines, ...over })[1];
-const enginesOn = (origin) => [
+export const enginesOn = (origin) => [
   { name: 'alpha', origin, path: '/alpha' },
   { name: 'beta', origin, path: '/beta', queryParam: 'query', ...BETA_SHAPE },
   { name: 'down', origin, path: '/down' },
@@ -286,6 +293,47 @@ export function webExercises() {
       }),
       expect: (r) => r.answered === 1 && r.codes.big === 'WEB_OUTPUT_LIMIT' && r.codes.alpha === null,
       lesson: 'The output budget is divided by the number of configured engines before any request is made, the way files.read and process.runMany divide theirs, so an engine answering at full length can only spend its own share: the oversized engine is refused WEB_OUTPUT_LIMIT and the engine inside its share still answers. Dividing first keeps the worst case structurally inside the kernel\'s own output bound instead of relying on a rejection after the bytes have already been read.',
+    },
+    // ---- composed: a search inside a plan, through the gate, feeding other tools ---------
+    {
+      family: 'composition', tool: 'web.search', grant: true, expectApprovals: 1,
+      plan: { version: 1, name: 'corroborate', tasks: [
+        { id: 'found', tool: 'web.search', input: { query: 'deterministic replay', limit: 5 } },
+        { id: 'pinned', tool: 'json.hash', dependsOn: ['found'], input: { $task: 'found', path: '/results' } },
+        { id: 'checked', tool: 'json.assert', dependsOn: ['found'], input: {
+          value: { $task: 'found', path: '/agreementMax' }, schema: { const: 2 },
+        } },
+      ] },
+      expect: (r) => r.results.found.asked === 3 && r.results.found.answered === 2
+        && r.results.found.uncorroborated === 1 && r.results.found.untrusted === true
+        && r.results.found.ranking === 'agreement-then-best-rank-v1'
+        && r.results.found.results.length === 3
+        && r.results.found.engines.filter((entry) => entry.ok).length === 2
+        && r.results.checked.passed === true
+        && /^[a-f0-9]{64}$/.test(r.results.pinned.digest),
+      lesson: 'A search runs inside a plan like any other task: it blocks once for an approval hash bound to the resolved query, and its corroboration table then feeds the kernel\'s own tools by reference — json.assert refusing to let the plan continue unless two engines agreed, and json.hash pinning the exact table that was returned so a later claim can cite it. This is the shape that makes a network answer usable as evidence rather than as narration: the plan states in advance what it requires of the web, and the run either meets it or fails the task. The whole run replays from the journal without asking any engine again.',
+    },
+    {
+      family: 'composition', tool: 'memory.candidate', grant: true, expectApprovals: 1,
+      plan: { version: 1, name: 'learn-from-the-web', tasks: [
+        { id: 'found', tool: 'web.search', input: { query: 'deterministic replay', limit: 5 } },
+        { id: 'draft', tool: 'memory.candidate', dependsOn: ['found'], input: {
+          lesson: 'Two independent engines agreed on the best-ranked page for this query, and one result was returned by a single engine.',
+          evidence: [{ $task: 'found', path: '/engines' }],
+        } },
+      ] },
+      expect: (r) => r.results.draft.evidenceHashes.length === 1
+        && r.results.draft.status === 'proposed' && r.results.draft.executable === false
+        && r.results.draft.candidateHash !== r.results.draft.evidenceHashes[0],
+      lesson: 'A lesson learned from the open web carries the digest of the engine table that justified it, because memory.candidate hashes its evidence rather than describing it: the candidate is a claim bound to the bytes each engine answered with, and editing either the claim or the evidence changes the hash that memory.promote would file it under. This is the whole adaptive loop in one plan — retrieve, corroborate, propose a lesson, and keep the evidence attached - and the candidate is still marked proposed and not executable, so learning something is never the same as being allowed to act on it.',
+    },
+    {
+      family: 'web', tool: 'web.search', expectCode: 'WEB_NO_ENGINE', grant: true, expectApprovals: 1,
+      narrow: { allowedOrigins: [] },
+      plan: { version: 1, name: 'search-with-nothing-allowlisted', tasks: [
+        { id: 'a', tool: 'web.search', input: { query: 'a query no engine may be asked' } },
+      ] },
+      lesson: 'A search under a policy whose allowedOrigins is empty refuses WEB_NO_ENGINE from inside a plan: every configured engine is refused WEB_ORIGIN individually, none answers, and a total failure is a refusal rather than an empty result list. It still blocks for an approval first, because the gate precedes the tool, so the sequence is grant then refuse — the operator approves reaching the network and the policy then decides there is nowhere to reach. An exercise can narrow the round\'s allowlist to nothing but could never widen it, which is the same rule that applies to every policy this kernel accepts.',
     },
     {
       family: 'web', tool: 'web.mergeAnswers',
