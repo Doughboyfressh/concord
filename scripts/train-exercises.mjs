@@ -5,6 +5,8 @@ import { readerExercises } from './train-exercises-readers.mjs';
 import { ghidraExercises } from './train-exercises-ghidra.mjs';
 import { evidenceExercises } from './train-exercises-evidence.mjs';
 import { writeExercises } from './train-exercises-writes.mjs';
+import { webExercises } from './train-exercises-web.mjs';
+import { buildExercises } from './train-exercises-build.mjs';
 import { composeExercises } from './train-exercises-compose.mjs';
 
 import { derivedExercises } from './train-exercises-derived.mjs';
@@ -39,6 +41,8 @@ export function exercises(inventory, registry) {
     ...ghidraExercises(),
     ...evidenceExercises(),
     ...writeExercises(),
+    ...webExercises(),
+    ...buildExercises(),
     ...composeExercises(),
     ...derivedExercises(registry),
     ...kernelExercises(),

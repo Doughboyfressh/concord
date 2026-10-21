@@ -1,0 +1,324 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { makeBuildTools, internals } from '../src/build.mjs';
+
+/**
+ * The building half of the write side: what a tree contains, what one reviewed target produces,
+ * and what two receipts of the same target mean when they differ.
+ *
+ * Direct calls rather than plans, like the web and process families, because these tools exist
+ * only where an operator configured a toolchain. The toolchain here is node itself — already on
+ * this machine as process.execPath, already digestible, and perfectly capable of being a
+ * compiler that succeeds, fails, writes an artifact or hangs past its deadline. Nothing had to be
+ * installed to exercise any of this.
+ *
+ * Fixtures live under one directory of their own inside the round's shared scratch workspace. The
+ * whole round shares that workspace, so a target declaring `inputs: ['src']` would digest
+ * whatever every other family happened to leave in src/, and the receipt exercises would compare
+ * against a moving tree. Nothing here asserts an absolute digest for that reason: every claim is
+ * a relation between two runs, or between a digest and bytes this file wrote itself.
+ */
+
+const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const NODE = process.execPath;
+// Digested once per round: the executable is around a hundred megabytes and every target needs it.
+let nodeDigest = null;
+const digestOfNode = () => (nodeDigest ??= sha256(fs.readFileSync(NODE)));
+
+const ROOT = 'build-fixture';
+const BUILDS = 'import fs from "node:fs";\nfs.writeFileSync("build-fixture/out.txt", "built");\nconsole.log("build ok");\n';
+const FAILS = 'import assert from "node:assert";\nassert.equal(1, 2);\n';
+const SLEEPS = 'setTimeout(() => {}, 5000);\n';
+const PACKAGE = JSON.stringify({ name: 'fixture', scripts: { build: 'node .', test: 'node --test' } }, null, 2);
+const MAKEFILE = 'all: dist\n\ndist:\n\techo building\n\nclean:\n\trm -rf dist\n';
+
+/** Write the fixture tree. Called by the runner before the exercise that declares it. */
+function fixture(dir) {
+  fs.mkdirSync(path.join(dir, ROOT, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(dir, ROOT, 'src', 'builds.mjs'), BUILDS);
+  fs.writeFileSync(path.join(dir, ROOT, 'src', 'fails.mjs'), FAILS);
+  fs.writeFileSync(path.join(dir, ROOT, 'package.json'), PACKAGE);
+  fs.writeFileSync(path.join(dir, ROOT, 'Makefile'), MAKEFILE);
+}
+function slowFixture(dir) {
+  fixture(dir);
+  fs.writeFileSync(path.join(dir, ROOT, 'src', 'sleeps.mjs'), SLEEPS);
+}
+
+const policyFor = (over = {}) => ({
+  version: 1, allowedTools: ['build.detect', 'build.run', 'build.compare'],
+  allowedEffects: ['pure', 'read', 'write', 'network', 'process'],
+  allowedOrigins: [], maxTasks: 32, maxOutputBytes: 262_144, maxJournalBytes: 16_777_216, timeoutMs: 20_000, ...over,
+});
+
+const targetFor = (over = {}) => ({
+  name: 'main', system: 'npm', executable: NODE, executableSha256: digestOfNode(),
+  args: [`${ROOT}/src/builds.mjs`], diagnostics: 'node-uncaught-v1',
+  inputs: [`${ROOT}/src`], artifacts: [`${ROOT}/out.txt`], ...over,
+});
+const toolsFor = (config = {}) => makeBuildTools({ timeoutMs: 20_000, maxOutputBytes: 262_144, ...config });
+const runnerFor = (targets, over = {}) => toolsFor({ targets, ...over }).find((tool) => tool.name === 'build.run');
+
+export function buildExercises() {
+  return [
+    // ---- what exists, and what may be run --------------------------------------------
+    {
+      family: 'build', tool: 'build.factory',
+      call: () => ({
+        unconfigured: makeBuildTools(undefined).length,
+        noTargets: makeBuildTools({}).map((tool) => `${tool.name}:${tool.effect}`),
+        withTarget: toolsFor({ targets: [targetFor()] }).map((tool) => `${tool.name}:${tool.effect}`),
+      }),
+      expect: (r) => r.unconfigured === 0
+        && r.noTargets.join(' ') === 'build.detect:read build.compare:pure'
+        && r.withTarget.join(' ') === 'build.detect:read build.run:process build.compare:pure',
+      lesson: 'An absent build configuration registers nothing, and a configuration with no reviewed targets still registers build.detect and build.compare but not build.run. Those two need no executable — detecting a build system is a read and comparing two receipts is pure — so they remain useful on a machine that is not permitted to build anything, while a build.run that could only ever refuse would be a capability in name only. The three effects are deliberately different: only the one that starts a process costs an approval.',
+    },
+    {
+      family: 'build', tool: 'build.run',
+      call: () => ({ schema: runnerFor([targetFor(), targetFor({ name: 'other' })]).inputSchema }),
+      expect: (r) => Array.isArray(r.schema.properties.target.enum)
+        && r.schema.properties.target.enum.join(',') === 'main,other'
+        && r.schema.additionalProperties === false
+        && Object.keys(r.schema.properties).join(',') === 'target,expectArtifactsSha256',
+      lesson: 'build.run\'s input offers a choice among the reviewed target names and nothing else: the enum is generated from the configuration, so a plan selects a build that was reviewed rather than describing one. There is no executable, args, cwd or env field anywhere in the schema, which keeps the invariant process.run already holds — argv comes only from reviewed configuration, never from a plan or a model.',
+    },
+
+    // ---- configuration refusals ------------------------------------------------------
+    {
+      family: 'build', tool: 'build.factory', expectThrow: 'BUILD_CONFIG',
+      call: () => toolsFor({ targets: [targetFor({ executableSha256: undefined })] }),
+      lesson: 'A build target without an exact executable digest is refused BUILD_CONFIG at registration. The digest is what makes the receipt mean anything: without it the receipt would attest that some compiler at that path produced those bytes, which is a claim about a filename rather than about a program.',
+    },
+    {
+      family: 'build', tool: 'build.factory', expectThrow: 'BUILD_CONFIG',
+      call: () => toolsFor({ targets: [targetFor({ diagnostics: 'invented-matcher' })] }),
+      lesson: 'A diagnostics matcher that is not one of the reviewed set is refused BUILD_CONFIG, and the refusal names the ones that exist. Matchers are code, not configuration: a caller cannot supply a pattern, because a pattern supplied per call could claim any file:line it liked and the diagnostic would still be reported as the compiler\'s.',
+    },
+    {
+      family: 'build', tool: 'build.factory', expectThrow: 'BUILD_CONFIG',
+      call: () => toolsFor({ targets: [targetFor({ inputs: ['../outside'] })] }),
+      lesson: 'A declared input or artifact path that escapes the workspace is refused BUILD_CONFIG at registration, and so is an absolute one. The input set is what the receipt attests over, so a path reaching outside the workspace would put bytes nobody can review inside a digest that claims to describe the build.',
+    },
+
+    // ---- detect: present is not the same as runnable -----------------------------------
+    {
+      family: 'build', tool: 'build.detect', workspace: 'temp', fixture,
+      call: ({ workspaceRoot }) => {
+        const [detect] = toolsFor({ targets: [targetFor()] });
+        const result = detect.execute({ directory: ROOT }, { policy: policyFor(), workspaceRoot });
+        return {
+          detector: result.detector, count: result.count, multiple: result.multiple, runnable: result.runnable,
+          systems: result.systems.map((entry) => [entry.system, entry.entries.join('|'), entry.entriesRead, entry.targets.join('|')]),
+          packageDigest: result.systems.find((entry) => entry.system === 'npm').markerSha256,
+          everyDeclaredKeyPresent: detect.outputKeys.every((key) => result[key] !== undefined),
+        };
+      },
+      expect: (r) => r.detector === 'markers-v1' && r.count === 2 && r.multiple === true
+        && r.systems[0][0] === 'npm' && r.systems[0][1] === 'build|test' && r.systems[0][2] === true && r.systems[0][3] === 'main'
+        && r.systems[1][0] === 'make' && r.systems[1][1] === 'all|clean|dist' && r.systems[1][3] === ''
+        && r.runnable.join(',') === 'npm'
+        && r.packageDigest === sha256(Buffer.from(PACKAGE))
+        && r.everyDeclaredKeyPresent,
+      lesson: 'build.detect reports each build system it found with the marker file, that file\'s digest, and the script or target names it actually read out of it — package.json\'s scripts and a Makefile\'s targets are read, while a Cargo.toml reports none because it does not list its own, and entriesRead distinguishes "read nothing" from "nothing to read". Two facts are kept apart: what the tree contains, and which of those systems has a reviewed target behind it, reported separately as runnable. Several build systems in one tree is the normal case and the usual source of a confident wrong guess, so multiple:true reports the ambiguity rather than resolving it.',
+    },
+    {
+      family: 'build', tool: 'build.detect', workspace: 'temp', fixture,
+      call: ({ workspaceRoot }) => {
+        const [detect] = toolsFor();
+        const result = detect.execute({}, { policy: policyFor(), workspaceRoot });
+        return { count: result.count, multiple: result.multiple, runnable: result.runnable.length, directory: result.directory };
+      },
+      expect: (r) => r.count === 0 && r.multiple === false && r.runnable === 0 && r.directory === null,
+      lesson: 'A directory with no marker reports count:0 rather than guessing a build system from file extensions. The fixture tree one level down is invisible from the root, because detection looks for markers exactly where it was asked rather than searching: a search would find a build system belonging to a vendored dependency and report it as this project\'s.',
+    },
+    {
+      family: 'build', tool: 'build.detect', expectThrow: 'BUILD_CONFIG', workspace: 'temp', fixture,
+      call: ({ workspaceRoot }) => toolsFor()[0].execute({ directory: '../elsewhere' }, { policy: policyFor(), workspaceRoot }),
+      lesson: 'A directory argument that escapes the workspace is refused BUILD_CONFIG, as are an absolute path and one containing a backslash. The input is the one part of detection a plan controls, so it gets the same path rules every workspace reader here applies.',
+    },
+
+    // ---- run: the receipt --------------------------------------------------------------
+    {
+      family: 'build', tool: 'build.run', workspace: 'temp', fixture,
+      call: async ({ workspaceRoot }) => {
+        const run = runnerFor([targetFor()]);
+        const result = await run.execute({ target: 'main' }, { policy: policyFor(), workspaceRoot });
+        return {
+          ok: result.ok, exitCode: result.exitCode, argv: result.argv.join(' '), matcher: result.matcher,
+          mentionsExecutablePath: result.argv.some((entry) => entry.includes(path.sep)),
+          inputs: result.inputs.map((entry) => entry.path).join('|'),
+          buildsDigest: result.inputs.find((entry) => entry.path.endsWith('builds.mjs'))?.sha256,
+          artifacts: result.artifacts.map((entry) => `${entry.path}:${entry.sha256}`).join('|'),
+          diagnostics: result.diagnostics.length, reproduced: result.reproduced,
+          stdout: result.stdoutTail.trim(), inputsSkipped: result.inputsSkipped,
+          everyDeclaredKeyPresent: run.outputKeys.every((key) => result[key] !== undefined),
+        };
+      },
+      expect: (r) => r.ok === true && r.exitCode === 0 && r.matcher === 'node-uncaught-v1'
+        && r.argv === `node.exe ${ROOT}/src/builds.mjs` && r.mentionsExecutablePath === false
+        && r.buildsDigest === sha256(Buffer.from(BUILDS))
+        && r.artifacts === `${ROOT}/out.txt:${sha256(Buffer.from('built'))}`
+        && r.diagnostics === 0 && r.reproduced === null && r.stdout === 'build ok'
+        && r.inputsSkipped === 0 && r.everyDeclaredKeyPresent,
+      lesson: 'A successful build.run returns a receipt rather than a transcript: every declared input file with its digest, every declared artifact with its digest, the exact argv, and the exit code. The input digests are computed before the child runs and the artifact digests after, so the receipt describes what was compiled and what came out rather than whatever the tree looks like later. The executable\'s own path is never echoed back — its basename plus the reviewed args is what a reader needs, and the path belongs to the configuration. With nothing claimed about the expected output, reproduced is null rather than true.',
+    },
+    {
+      family: 'build', tool: 'build.run', workspace: 'temp', fixture,
+      call: async ({ workspaceRoot }) => {
+        const run = runnerFor([targetFor()]);
+        const context = { policy: policyFor(), workspaceRoot };
+        const first = await run.execute({ target: 'main' }, context);
+        const second = await run.execute({ target: 'main', expectArtifactsSha256: first.artifactsSha256 }, context);
+        const wrongClaim = await run.execute({ target: 'main', expectArtifactsSha256: 'a'.repeat(64) }, context);
+        return {
+          sameReceipt: first.receipt === second.receipt,
+          sameInputs: first.inputsSha256 === second.inputsSha256,
+          reproduced: second.reproduced, deniedClaim: wrongClaim.reproduced, stillBuilt: wrongClaim.ok,
+        };
+      },
+      expect: (r) => r.sameReceipt && r.sameInputs && r.reproduced === true
+        && r.deniedClaim === false && r.stillBuilt === true,
+      lesson: 'The same inputs through the same reviewed toolchain produce the same receipt, which is what makes a receipt comparable at all: it is the digest of the inputs, the argv, the executable digest, the artifact digests and the exit code together. Asking for a specific artifact digest and not getting it reports reproduced:false as a value rather than throwing, and the build is still reported as having succeeded — a rebuild whose output drifted is a finding that needs its diagnostics and both digests, not an exception that discards them.',
+    },
+    {
+      family: 'build', tool: 'build.compare', workspace: 'temp', fixture,
+      call: async ({ workspaceRoot }) => {
+        const [, run, compare] = toolsFor({ targets: [targetFor()] });
+        const context = { policy: policyFor(), workspaceRoot };
+        const before = await run.execute({ target: 'main' }, context);
+        // An edit that cannot reach the output: a comment appended to the build script.
+        fs.appendFileSync(path.join(workspaceRoot, ROOT, 'src', 'builds.mjs'), '// an edit that changes nothing it writes\n');
+        const after = await run.execute({ target: 'main' }, context);
+        const verdict = compare.execute({ left: before, right: after });
+        // Restored, so a second invocation of this exercise starts from the same tree it did.
+        fs.writeFileSync(path.join(workspaceRoot, ROOT, 'src', 'builds.mjs'), BUILDS);
+        return {
+          inputsMoved: before.inputsSha256 !== after.inputsSha256,
+          artifactsHeld: before.artifactsSha256 === after.artifactsSha256,
+          receiptMoved: before.receipt !== after.receipt,
+          verdict: verdict.verdict, transition: verdict.transition, sameReceipt: verdict.sameReceipt,
+          everyDeclaredKeyPresent: compare.outputKeys.every((key) => verdict[key] !== undefined),
+        };
+      },
+      expect: (r) => r.inputsMoved && r.artifactsHeld && r.receiptMoved
+        && r.verdict === 'inputs-changed-output-did-not' && r.transition === 'still-succeeding'
+        && r.sameReceipt === false && r.everyDeclaredKeyPresent,
+      lesson: 'build.compare answers two questions a pass-or-fail cannot: did the declared inputs change, and did the output bytes change. An edit to a source file that never reaches the artifact gives inputs-changed-output-did-not — the receipt moves because it binds the inputs, while the artifact digest holds — and that is the verdict a harness knowing only "the build succeeded" cannot produce. It consumes a whole build.run result as its input rather than four projected fields, so a plan can wire {$task} straight from one build to the next.',
+    },
+    {
+      family: 'build', tool: 'build.compare',
+      call: () => {
+        const compare = toolsFor({ targets: [targetFor()] }).find((tool) => tool.name === 'build.compare');
+        const a = 'a'.repeat(64);
+        const b = 'b'.repeat(64);
+        const receipt = (inputs, artifacts, exitCode) => ({ inputsSha256: inputs, artifactsSha256: artifacts, exitCode });
+        const verdict = (left, right) => compare.execute({ left, right }).verdict;
+        const transition = (left, right) => compare.execute({ left, right }).transition;
+        return {
+          identical: verdict(receipt(a, b, 0), receipt(a, b, 0)),
+          changed: verdict(receipt(a, b, 0), receipt(b, a, 0)),
+          noEffect: verdict(receipt(a, b, 0), receipt(b, b, 0)),
+          nondeterministic: verdict(receipt(a, b, 0), receipt(a, a, 0)),
+          transitions: [
+            transition(receipt(a, b, 0), receipt(a, b, 0)), transition(receipt(a, b, 1), receipt(a, b, 1)),
+            transition(receipt(a, b, 0), receipt(a, b, 1)), transition(receipt(a, b, 1), receipt(a, b, 0)),
+          ].join(','),
+          unsuppliedReceipts: compare.execute({ left: receipt(a, b, 0), right: receipt(a, b, 0) }).sameReceipt,
+        };
+      },
+      expect: (r) => r.identical === 'identical' && r.changed === 'changed'
+        && r.noEffect === 'inputs-changed-output-did-not' && r.nondeterministic === 'nondeterministic-build'
+        && r.transitions === 'still-succeeding,still-failing,broken,fixed'
+        && r.unsuppliedReceipts === null,
+      lesson: 'The four verdicts are exactly the four combinations of "inputs moved" and "artifacts moved": identical, changed, inputs-changed-output-did-not, and nondeterministic-build — identical inputs producing different output bytes, which is the one no amount of rerunning a build will tell you about. The exit-code transition (still-succeeding, still-failing, broken, fixed) is reported on its own axis rather than folded in, because "the build now fails" and "the build is not reproducible" are independent findings and a single score would hide whichever one it did not name. Like experiment.compare, this deliberately emits no aggregate.',
+    },
+    {
+      family: 'build', tool: 'build.run', workspace: 'temp', fixture,
+      call: async ({ workspaceRoot }) => {
+        const run = runnerFor([targetFor({ args: [`${ROOT}/src/fails.mjs`] })]);
+        const result = await run.execute({ target: 'main' }, { policy: policyFor(), workspaceRoot });
+        const [diagnostic] = result.diagnostics;
+        return {
+          ok: result.ok, exitCode: result.exitCode, counts: JSON.stringify(result.diagnosticCounts),
+          code: diagnostic?.code, message: diagnostic?.message, line: diagnostic?.line,
+          workspacePath: diagnostic?.workspacePath,
+          boundToTheFile: diagnostic?.fileSha256 === sha256(Buffer.from(FAILS)),
+          agreesWithInputSet: diagnostic?.fileSha256 === result.inputs.find((entry) => entry.path.endsWith('fails.mjs'))?.sha256,
+          everyDeclaredKeyPresent: run.outputKeys.every((key) => result[key] !== undefined),
+        };
+      },
+      expect: (r) => r.ok === false && r.exitCode === 1 && r.counts === '{"error":1}'
+        && r.code === 'ERR_ASSERTION' && r.message === '1 == 2' && r.line === 2
+        && r.workspacePath === `${ROOT}/src/fails.mjs`
+        && r.boundToTheFile && r.agreesWithInputSet && r.everyDeclaredKeyPresent,
+      lesson: 'A failing build is a result, not an exception: build.run reports exitCode, ok:false and its structured diagnostics, where integrations\' spawnBounded would have rejected on the non-zero exit and discarded the diagnostics of every failing build — the case that matters most. Each diagnostic carries the SHA-256 of the file it blames as the build saw it, matching that file\'s entry in the input set, so a reported error is attributable to exact bytes and a diagnostic that outlived its file can be shown to be stale without rebuilding.',
+    },
+    {
+      family: 'build', tool: 'build.run', expectThrow: 'BUILD_TIMEOUT', workspace: 'temp', fixture: slowFixture,
+      call: ({ workspaceRoot }) => runnerFor([targetFor({ args: [`${ROOT}/src/sleeps.mjs`], timeoutMs: 700 })])
+        .execute({ target: 'main' }, { policy: policyFor(), workspaceRoot }),
+      lesson: 'A build that outruns its deadline is refused BUILD_TIMEOUT and the child is killed, rather than returning a partial receipt. A receipt whose artifact digests were taken while a compiler was still writing would attest to a half-written file, which is worse than no attestation: it would compare as a legitimate difference against the finished one.',
+    },
+    {
+      family: 'build', tool: 'build.run', expectThrow: 'INTEGRATION_EXECUTABLE', workspace: 'temp', fixture,
+      call: ({ workspaceRoot }) => runnerFor([targetFor({ executableSha256: 'f'.repeat(64) })])
+        .execute({ target: 'main' }, { policy: policyFor(), workspaceRoot }),
+      lesson: 'A toolchain whose digest does not match the reviewed one is refused INTEGRATION_EXECUTABLE even though the file exists and would run — and the code is the integration layer\'s on purpose, because this is literally integrations\' own resolveExecutable guard rather than a second copy of it. One guard means one set of codes and nothing to drift; a parallel implementation with prettier codes would be the more dangerous choice.',
+    },
+    {
+      family: 'build', tool: 'build.run', expectThrow: 'BUILD_POLICY', workspace: 'temp', fixture,
+      call: ({ workspaceRoot }) => runnerFor([targetFor()])
+        .execute({ target: 'main' }, { policy: policyFor({ allowedEffects: ['pure', 'read'] }), workspaceRoot }),
+      lesson: 'build.run is refused BUILD_POLICY when the policy does not allow the process effect, while build.detect continues to work under the same policy because it is a read. The split is what lets an operator permit a harness to see what a tree would build without permitting it to build anything.',
+    },
+    {
+      family: 'build', tool: 'build.run', workspace: 'temp', fixture,
+      call: async ({ workspaceRoot }) => {
+        const run = runnerFor([
+          targetFor({ name: 'declares', artifacts: [`${ROOT}/never-written.txt`] }),
+          targetFor({ name: 'declaresNothing', artifacts: [] }),
+        ]);
+        const context = { policy: policyFor(), workspaceRoot };
+        const declared = await run.execute({ target: 'declares' }, context);
+        const nothing = await run.execute({ target: 'declaresNothing' }, context);
+        return {
+          bothFoundNothing: declared.artifacts.length === 0 && nothing.artifacts.length === 0,
+          digestsDiffer: declared.artifactsSha256 !== nothing.artifactsSha256,
+        };
+      },
+      expect: (r) => r.bothFoundNothing && r.digestsDiffer,
+      lesson: 'The declared path list is part of the inputs and artifacts digest, not only the files found under it. Without that, a target asked for an artifact it never produced and a target asked for no artifacts at all both hash the empty list and compare as identical — so a build that produced nothing would look perfectly reproducible against one that was never asked to produce anything.',
+    },
+
+    // ---- the matcher trap worth remembering --------------------------------------------
+    {
+      family: 'build', tool: 'build.matchers',
+      call: () => {
+        const parse = (name, output) => internals.MATCHERS[name].parse(output.replace(/\r\n?/g, '\n'));
+        const assertion = parse('node-uncaught-v1', [
+          'node:internal/modules/run_main:107', '    triggerUncaughtException(', '    ^', '',
+          'AssertionError [ERR_ASSERTION]: 1 == 2',
+          '    at file:///C:/work/src/main.mjs:2:8',
+          '    at ModuleJob.run (node:internal/modules/esm/module_job:561:25)',
+        ].join('\n'));
+        const internal = parse('node-uncaught-v1', ['node:internal/modules/run_main:107', '', 'Error: nothing of ours', '    at run (node:internal/modules/esm/loader:647:26)'].join('\n'));
+        const gcc = parse('gcc-v1', 'main.c:4:12: error: expected a semicolon\r\nmain.c:9:1: warning: unused variable\r\n');
+        const rustc = parse('rustc-v1', 'error[E0425]: cannot find value `x`\r\n  --> src/main.rs:3:13\r\n');
+        return {
+          firstFrameWins: assertion[0]?.file, line: assertion[0]?.line, column: assertion[0]?.column,
+          noLocationRatherThanNodes: internal[0]?.file, plainErrorStillRead: internal[0]?.message,
+          gcc: gcc.map((entry) => `${entry.severity}@${entry.line}:${entry.column}:${entry.message}`).join('|'),
+          rustc: `${rustc[0]?.code}@${rustc[0]?.file}:${rustc[0]?.line}`,
+          nothingClaimed: parse('none', 'error: anything at all\n').length,
+        };
+      },
+      expect: (r) => r.firstFrameWins === 'file:///C:/work/src/main.mjs' && r.line === 2 && r.column === 8
+        && r.noLocationRatherThanNodes === null && r.plainErrorStillRead === 'nothing of ours'
+        && r.gcc === 'error@4:12:expected a semicolon|warning@9:1:unused variable'
+        && r.rustc === 'E0425@src/main.rs:3' && r.nothingClaimed === 0,
+      lesson: 'node\'s own first line lies about location: an uncaught assertion heads its stack with node:internal/modules/run_main:107, and the file the operator edited appears only in the first non-internal stack frame, so the matcher takes the frame and falls back to the header only when the header is not itself inside node. When every frame is internal it reports no location at all, because a location inside node points at the wrong code more convincingly than a null does. Three things here were wrong on first contact with real output and were fixed by running a compiler rather than reading about one: a path class excluding colons matched nothing on file:///C:/… , an optional "functionName (" prefix that excluded only parentheses matched across the line break and consumed the next frame\'s paren, and a required prefix before Error|Exception silently missed every plain "Error:". Every matcher is fed LF-normalised text, or CRLF leaves a stray carriage return inside each captured message and a multi-line pattern like rustc\'s never matches at all.',
+    },
+  ];
+}
