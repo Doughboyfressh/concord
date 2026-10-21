@@ -1,0 +1,1 @@
+{"version":1,"allowedTools":["web.search","web.fetch"],"allowedEffects":["network"],"allowedOrigins":["https://example.com","http://127.0.0.1:8888","https://api.search.brave.com"],"maxTasks":4,"maxOutputBytes":1048576,"maxJournalBytes":16777216,"timeoutMs":60000}

@@ -1,0 +1,1 @@
+{"version":1,"allowedTools":["build.detect","build.run","build.compare"],"allowedEffects":["pure","read","process"],"maxTasks":8,"maxOutputBytes":1048576,"maxJournalBytes":16777216,"timeoutMs":180000}

@@ -1,0 +1,27 @@
+{
+  "timeoutMs": 120000,
+  "maxOutputBytes": 1048576,
+  "targets": [
+    {
+      "name": "check",
+      "system": "npm",
+      "executable": "C:/Program Files/nodejs/node.exe",
+      "executableSha256": "replace with the sha256 of the executable above",
+      "args": ["scripts/check.mjs"],
+      "diagnostics": "node-uncaught-v1",
+      "inputs": ["src", "scripts"],
+      "artifacts": []
+    },
+    {
+      "name": "bundle",
+      "system": "npm",
+      "executable": "C:/Program Files/nodejs/node.exe",
+      "executableSha256": "replace with the sha256 of the executable above",
+      "args": ["scripts/bundle.mjs"],
+      "diagnostics": "none",
+      "inputs": ["src"],
+      "artifacts": ["dist/concord.mjs"],
+      "timeoutMs": 60000
+    }
+  ]
+}

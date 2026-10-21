@@ -1,0 +1,31 @@
+{
+  "timeoutMs": 15000,
+  "maxOutputBytes": 1048576,
+  "maxRedirects": 3,
+  "engines": [
+    {
+      "name": "searx-local",
+      "origin": "http://127.0.0.1:8888",
+      "path": "/search",
+      "queryParam": "q",
+      "extraParams": { "format": "json" },
+      "resultsPath": ["results"],
+      "urlKey": "url",
+      "titleKey": "title",
+      "snippetKey": "content",
+      "maxResults": 10
+    },
+    {
+      "name": "brave",
+      "origin": "https://api.search.brave.com",
+      "path": "/res/v1/web/search",
+      "queryParam": "q",
+      "apiKeyEnv": "BRAVE_SEARCH_TOKEN",
+      "resultsPath": ["web", "results"],
+      "urlKey": "url",
+      "titleKey": "title",
+      "snippetKey": "description",
+      "maxResults": 10
+    }
+  ]
+}

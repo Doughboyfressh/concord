@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "Search several engines at once, then retrieve the best-corroborated page",
+  "tasks": [
+    { "id": "found", "tool": "web.search", "input": { "query": "deterministic replay agent harness", "limit": 5 } },
+    { "id": "page", "tool": "web.fetch", "input": { "url": "https://example.com/" } }
+  ]
+}

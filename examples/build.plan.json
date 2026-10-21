@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "name": "Detect the build systems present, build one reviewed target, then compare two receipts",
+  "tasks": [
+    {
+      "id": "present",
+      "tool": "build.detect",
+      "input": {}
+    },
+    {
+      "id": "before",
+      "tool": "build.run",
+      "input": {
+        "target": "check"
+      }
+    },
+    {
+      "id": "after",
+      "tool": "build.run",
+      "input": {
+        "target": "check"
+      },
+      "dependsOn": [
+        "before"
+      ]
+    },
+    {
+      "id": "verdict",
+      "tool": "build.compare",
+      "input": {
+        "left": {
+          "$task": "before"
+        },
+        "right": {
+          "$task": "after"
+        }
+      },
+      "dependsOn": [
+        "before",
+        "after"
+      ]
+    }
+  ]
+}

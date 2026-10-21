@@ -11,6 +11,8 @@ import { makeAgentTools } from './workers.mjs';
 import { makeArtifactTools } from './artifacts.mjs';
 import { makeBrowserTools } from './browser.mjs';
 import { makeDecompilerTools } from './decompiler.mjs';
+import { makeWebTools } from './web.mjs';
+import { makeBuildTools } from './build.mjs';
 import { makeReverseTools } from './reverse.mjs';
 import { makeReaderTools } from './readers.mjs';
 import { makeForeignTools } from './foreign.mjs';
@@ -34,7 +36,7 @@ import { createServer, listenServer } from './server.mjs';
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
 /** Every flag the launchers accept. A flag absent here is rejected rather than ignored. */
-export const CHAT_FLAGS = ['workspace', 'policy', 'integrations', 'workers', 'browser', 'decompiler', 'reverse', 'foreign', 'port', 'store'];
+export const CHAT_FLAGS = ['workspace', 'policy', 'integrations', 'workers', 'browser', 'decompiler', 'web', 'build', 'reverse', 'foreign', 'port', 'store'];
 
 /** The kernel's own ceiling for a policy deadline, from the policy schema in src/engine.mjs. */
 const POLICY_MAX_TIMEOUT_MS = 300_000;
@@ -83,6 +85,8 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
   const workers = flags.workers ? readJson(flags.workers) : {};
   const browser = flags.browser ? readJson(flags.browser) : undefined;
   const decompiler = flags.decompiler ? readJson(flags.decompiler) : undefined;
+  const web = flags.web ? readJson(flags.web) : undefined;
+  const build = flags.build ? readJson(flags.build) : undefined;
   const reverseTable = readJson(path.join(root, 'reverse-tools.json'));
   const reverse = flags.reverse ? readJson(flags.reverse) : {};
   const foreignManifest = fs.existsSync(path.join(root, 'foreign-capabilities.json'))
@@ -91,6 +95,7 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
   const descriptors = [
     ...makeBuiltinTools(), ...makeSourceTools(catalog), ...makeCapabilityTools(inventory), ...makeArtifactTools(),
     ...makeIntegrationTools(integrations), ...makeAgentTools(workers), ...makeBrowserTools(browser), ...makeDecompilerTools(decompiler),
+    ...makeWebTools(web), ...makeBuildTools(build),
     ...makeReverseTools(reverseTable, reverse), ...makeReaderTools(),
     ...makeForeignTools(foreignManifest, flags.foreign ? readJson(flags.foreign) : {}),
     ...makeMailboxTools({ directory: mailboxDir }),
