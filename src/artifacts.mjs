@@ -737,10 +737,26 @@ const INTERFACE_ENTRY_SCHEMA = {
     kind: { enum: ['func', 'table', 'memory', 'global', 'tag', 'unknown'] },
   },
 };
-const INTERFACE_SCHEMA = object({
-  state: { enum: ['complete', 'partial'] },
-  entries: { type: 'array', maxItems: MAX_WASM_INTERFACE_ENTRIES * 2, items: INTERFACE_ENTRY_SCHEMA },
-}, ['entries']);
+/**
+ * Open, like every other comparison input here, so a reader result can be handed over whole.
+ *
+ * This was the one compare tool declared with the closed `object()` helper, and that was an
+ * accident rather than a decision: artifact.compareHar, compareJsExports, compareSourceToBundle,
+ * compareManagedMembers and compareApplicationVersions all declare their sides with
+ * `additionalProperties: true`, precisely because what a caller holds is a reader's output, which
+ * carries path, sha256, limitations and untrusted alongside the part being compared. Closed here,
+ * the only way to call this tool from a plan was to project `state` and `entries` by hand, and a
+ * caller who passed the obvious thing failed the *task* at run time rather than the plan at
+ * compile time, because a reference is resolved while running. Found by a training round composing
+ * the two tools the natural way and being told its prediction did not hold.
+ */
+const INTERFACE_SCHEMA = {
+  type: 'object', additionalProperties: true, required: ['entries'],
+  properties: {
+    state: { enum: ['complete', 'partial'] },
+    entries: { type: 'array', maxItems: MAX_WASM_INTERFACE_ENTRIES * 2, items: INTERFACE_ENTRY_SCHEMA },
+  },
+};
 
 const signatureOf = (entry) => (entry.signature === undefined ? null : entry.signature);
 const entryKey = (entry) => JSON.stringify([entry.direction, entry.module ?? null, entry.name]);

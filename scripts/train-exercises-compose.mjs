@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { canonical } from '../src/value.mjs';
 
 /**
  * Composition: the thing the kernel is actually for, and the thing nothing was testing.
@@ -24,9 +25,107 @@ import path from 'node:path';
 
 const write = (dir, name, body) => fs.writeFileSync(path.join(dir, name), body);
 
+/**
+ * A minimal but real WebAssembly module: type, import, function, export and code sections.
+ *
+ * Hand-encoded because the only wasm fixture in this suite was the eight-byte header, against
+ * which every one of the reader's outputs is an empty list — a parser that read nothing at all
+ * would have scored the same. Each export points at function index 0; the signature is () -> ().
+ */
+function wasmModule(exportNames) {
+  const bytes = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+  const section = (id, body) => { bytes.push(id, body.length, ...body); };
+  const str = (text) => [text.length, ...[...text].map((character) => character.charCodeAt(0))];
+  section(0x01, [0x01, 0x60, 0x00, 0x00]);                                  // one signature, () -> ()
+  section(0x02, [0x01, ...str('env'), ...str('log'), 0x00, 0x00]);          // one imported function
+  section(0x03, [0x01, 0x00]);                                             // one local function
+  section(0x07, [exportNames.length, ...exportNames.flatMap((name) => [...str(name), 0x00, 0x00])]);
+  section(0x0a, [0x01, 0x02, 0x00, 0x0b]);                                 // one empty body
+  return Buffer.from(bytes);
+}
+
+/** Two captures of the same page, differing by one failure and one new request. */
+const har = (entries) => JSON.stringify({ log: { version: '1.2', creator: { name: 'training', version: '1' }, entries } });
+const capture = (method, url, status, mimeType, size) => ({
+  request: { method, url }, response: { status, content: { mimeType, size }, bodySize: size },
+});
+const BEFORE_HAR = har([
+  capture('GET', 'https://app.example/index.html', 200, 'text/html', 1200),
+  capture('GET', 'https://app.example/app.js', 200, 'application/javascript', 8400),
+]);
+const AFTER_HAR = har([
+  capture('GET', 'https://app.example/index.html', 200, 'text/html', 1300),
+  capture('GET', 'https://app.example/app.js', 500, 'application/javascript', 0),
+  capture('POST', 'https://telemetry.example/collect', 204, 'application/json', 0),
+]);
+
 export function composeExercises() {
   return [
     // ---- compositions that do real work ----------------------------------------------
+    {
+      family: 'composition', tool: 'artifact.compareHar', workspace: 'temp',
+      fixture: (dir) => {
+        write(dir, 'before.har', BEFORE_HAR);
+        write(dir, 'after.har', AFTER_HAR);
+      },
+      plan: { version: 1, name: 'compare-two-captures', tasks: [
+        { id: 'before', tool: 'artifact.harCapture', input: { path: 'before.har' } },
+        { id: 'after', tool: 'artifact.harCapture', input: { path: 'after.har' } },
+        { id: 'diff', tool: 'artifact.compareHar', dependsOn: ['before', 'after'],
+          input: { left: { $task: 'before' }, right: { $task: 'after' } } },
+      ] },
+      expect: (r) => r.results.before.summary.entryCount === 2 && r.results.after.summary.entryCount === 3
+        && r.results.before.summary.byStatus['2xx'] === 2 && r.results.after.summary.byStatus['5xx'] === 1
+        && r.results.after.summary.origins.length === 2
+        && canonical(r.results.diff.summary) === canonical({ added: 1, removed: 0, changed: 1, unchanged: 1, countDiffers: 0 })
+        && r.results.diff.changes.find((change) => change.state === 'added').request === 'POST https://telemetry.example/collect'
+        && r.results.diff.changes.find((change) => change.state === 'changed').right.status === 500
+        && r.results.before.untrusted === true && r.results.diff.limitations.length === 1,
+      lesson: 'Two HTTP archives read by artifact.harCapture feed artifact.compareHar by reference, and the comparison is the point of both: it reports one request added, one changed and one unchanged, keying requests by method, origin and path so that a query string or a timing difference is not mistaken for a different request. It names the unchanged request explicitly rather than omitting it, which is what lets a reader tell "the same request still succeeds" from "the request is no longer in the capture". The reason this tool takes two reader results rather than two paths is that comparison is pure: nothing is read twice, and the same two captures can be compared again from the journal without touching the files. Its single stated limitation is the key itself, which a caller has to know in order to read the result correctly.',
+    },
+    {
+      family: 'composition', tool: 'artifact.compareWasmInterfaces', workspace: 'temp',
+      fixture: (dir) => {
+        write(dir, 'before.wasm', wasmModule(['run', 'version']));
+        write(dir, 'after.wasm', wasmModule(['run']));
+      },
+      plan: { version: 1, name: 'did-the-module-keep-its-surface', tasks: [
+        { id: 'before', tool: 'artifact.wasmInterface', input: { path: 'before.wasm' } },
+        { id: 'after', tool: 'artifact.wasmInterface', input: { path: 'after.wasm' } },
+        { id: 'surface', tool: 'artifact.compareWasmInterfaces', dependsOn: ['before', 'after'],
+          input: { left: { $task: 'before' }, right: { $task: 'after' }, select: 'exports' } },
+      ] },
+      expect: (r) => r.results.before.state === 'complete' && r.results.before.entries.length === 3
+        && r.results.before.entries[0].direction === 'import' && r.results.before.entries[0].module === 'env'
+        && r.results.before.entries[0].wat_form === '(import "env" "log" (func))'
+        && r.results.before.entries.filter((entry) => entry.direction === 'export').length === 2
+        && r.results.after.entries.filter((entry) => entry.direction === 'export').length === 1
+        && r.results.surface.select === 'exports'
+        && canonical(r.results.surface.summary) === canonical({ added: 0, removed: 1, changed: 0, unchanged: 1, unknown: 0 })
+        && r.results.surface.changes.find((change) => change.name === 'version').state === 'removed'
+        && r.results.surface.changes.every((change) => change.direction === 'export'),
+      lesson: 'A real WebAssembly module — type, import, function, export and code sections, hand-encoded — proves artifact.wasmInterface reads the module\'s actual surface rather than only recognising its magic bytes: one import from env, two exported functions, each with its decoded signature and a WAT form beside it. Feeding two of those to artifact.compareWasmInterfaces answers whether a module kept the surface its callers depend on, and select narrows the question to imports, exports or both, so "we stopped exporting something" is distinguishable from "we started depending on something new" rather than being averaged into one diff. Until this exercise the reader had only ever been run against an eight-byte header, where every output was an empty list and a parser that read nothing at all would have scored identically.',
+    },
+    {
+      family: 'composition', tool: 'artifact.compareSourceToBundle', workspace: 'temp',
+      fixture: (dir) => {
+        write(dir, 'authored.js', 'export const keep = 1;\nexport function alsoKeep() {}\nexport class Dropped {}\n');
+        write(dir, 'shipped.js', 'export const keep = 1;\nexport function alsoKeep() {}\nexport const extra = 2;\n');
+      },
+      plan: { version: 1, name: 'did-the-build-keep-what-was-written', tasks: [
+        { id: 'authored', tool: 'artifact.jsExports', input: { path: 'authored.js' } },
+        { id: 'shipped', tool: 'artifact.jsExports', input: { path: 'shipped.js' } },
+        { id: 'verdict', tool: 'artifact.compareSourceToBundle', dependsOn: ['authored', 'shipped'],
+          input: { source: { $task: 'authored' }, bundle: { $task: 'shipped' } } },
+      ] },
+      expect: (r) => canonical(r.results.verdict.summary) === canonical({ present: 2, absent: 1, bundleOnly: 1 })
+        && r.results.verdict.findings.find((entry) => entry.name === 'Dropped').state === 'absent'
+        && r.results.verdict.findings.find((entry) => entry.name === 'Dropped').reason.includes('minifier')
+        && r.results.verdict.findings.find((entry) => entry.name === 'extra').state === 'bundle-only'
+        && r.results.verdict.findings.filter((entry) => entry.state === 'present').length === 2
+        && r.results.verdict.limitations.some((note) => note.includes('not evidence of removal')),
+      lesson: 'artifact.compareSourceToBundle is deliberately asymmetric where artifact.compareJsExports is symmetric: it answers "did the build keep what the source declared", so an export missing from the bundle is absent, one the bundle adds is bundle-only, and those are different findings rather than two directions of one diff. The valuable part is what it refuses to conclude - an absent export carries the reason that a minifier renaming it would look identical, and the result repeats as a limitation that absence is not evidence of removal. A tool reporting "one export was removed" would be more satisfying and would be making a claim the evidence does not support. Both sides come from the same reader over different files, composed by reference, so the comparison is pure and replays without reading either file again.',
+    },
     {
       family: 'composition', tool: 'artifact.compareJsExports', workspace: 'temp',
       fixture: (dir) => {

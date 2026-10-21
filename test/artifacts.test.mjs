@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { makeArtifactTools } from '../src/artifacts.mjs';
-import { HarnessError, canonical } from '../src/value.mjs';
+import { HarnessError, canonical, validateSchema } from '../src/value.mjs';
 import { runPlan, replayPlan } from '../src/engine.mjs';
 import { tempDir } from './temp-workspace.mjs';
 
@@ -794,6 +794,13 @@ test('WASM interface decoding agrees with Node WebAssembly, and resolves the fun
   assert.equal(diff.changes.find((c) => c.name === 'exported_mem').state, 'removed');
   assert.equal(diff.changes.find((c) => c.name === 'added_export').state, 'added');
   assert.equal(diff.changes.find((c) => c.name === 'exported_void').state, 'unchanged');
+
+  // The declaration has to accept what this test just passed. Calling execute() directly skips
+  // schema validation, which the kernel performs for a plan — so until a training round composed
+  // these two tools in a plan, this test passed whole reader results while the declared schema
+  // rejected them, and the disagreement was invisible from either side. A reference is resolved
+  // while running, so the cost was a failed task rather than a refused plan.
+  assert.doesNotThrow(() => validateSchema({ left: full, right: full, select: 'exports' }, compareWasmInterfaces.inputSchema));
   fs.rmSync(temp, { recursive: true, force: true });
 });
 
