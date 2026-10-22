@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { deflateSync } from 'node:zlib';
 import { loadLanguage, decodeInstruction, decodeRange } from '../src/sleigh.mjs';
+import { openSla } from '../src/ghidra.mjs';
 import { recoverControlFlow } from '../src/control-flow.mjs';
 import { analyseDataflow } from '../src/dataflow.mjs';
 import { makeBuildTools } from '../src/build.mjs';
@@ -51,6 +53,21 @@ const repeating = (pair, count) => Buffer.from(Array.from({ length: count * pair
 const BRANCHES = repeating([0x74, 0x00], 2100);
 const INCREMENTS = repeating([0xff, 0xc0], 4500);
 
+/**
+ * The real table, inflated, cut short, and compressed again.
+ *
+ * Nothing simpler reaches the guard worth proving. A truncated `.sla` file fails to inflate and is
+ * refused by the header check with reason not_a_sla or inflate_failed - a different site, the same
+ * code. Recompressing a prefix of the decompressed stream produces a file that inflates perfectly
+ * and then runs out mid-element, which is the case the tree decoder exists to catch. One per cent
+ * of four and a half megabytes is plenty and keeps the exercise cheap.
+ */
+const cutTable = () => {
+  const real = fs.readFileSync(TABLE);
+  const opened = openSla(real);
+  return Buffer.concat([real.subarray(0, 4), deflateSync(opened.flat.subarray(0, Math.floor(opened.flat.length / 100)))]);
+};
+
 /** A build target whose declared input set is larger than the digest walk will read. */
 const MANY = 'many-inputs';
 const manyFixture = (dir) => {
@@ -78,6 +95,19 @@ export function limitExercises() {
       lesson: 'A build target declaring more than four thousand input files is refused BUILD_INPUT_LIMIT during the digest walk, before the compiler is spawned. The walk is what makes a build receipt mean anything - it is the record of exactly which bytes went in - so a path set too large to digest is a receipt that cannot be produced, and running anyway would hand back an artifact with no statement of what it was built from. The bound is on files rather than bytes because the cost being refused is the walk itself.',
     },
     ...(GHIDRA ? [
+      {
+        family: 'limits', tool: 'sleigh.loadLanguage', expectThrow: 'SLEIGH_TABLE',
+        call: () => loadLanguage(cutTable()),
+        lesson: 'A compiled table that inflates cleanly and then ends mid-element is refused SLEIGH_TABLE with details.at naming where it ended - truncated, overflowed, or invalid. Two sites raise this one code and the details are what tell them apart: the header check refuses a file that is not a .sla or will not inflate at all, and the tree decoder refuses a stream that decompressed fine and then stopped making sense. The second is the one worth a guard, because a partially decoded language would disassemble with a subset of the processor’s constructors and report instructions that are wrong rather than absent.',
+      },
+      {
+        family: 'limits', tool: 'sleigh.decodeInstruction', expectThrow: 'SLEIGH_DECODE',
+        // Fifteen 0x66 operand-size prefixes and then an instruction that still wants a
+        // displacement: x86 lets a caller pad prefixes until the instruction cannot fit.
+        call: () => decodeInstruction(realLanguage(),
+          Buffer.from([...Array(15).fill(0x66), 0x0f, 0x1f, 0x84, 0x00, 0x11, 0x22, 0x33, 0x44]), { address: 0n }),
+        lesson: 'An instruction that reads past sixteen bytes is refused SLEIGH_DECODE, because ParserContext::buf in Ghidra is sixteen bytes and throws past it - this reader refuses at the same boundary rather than reading further and producing an answer Ghidra itself could not. x86 makes the case reachable from input alone: prefixes can be repeated, so fifteen operand-size prefixes before an instruction that still wants a displacement runs off the end. Measured at the boundary too - a twelve-prefix sequence decoding to exactly sixteen bytes is accepted, so the guard sits where the window ends and not before it.',
+      },
       {
         family: 'limits', tool: 'control-flow.recover', expectThrow: 'FLOW_LIMIT',
         call: () => recoverControlFlow(realLanguage(), BRANCHES, { address: 0n, limit: 4096 }),
