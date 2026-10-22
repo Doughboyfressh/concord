@@ -218,6 +218,43 @@ export function analyseGaps({ root, exercises, registry, observedCodes = new Set
    * of composable tools. A denominator containing permanently unreachable entries is the same
    * mistake the refusal count made with warnings returned as data, fixed the same way.
    */
+  /**
+   * Declared input fields nothing ever supplies.
+   *
+   * The mirror of the output-key axis, and added because that one turned out to be measuring
+   * something larger than it looked: a key no prediction read was usually a reader that had
+   * never been handed its own format. An input field no exercise passes is the same shape of
+   * blind spot from the other side - a code path the suite has never entered, and a place where
+   * the declaration and the implementation can disagree without anything failing. That is not
+   * hypothetical: artifact.managedMembers accepted a `limit` its schema does not declare, and
+   * the only thing that caught it was compiling a plan.
+   *
+   * Counted from plan task inputs only. A direct call bypasses schema validation entirely, so
+   * what it passes says nothing about what the declaration permits - the same reason the output
+   * keys are counted from plans alone.
+   */
+  const suppliedByTool = new Map();
+  for (const exercise of exercises) {
+    for (const task of exercise.plan?.tasks ?? []) {
+      if (!suppliedByTool.has(task.tool)) suppliedByTool.set(task.tool, new Set());
+      for (const field of Object.keys(task.input ?? {})) suppliedByTool.get(task.tool).add(field);
+    }
+  }
+  let declaredFieldCount = 0;
+  let suppliedFieldCount = 0;
+  const unsuppliedFields = [];
+  for (const [name, tool] of registry) {
+    const properties = tool.inputSchema?.properties;
+    if (!properties || typeof properties !== 'object') continue;
+    const fields = Object.keys(properties);
+    if (!fields.length) continue;
+    const seen = suppliedByTool.get(name) ?? new Set();
+    declaredFieldCount += fields.length;
+    const missing = fields.filter((field) => !seen.has(field));
+    suppliedFieldCount += fields.length - missing.length;
+    if (missing.length) unsuppliedFields.push({ tool: name, missing, of: fields.length });
+  }
+
   const addressable = [...exercised].filter((name) => registry?.has?.(name));
   const singleTaskOnly = addressable.filter((name) => !composed.has(name)).sort();
   const notAddressable = [...exercised].filter((name) => !registry?.has?.(name)).sort();
@@ -234,6 +271,11 @@ export function analyseGaps({ root, exercises, registry, observedCodes = new Set
       declared: declaredKeyCount, asserted: assertedKeyCount,
       unread: unreadKeys.sort((a, b) => b.missing.length - a.missing.length).slice(0, 25),
       overdeclared,
+    },
+    inputFields: {
+      declared: declaredFieldCount, supplied: suppliedFieldCount,
+      unsupplied: unsuppliedFields.sort((a, b) => b.missing.length - a.missing.length).slice(0, 25),
+      tools: unsuppliedFields.length,
     },
     composition: {
       composed: composed.size, addressable: addressable.length,
@@ -255,6 +297,8 @@ export function renderGaps(gaps) {
     '',
     `**Output keys.** ${gaps.outputKeys.asserted}/${gaps.outputKeys.declared} declared output keys are read by some prediction. A key no prediction reads has never been checked against a real run.`,
     '',
+    `**Input fields.** ${gaps.inputFields.supplied}/${gaps.inputFields.declared} declared input fields are supplied by some plan, leaving ${gaps.inputFields.declared - gaps.inputFields.supplied} across ${gaps.inputFields.tools} tools that nothing has ever passed. This is the output-key axis from the other side: a field no plan supplies is a code path the suite has never entered, and a place where the declaration and the implementation can disagree without anything failing. Counted from plan inputs alone, because a direct call skips schema validation and so says nothing about what the declaration permits.`,
+    '',
     `**Composition.** ${gaps.composition.composed} of the ${gaps.composition.addressable} registry tools an exercise names appear in a plan with more than one task; ${gaps.composition.singleTaskOnly === 1 ? 'one is exercised only alone' : gaps.composition.singleTaskOnly + ' are exercised only alone'}. A further ${gaps.composition.notAddressable} exercise labels are not plan-addressable at all - factories, engine entry points, value helpers, and tools a configured adapter would have to register - and are counted separately rather than held against this axis. The kernel exists to compose tools, so this is the axis where a high tool count is most misleading.`,
     '',
   ];
@@ -271,6 +315,10 @@ export function renderGaps(gaps) {
       'is never there, or the exercise never reached the path that produces it. Both are worth',
       'knowing and they are not the same thing.', '',
       ...gaps.outputKeys.overdeclared.map((entry) => `- \`${entry.tool}\` — ${entry.absent.map((key) => '`' + key + '`').join(', ')}`), '');
+  }
+  if (gaps.inputFields.unsupplied.length) {
+    lines.push('### Declared input fields no plan supplies', '',
+      ...gaps.inputFields.unsupplied.map((entry) => `- \`${entry.tool}\` — ${entry.missing.map((field) => '`' + field + '`').join(', ')} (of ${entry.of})`), '');
   }
   if (gaps.outputKeys.unread.length) {
     lines.push('### Declared output keys no prediction reads', '',

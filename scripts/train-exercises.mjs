@@ -13,6 +13,7 @@ import { limitExercises } from './train-exercises-limits.mjs';
 import { decompilerExercises } from './train-exercises-decompiler.mjs';
 import { formatExercises } from './train-exercises-formats.mjs';
 import { specExercises } from './train-exercises-specs.mjs';
+import { filterExercises } from './train-exercises-filters.mjs';
 import { buildExercises } from './train-exercises-build.mjs';
 import { composeExercises } from './train-exercises-compose.mjs';
 
@@ -62,6 +63,8 @@ export function exercises(inventory, registry) {
     ...kernelExercises(),
     ...sessionExercises(),
     ...processExercises(),
+    // Last on purpose: these read fixtures the families above write into the same workspace.
+    ...filterExercises(),
 
     // ---- determinism -----------------------------------------------------------------
     {
