@@ -64,6 +64,19 @@ Canonical JSON is Concord's JavaScript JSON domain, not an implementation claim 
 
 ## Durability
 
+**Granting one approval at a time re-runs the plan.** A task that blocks does not execute on that
+run; it executes on the run whose approvals carry its hash, and on every run after that. So a plan
+with two effects is run three times to collect two grants, and the first effect is reached a second
+time on the final pass. Where that effect is not idempotent the kernel refuses the task with
+`EFFECT_INDETERMINATE` rather than applying it twice — `files.write` creates exclusively and never
+replaces, so its outcome cannot be re-established and saying so is the only honest answer.
+Collecting every hash up front is not a workaround: a request hash binds the *resolved* input, and
+a later task's input can depend on an earlier task's output, which does not exist until that
+earlier effect has run. A long-horizon plan therefore keeps to one effect per run, or its effects
+are idempotent by construction — `schedule.declare` replacing by id, `memory.promote` writing to
+the path its own content digest names. A plan with a single effect is unaffected: it blocks before
+executing anything and the granted run performs it exactly once.
+
 With `--journal`, the kernel exclusively creates a JSONL sink and fsyncs the header and each event. The CLI reserves the final run file before effects. A crash may leave an empty envelope and a partial intent log. Partial logs are forensic evidence; replay accepts complete settled envelopes only. Automatic retry/resume of interrupted effects is absent. Future durable retries need idempotency keys and reconciliation.
 
 ## Chat context and review
