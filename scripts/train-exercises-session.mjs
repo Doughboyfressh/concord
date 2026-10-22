@@ -6,6 +6,7 @@ import { makeSourceTools, loadSourceLock } from '../src/sources.mjs';
 import { makeReverseTools } from '../src/reverse.mjs';
 import { makeInstructionTools, splitTrained } from '../src/instructions.mjs';
 import { buildChatContext } from '../src/chat-context.mjs';
+import { checkAppUrl, findAppBrowser, appWindowArgv, launchAppWindow } from '../src/desktop.mjs';
 import { createChatHarness } from '../src/chat.mjs';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
@@ -177,6 +178,44 @@ const chatRefusals = () => [
 
 export function sessionExercises() {
   return [
+    /**
+     * The desktop window's own refusals, which are decided before anything is launched.
+     *
+     * None of this is a tool: it is the argv for a Chromium opened in application mode, and every
+     * check below exists because that argv ends up in the process table of a machine the operator
+     * is sitting at. A plan cannot reach any of it, which is exactly why it is exercised here.
+     */
+    {
+      family: 'session', tool: 'desktop.checkAppUrl', expectThrow: 'DESKTOP_URL',
+      call: () => checkAppUrl('http://localhost:7000/'),
+      lesson: 'The window URL is refused DESKTOP_URL unless it is http on a loopback *address*, with no credentials, no query, no fragment and the root path - and localhost is refused by name, because the local server authorizes on an exact Host match and a name that resolves differently is a different server. Refusing a query string is not fussiness either: the URL reaches the process table, where anything in it is readable by every other process on the machine.',
+    },
+    {
+      family: 'session', tool: 'desktop.findAppBrowser', expectThrow: 'DESKTOP_BROWSER',
+      call: () => findAppBrowser({ platform: 'win32', env: { CONCORD_BROWSER: 'C:/nowhere/chrome.exe' }, exists: () => false }),
+      lesson: 'CONCORD_BROWSER naming a file that is not there is refused DESKTOP_BROWSER rather than falling back to a browser the operator did not choose. An override exists so somebody can be specific, so silently searching the usual locations after being told exactly which binary to use would discard the instruction and open a different program than the one named.',
+    },
+    {
+      family: 'session', tool: 'desktop.appWindowArgv', expectThrow: 'DESKTOP_PROFILE',
+      call: () => appWindowArgv({ url: 'http://127.0.0.1:7000/', profileDir: 'relative/profile' }),
+      lesson: 'A relative profile directory is refused DESKTOP_PROFILE. The window gets a private profile so it shares nothing with the browser the operator browses with, and a relative path would resolve against whatever directory the host process happened to start in - which is not a statement about where the profile is.',
+    },
+    {
+      family: 'session', tool: 'desktop.appWindowArgv', expectThrow: 'DESKTOP_WINDOW',
+      call: () => appWindowArgv({ url: 'http://127.0.0.1:7000/', profileDir: 'C:/concord/profile', windowSize: 'as-big-as-possible' }),
+      lesson: 'A window size that is not two plain pixel counts is refused DESKTOP_WINDOW. The value becomes a command-line flag, so accepting arbitrary text would let a configuration string become an argument to the browser rather than a size - the same reason every other value on this argv is pattern-checked before it is passed.',
+    },
+    {
+      family: 'session', tool: 'desktop.launchAppWindow', expectThrow: 'DESKTOP_LAUNCH',
+      call: async () => {
+        const { closed } = launchAppWindow({
+          executable: 'C:/nowhere/chrome.exe', url: 'http://127.0.0.1:7000/',
+          profileDir: 'C:/concord/profile', windowSize: '1180,860',
+        });
+        return closed;
+      },
+      lesson: 'A browser executable that cannot be started rejects DESKTOP_LAUNCH on the promise the caller waits on, rather than resolving as though a window had opened. The distinction matters because the desktop entry point treats that promise as "the window is open until it closes": resolving on a failed spawn would report a window the operator never saw and then exit as if they had closed it.',
+    },
     ...chatRefusals().map((entry) => ({
       family: 'session', tool: 'chat.' + entry.code.toLowerCase().replace('chat_', ''),
       expectThrow: entry.code, workspace: 'temp',

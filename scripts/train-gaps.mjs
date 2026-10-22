@@ -49,9 +49,23 @@ import path from 'node:path';
  * because a bare pair of shouted strings is usually a list rather than a refusal. Without that,
  * `['ELOOP', 'EMLINK'].includes(code)` contributed ELOOP as a refusal code that nothing can raise,
  * and it would have sat on the frontier forever inflating the denominator.
+ *
+ * That heuristic was still not enough on its own. desktop.mjs opens an array of environment
+ * variable names with `['LOCALAPPDATA', 'ProgramFiles', ...]`, and ProgramFiles contains lower-case
+ * letters, so the pair read as a code and a message and LOCALAPPDATA was reported as a refusal
+ * nothing could reach. The pattern is now anchored on the call that raises - fail, assert or
+ * new HarnessError - with a non-greedy run that stays on the line, which crosses the commas of an
+ * assert condition the way the original anchored attempt could not while excluding a bare literal.
  */
 const THROWN_PATTERNS = [
-  /'([A-Z][A-Z0-9_]{2,})'\s*,\s*'[^']*[a-z ][^']*'/g,
+  /'([A-Z][A-Z0-9_]{2,})'\s*,\s*'[^']*[a-z][^']* [^']*'/g,
+  // The same pair with a template-literal message. Without this, a code whose message interpolates
+  // anything was invisible to the frontier in both directions: not counted as declared, so never
+  // listed as unproven, and silently absent from the denominator. WEB_ORIGIN, WEB_REDIRECT and the
+  // engine's own OUTPUT_REJECTED and EFFECT_INDETERMINATE were all missing for that reason, which
+  // is the more dangerous failure of the two the message heuristic has now had: an inflated
+  // denominator is visible on the list, and an absent one looks like completeness.
+  /'([A-Z][A-Z0-9_]{2,})'\s*,\s*`[^`]*[a-z][^`]* [^`]*`/g,
 ];
 
 /**
