@@ -10,6 +10,7 @@ import { horizonExercises } from './train-exercises-horizon.mjs';
 import { hubExercises } from './train-exercises-hub.mjs';
 import { serverExercises } from './train-exercises-server.mjs';
 import { limitExercises } from './train-exercises-limits.mjs';
+import { decompilerExercises } from './train-exercises-decompiler.mjs';
 import { buildExercises } from './train-exercises-build.mjs';
 import { composeExercises } from './train-exercises-compose.mjs';
 
@@ -50,6 +51,7 @@ export function exercises(inventory, registry) {
     ...hubExercises(),
     ...serverExercises(),
     ...limitExercises(),
+    ...decompilerExercises(),
     ...buildExercises(),
     ...composeExercises(),
     ...derivedExercises(registry),
