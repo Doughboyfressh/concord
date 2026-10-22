@@ -203,7 +203,12 @@ export function evidenceExercises() {
         const kinds = r.results.a.issues.map((issue) => issue.issue);
         return kinds.includes('duplicate-id-different-digest') && kinds.includes('no-digest')
           && kinds.includes('reference-not-in-view') && r.results.a.summary.dangling === 1
-          && r.results.a.summary.distinctIds === 2 && r.results.a.summary.withDigest === 1;
+          && r.results.a.summary.distinctIds === 2 && r.results.a.summary.withDigest === 1
+          // Two tallies over the same three records, cut two ways: by what each record claims to
+          // be and by which file it came from. Three records, two of them exports from a.js.
+          && r.results.a.byKind.export === 2 && r.results.a.byKind.import === 1
+          && r.results.a.bySource['a.js'] === 2 && r.results.a.bySource['b.js'] === 1
+          && r.results.a.limitations.some((note) => note.includes('internal-consistency'));
       },
       lesson: 'artifact.analysisView checks a record set against itself and names each problem separately: one id reused for two different digests, a record carrying no digest, and a reference to something the view never contained. It says outright that a pure tool reaches nothing, so it can prove internal consistency and never authenticity.',
     },

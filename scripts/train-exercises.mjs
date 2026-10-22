@@ -71,7 +71,8 @@ export function exercises(inventory, registry) {
     {
       family: 'determinism', tool: 'json.assert',
       plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'json.assert', input: { value: { n: 5 }, schema: { type: 'object', properties: { n: { type: 'number', minimum: 0 } }, required: ['n'] } } }] },
-      expect: (r) => r.results.a.passed === true,
+      expect: (r) => r.results.a.passed === true
+        && /^[0-9a-f]{64}$/.test(r.results.a.evidenceHash) && r.results.a.value.n === 5,
       lesson: 'json.assert returns a verdict carrying an evidence hash rather than a bare boolean, so a validation result can be cited later by that hash.',
     },
     {
@@ -228,13 +229,23 @@ export function exercises(inventory, registry) {
     {
       family: 'memory', tool: 'memory.candidate',
       plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'memory.candidate', input: { lesson: 'A candidate is not yet memory.', evidence: [{ note: 'training' }] } }] },
-      expect: (r) => typeof r.results.a.candidateHash === 'string',
+      expect: (r) => typeof r.results.a.candidateHash === 'string'
+        && r.results.a.version === 1 && r.results.a.lesson === 'A candidate is not yet memory.',
       lesson: 'memory.candidate is pure and yields only a content hash: nothing is remembered until memory.promote writes it under its own exact grant, so drafting a lesson costs no authority.',
     },
     {
       family: 'memory', tool: 'memory.recall',
       plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'memory.recall', input: { query: 'approval grant hash', limit: 3 } }] },
-      expect: (r) => r.results.a.strategy === 'lexical-overlap-v1' && r.results.a.corruptedEntries === 0,
+      expect: (r) => r.results.a.strategy === 'lexical-overlap-v1' && r.results.a.corruptedEntries === 0
+        // matchedCount and results.length are independent, in both directions - measured after
+        // predicting one bounded the other and being wrong twice over. results is what recall
+        // returns, capped by the caller's limit; matchedCount is how many stored entries the
+        // strategy considered a match. Five matches with a limit of three returns three, and a
+        // query that matches nothing still returns its nearest candidates scored zero, so the
+        // only bound that holds is against the store itself.
+        && r.results.a.matchedCount <= r.results.a.totalEntries
+        && r.results.a.results.length <= 3
+        && r.results.a.results.every((entry) => typeof entry.candidateHash === 'string' && typeof entry.score === 'number'),
       lesson: 'memory.recall is lexical, and it counts stored entries it could not parse rather than skipping them silently: a corrupted lesson is reported, not hidden.',
     },
     {
@@ -262,7 +273,9 @@ export function exercises(inventory, registry) {
     {
       family: 'approval', tool: 'files.write', grant: true, workspace: 'temp', expectApprovals: 1,
       plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'files.write', input: { path: 'trained.json', content: { ok: true } } }] },
-      expect: (r, ctx) => r.outcome.status === 'completed' && fs.existsSync(path.join(ctx.workspaceRoot, 'trained.json')),
+      expect: (r, ctx) => r.outcome.status === 'completed' && fs.existsSync(path.join(ctx.workspaceRoot, 'trained.json'))
+        && r.results.a.created === true && r.results.a.path === 'trained.json'
+        && /^[0-9a-f]{64}$/.test(r.results.a.contentHash),
       lesson: 'A write blocks once with an exact request hash and runs only when that same hash is granted; the hash binds the resolved input, so an approval can never be reused for a different write.',
     },
     ...(skill ? [{
