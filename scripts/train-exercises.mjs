@@ -288,6 +288,70 @@ export function exercises(inventory, registry) {
       lesson: 'The whole skill lifecycle composes in one plan: adopt a reviewed skill, list what is installed, remove it by the id the installation itself reported, and list again. Two writes mean two approval hashes, each bound to its own resolved input, and the removal takes its id by reference rather than by restating it — so the plan cannot drift into removing something other than what it installed. The lock records the digest the inventory declared and the listing reports the installed copy against it, so localChanged distinguishes a skill someone edited in the workspace from one still matching its source, and upstreamChanged distinguishes a source that has moved on. Every stage repeats that an installed skill is inert text: installing it executes nothing and grants nothing, and the status the inventory recorded travels with it, so an unreviewed source stays unreviewed after adoption. Removal reports both that the lock entry went and that the file went, which are two different facts — a lock entry without its file, or a file without its entry, is the state worth being able to name.',
     }] : []),
 
+    // ---- delegation: a sub-plan that runs on no authority of its own --------------------
+    {
+      family: 'authority', tool: 'agent.delegate',
+      plan: { version: 1, name: 'delegate-something-harmless', tasks: [
+        { id: 'sub', tool: 'agent.delegate', input: {
+          plan: { version: 1, name: 'inner', tasks: [{ id: 's', tool: 'json.hash', input: { delegated: true } }] },
+          note: 'a pure sub-plan',
+        } },
+        { id: 'checked', tool: 'json.assert', dependsOn: ['sub'], input: {
+          value: { $task: 'sub', path: '/authority/approvals' }, schema: { const: 0 },
+        } },
+      ] },
+      expect: (r) => r.results.sub.status === 'completed'
+        && r.results.sub.taskCount === 1 && typeof r.results.sub.root === 'string'
+        && r.results.sub.rejection === null && r.results.sub.blocked.length === 0
+        && r.results.sub.results.s.digest === digest({ delegated: true })
+        && r.results.sub.authority.approvals === 0
+        // Exactly one tool fewer than the caller holds, and the missing one is itself.
+        && r.results.sub.authority.allowedTools === registry.size - 1
+        && r.results.sub.limitations.length === 2
+        && r.results.checked.passed === true,
+      lesson: 'agent.delegate runs a sub-plan and reports its whole outcome as data: the status, each task result, the Merkle root of the delegated run, and the authority it was given. It is a read effect, so delegating costs no approval of its own, and the authority it reports is the point — zero approvals, and a registry one tool smaller than the caller\'s, because the delegate cannot delegate. The sub-plan\'s results are recorded rather than adopted: nothing it produced has authority over the caller, and a later task that wants to rely on a delegated value has to read it by reference and say so, which is what the json.assert here does with the approval count itself.',
+    },
+    {
+      family: 'authority', tool: 'agent.delegate', workspace: 'temp',
+      plan: { version: 1, name: 'delegate-a-write-and-watch-it-not-happen', tasks: [
+        { id: 'sub', tool: 'agent.delegate', input: {
+          plan: { version: 1, name: 'inner', tasks: [{ id: 's', tool: 'files.write', input: { path: 'delegated-write.json', content: { n: 1 } } }] },
+        } },
+      ] },
+      expect: (r, ctx) => r.outcome.status === 'completed'
+        // The *caller's* task completed; the delegated plan is the thing that blocked.
+        && r.results.sub.status === 'blocked'
+        && r.results.sub.blocked.length === 1
+        && r.results.sub.blocked[0].tool === 'files.write'
+        && r.results.sub.blocked[0].effect === 'write'
+        && r.results.sub.blocked[0].taskId === 's'
+        && Object.keys(r.results.sub.results).length === 0
+        && r.results.sub.authority.approvals === 0
+        && r.results.sub.limitations.some((note) => note.includes('comes back blocked rather than performed'))
+        // The guarantee, checked against the filesystem rather than taken from the report.
+        && !fs.existsSync(path.join(ctx.workspaceRoot, 'delegated-write.json')),
+      lesson: 'A delegated write does not happen. The delegate is handed an empty approvals list, so the write reaches the approval gate and comes back as a recorded blocked event naming the task, the tool and the effect — and the file is not on disk, which this exercise checks directly rather than believing the report. The caller\'s own task still completes, because "the sub-plan was blocked" is an answer and not a failure. Worth knowing why the effect list is left alone instead of being attenuated to pure and read: that would make the write fail to compile as POLICY_DENIED, which is equally unable to run but says nothing about what was attempted. Both refuse; only one leaves a record of the request, and a record is what an operator needs in order to grant it deliberately later.',
+    },
+    {
+      family: 'authority', tool: 'agent.delegate',
+      plan: { version: 1, name: 'a-delegate-cannot-delegate', tasks: [
+        { id: 'sub', tool: 'agent.delegate', input: {
+          plan: { version: 1, name: 'inner', tasks: [{ id: 's', tool: 'agent.delegate', input: {
+            plan: { version: 1, name: 'deeper', tasks: [{ id: 'i', tool: 'json.hash', input: { deep: true } }] },
+          } }] },
+        } },
+      ] },
+      expect: (r) => r.outcome.status === 'completed'
+        && r.results.sub.status === 'rejected'
+        && r.results.sub.rejection.code === 'UNKNOWN_TOOL'
+        && r.results.sub.root === null
+        && r.results.sub.blocked.length === 0
+        && Object.keys(r.results.sub.results).length === 0
+        && r.results.sub.limitations.length === 1
+        && r.results.sub.limitations[0].includes('refused before anything ran'),
+      lesson: 'A delegated plan naming agent.delegate is rejected UNKNOWN_TOOL, because the registry handed to a delegate has that tool removed — recursion there would let a caller spend its whole budget on bookkeeping, and nothing needs it. The rejection is reported rather than thrown: status rejected, a root of null since no run happened, and a single limitation saying the plan was refused before anything ran, so a caller gets the same shape of answer whether the sub-plan ran, blocked or would not compile. A plan naming any other unregistered tool comes back identically, which is the honest reading — from inside a delegate, a tool that was taken away and a tool that never existed are the same fact.',
+    },
+
     // ---- refusals, each naming its own code ------------------------------------------
     {
       family: 'refusal', tool: 'json.mergeShallow', expectCode: 'MERGE_COLLISION',
