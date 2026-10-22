@@ -7,6 +7,7 @@ import { evidenceExercises } from './train-exercises-evidence.mjs';
 import { writeExercises } from './train-exercises-writes.mjs';
 import { webExercises } from './train-exercises-web.mjs';
 import { horizonExercises } from './train-exercises-horizon.mjs';
+import { hubExercises } from './train-exercises-hub.mjs';
 import { buildExercises } from './train-exercises-build.mjs';
 import { composeExercises } from './train-exercises-compose.mjs';
 
@@ -44,6 +45,7 @@ export function exercises(inventory, registry) {
     ...writeExercises(),
     ...webExercises(registry),
     ...horizonExercises(),
+    ...hubExercises(),
     ...buildExercises(),
     ...composeExercises(),
     ...derivedExercises(registry),

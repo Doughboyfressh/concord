@@ -6,7 +6,9 @@ import { makeSourceTools, loadSourceLock } from '../src/sources.mjs';
 import { makeReverseTools } from '../src/reverse.mjs';
 import { makeInstructionTools, splitTrained } from '../src/instructions.mjs';
 import { buildChatContext } from '../src/chat-context.mjs';
-import { main as mcpMain } from '../src/mcp.mjs';
+import { main as mcpMain, mcpNameFor } from '../src/mcp.mjs';
+import { main as cliMain } from '../src/cli.mjs';
+import { startChatServer } from '../src/app.mjs';
 import { checkAppUrl, findAppBrowser, appWindowArgv, launchAppWindow } from '../src/desktop.mjs';
 import { createChatHarness } from '../src/chat.mjs';
 import os from 'node:os';
@@ -620,6 +622,38 @@ export function sessionExercises() {
         return makeInstructionTools({ directory })[0].execute({ ids: ['rea:artifact.dex'] }, { workspaceRoot, policy: toolPolicy });
       },
       lesson: 'The store verifies every module against its manifest digest before returning any text, and refuses INSTRUCTION_STORE when they disagree. This is the check that keeps retrieval from being the weaker of two routes to the same bytes: the turn context already verifies digests, so a retrieval path that did not would be a way to read instruction text no reviewer signed.',
+    },
+
+    // ---- the three entry points, each refusing before it builds anything ----------------
+    {
+      family: 'session', tool: 'cli.main', expectThrow: 'CLI_USAGE',
+      call: () => cliMain(['run', '--nope', 'value']),
+      lesson: 'The CLI refuses CLI_USAGE for an unknown, duplicated, or incomplete flag before it reads a single file. One guard covers all three because they are the same mistake seen from different sides: a flag this build does not accept, a flag whose second value would silently win, and a flag whose value is missing or is itself another flag. Argument parsing finishes entirely before any input is opened, so a malformed command line can never half-run.',
+    },
+    {
+      family: 'session', tool: 'cli.main', expectThrow: 'INPUT_LIMIT', workspace: 'temp',
+      call: ({ workspaceRoot }) => {
+        // A directory, given where a plan belongs. Measured rather than assumed: a complete
+        // command line is required to get this far at all, because CLI_USAGE fires on the missing
+        // --policy and --out long before anything is opened.
+        const policy = path.join(workspaceRoot, 'cli-input-limit-policy.json');
+        fs.writeFileSync(policy, JSON.stringify({
+          version: 1, allowedTools: ['json.value'], allowedEffects: ['pure'],
+          maxTasks: 4, maxOutputBytes: 65536, maxJournalBytes: 1048576, timeoutMs: 5000,
+        }));
+        return cliMain(['run', workspaceRoot, '--policy', policy, '--out', path.join(workspaceRoot, 'cli-input-limit-run.json')]);
+      },
+      lesson: 'An input that is not a regular file is refused INPUT_LIMIT, and the same guard carries the 256 MiB bound. Opening a directory succeeds on every platform this runs on - it is reading one that fails - so the check is on the fstat rather than on the open, and it is one check rather than two because "not a plain file" and "a plain file too large to hold" are the same answer to the caller: this is not something the harness will read.',
+    },
+    {
+      family: 'session', tool: 'mcp.nameFor', expectThrow: 'MCP_CONFIG',
+      call: () => mcpNameFor('not a valid name!'),
+      lesson: 'A Concord tool name that cannot be mapped to a valid MCP tool name is refused MCP_CONFIG at startup. Dotted names are not safe across every client function-name validator, so each is rewritten with underscores and then checked against what the protocol actually permits - and a name that still fails is refused rather than mangled further, because a tool silently renamed is a tool a plan can no longer address.',
+    },
+    {
+      family: 'session', tool: 'app.startChatServer', expectThrow: 'CHAT_CONFIG', workspace: 'temp',
+      call: ({ workspaceRoot }) => startChatServer({ flags: { policy: workspaceRoot, workspace: workspaceRoot } }),
+      lesson: 'The desktop server refuses CHAT_CONFIG for a policy path that is not a regular JSON file, before it opens a port. Its bound is 32 MiB where the CLI allows 256, which is deliberate: the CLI reads plans and artifacts, while this reads configuration a person wrote. The guard also fires when the file changes size during the read, so a configuration edited mid-startup is refused rather than half-applied.',
     },
 
     // ---- the filesystem catch-all, where a read can actually be denied ------------------
