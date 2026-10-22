@@ -113,6 +113,7 @@ export function composeExercises() {
           // And one fact from each, so the envelope is not the only thing being claimed.
           && r.results.exports.exports.length === 2
           && r.results.imports.imports.length === 2
+          && r.results.imports.counts.import === 2
           && r.results.scripts.scripts.length === 2
           && r.results.firmware.regions.length === 1
           && r.results.wasm.entries.length === 0 && r.results.wasm.state === 'complete'

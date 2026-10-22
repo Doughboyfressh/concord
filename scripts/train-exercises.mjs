@@ -69,7 +69,11 @@ export function exercises(inventory, registry) {
       // Round 021 learned this the hard way: passing { value: ... } hashed the wrapper, because
       // in a plan json.hash's input IS the value. That wrapper is an MCP-surface artefact.
       plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'json.hash', input: { b: 2, a: 1 } }] },
-      expect: (r) => r.results.a.digest === digest({ a: 1, b: 2 }),
+      expect: (r) => r.results.a.digest === digest({ a: 1, b: 2 })
+        // Not plain sha256: the name carries the canonicalisation, because the digest is over
+        // the canonical form and a caller recomputing it with a different one gets a different
+        // answer for the same value.
+        && r.results.a.algorithm === 'sha256/concord-json-v1',
       lesson: 'json.hash hashes its entire input and, in a plan, that input IS the value: the {value: ...} wrapper exists only on the MCP surface, where a tool whose schema is not an object schema gets wrapped. A plan passing {value: X} hashes the wrapper, not X. Key order never matters either way, because canonicalisation happens first.',
     },
     {

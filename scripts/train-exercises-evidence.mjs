@@ -92,6 +92,17 @@ export function evidenceExercises() {
       ] },
       expect: (r) => r.results.members.summary.changed === 1
         && r.results.members.changes[0].state === 'changed'
+        // Each of the three says what it does not know. The comparison keys on declaring type,
+        // name and kind, so an overload that changed signature is invisible to it; the import
+        // counts by name and kind, so a member reconstructed with the wrong body still counts.
+        && r.results.members.limitations.some((note) => note.includes('signatures are not part of the key'))
+        && r.results.imported.limitations.some((note) => note.includes('behaviourally correct'))
+        // Three boundaries, three different states - and the unknown one says why rather than
+        // being reported as satisfied by default.
+        && r.results.boundaries.findings.length === 3
+        && r.results.boundaries.findings.some((entry) => entry.importName === 'ok' && entry.state === 'satisfied')
+        && r.results.boundaries.findings.some((entry) => entry.importName === 'absent' && entry.state === 'missing')
+        && r.results.boundaries.findings.some((entry) => entry.state === 'unknown' && typeof entry.reason === 'string')
         && r.results.imported.accepted.length === 1 && r.results.imported.rejected.length === 2
         && r.results.imported.summary.coverage === 0.5
         && r.results.imported.rejected.every((entry) => /declares no such member/.test(entry.reason))
@@ -166,7 +177,10 @@ export function evidenceExercises() {
       family: 'evidence', tool: 'experiment.compare', workspace: 'temp',
       plan: one('experiment.compare', { hypothesis: 'one condition proves it', conditions: [{ name: 'only', varied: { a: 1 }, expected: 1, actual: 1 }] }),
       expect: (r) => r.results.a.warnings.some((warning) => warning.code === 'SINGLE_CONDITION')
-        && r.results.a.confirmed.length === 1,
+        && r.results.a.confirmed.length === 1
+        // The hypothesis comes back with the verdict. A comparison reported without the claim it
+        // was testing is a number nobody can check later.
+        && r.results.a.hypothesis === 'one condition proves it',
       lesson: 'experiment.compare confirms a single condition and warns SINGLE_CONDITION in the same breath: the comparison passed, and one condition still cannot isolate a cause. The warning rides along with a successful result rather than replacing it, because the finding is real and the inference from it is not.',
     },
     {

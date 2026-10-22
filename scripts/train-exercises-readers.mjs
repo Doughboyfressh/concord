@@ -43,14 +43,40 @@ const NOT_MINE = 'this is plain text, not the format this reader parses';
  */
 const NOT_MINE_DIGEST = digestOf(NOT_MINE);
 
-/** Binary readers: a non-matching file is reported, not thrown. */
+/**
+ * Binary readers: a non-matching file is reported, not thrown.
+ *
+ * `empty` names what each returns in place of findings, for the same reason NARROWED_READERS
+ * below carries one: "it returns nothing useful" has several shapes and only one of them is what
+ * a given reader actually does. Measured, and they genuinely differ - a list, an explicit null,
+ * one of each, and an empty object. A reader that returned undefined for its own subject would
+ * make a caller branch on whether a key exists, which is the thing every envelope here prevents.
+ *
+ * The readers with no predicate are the ones that now have a fixture of their own format, where
+ * the success path is asserted in full; this exercise is only about the refusal path.
+ */
 const BINARY_READERS = [
-  'artifact.androidManifest', 'artifact.apk', 'artifact.coreDump', 'artifact.dartSnapshot',
-  'artifact.dex', 'artifact.dexGraph', 'artifact.electronFuses', 'artifact.flutterBuild',
-  'artifact.goBuildInfo', 'artifact.harmonyGraph', 'artifact.managed', 'artifact.managedGraph',
-  'artifact.managedMembers', 'artifact.managedNativeBoundaries', 'artifact.packetFields',
-  'artifact.pcap', 'artifact.peResources', 'artifact.plist', 'artifact.recoverSources',
-  'artifact.rustBinary', 'artifact.sqlite',
+  { tool: 'artifact.androidManifest', empty: (r) => r.elements.length === 0 },
+  { tool: 'artifact.apk', empty: (r) => r.entries.length === 0 && r.summary === null },
+  { tool: 'artifact.coreDump', empty: (r) => r.thread === null && r.process === null },
+  { tool: 'artifact.dartSnapshot', empty: (r) => r.versionHash === null && r.buildMode === null },
+  { tool: 'artifact.dex', empty: (r) => r.classes.length === 0 && r.counts === null },
+  { tool: 'artifact.dexGraph', empty: (r) => r.edges.length === 0 && r.roots.length === 0 },
+  { tool: 'artifact.electronFuses', empty: (r) => r.fuses.length === 0 && Object.keys(r.byName).length === 0 },
+  { tool: 'artifact.flutterBuild', empty: (r) => r.markers.length === 0 && r.buildMode === null },
+  { tool: 'artifact.goBuildInfo', empty: (r) => r.version === null && r.settings.length === 0 },
+  { tool: 'artifact.harmonyGraph', empty: (r) => r.module === null && r.edges.length === 0 },
+  { tool: 'artifact.rustBinary', empty: (r) => r.rustcVersions.length === 0 && r.mangling === null },
+  { tool: 'artifact.managed' },
+  { tool: 'artifact.managedGraph' },
+  { tool: 'artifact.managedMembers' },
+  { tool: 'artifact.managedNativeBoundaries' },
+  { tool: 'artifact.packetFields' },
+  { tool: 'artifact.pcap' },
+  { tool: 'artifact.peResources' },
+  { tool: 'artifact.plist' },
+  { tool: 'artifact.recoverSources' },
+  { tool: 'artifact.sqlite' },
 ];
 
 /**
@@ -99,7 +125,7 @@ export function readerExercises() {
       family: 'composition', tool: 'artifact.dex', workspace: 'temp',
       fixture: (dir) => write(dir, 'notmine.bin', NOT_MINE),
       plan: { version: 1, name: 'one-wrong-file-and-every-reader', tasks: [
-        ...BINARY_READERS.map((tool, index) => ({ id: `b${index}`, tool, input: { path: 'notmine.bin' } })),
+        ...BINARY_READERS.map((entry, index) => ({ id: `b${index}`, tool: entry.tool, input: { path: 'notmine.bin' } })),
         ...NARROWED_READERS.map((entry, index) => ({ id: `n${index}`, tool: entry.tool, input: { path: 'notmine.bin', ...entry.extra } })),
       ] },
       expect: (r) => {
@@ -110,18 +136,21 @@ export function readerExercises() {
             && value.path === 'notmine.bin' && Array.isArray(value.limitations))
           // Each reason is that reader's own, not one shared string.
           && new Set(values.map((value) => value.reason)).size > 1
+          && BINARY_READERS.every((entry, index) => !entry.empty || entry.empty(r.results[`b${index}`]))
           && NARROWED_READERS.every((entry, index) => entry.empty(r.results[`n${index}`]));
       },
       lesson: 'Twenty-three readers, one file none of them can parse, one plan. Every answer has the same shape — supported:false, a reason, the digest of exactly those bytes, the untrusted flag, the path asked for, and a limitations list — while the reasons differ from one another, so a caller learns both that nothing parsed the file and what each reader was looking for. The readers taking an extra argument still return an empty list or an explicit null where findings would go. Proven together rather than only one at a time because the uniformity is itself the property: a caller meeting an unknown file writes one branch for twenty-three formats, and a reader that broke the shape would show up here rather than at whichever call site happened to depend on it.',
     },
 
-    ...BINARY_READERS.map((tool) => ({
+    ...BINARY_READERS.map(({ tool, empty }) => ({
       family: 'readers', tool, workspace: 'temp',
       fixture: (dir) => write(dir, 'notmine.bin', NOT_MINE),
       plan: { version: 1, name: 't', tasks: [{ id: 'a', tool, input: { path: 'notmine.bin' } }] },
       expect: (r) => r.results.a.supported === false && typeof r.results.a.reason === 'string'
         && r.results.a.sha256 === NOT_MINE_DIGEST && r.results.a.untrusted === true
-        && r.results.a.path === 'notmine.bin' && Array.isArray(r.results.a.limitations),
+        && r.results.a.path === 'notmine.bin' && Array.isArray(r.results.a.limitations)
+        // And what this particular reader puts where its findings would go.
+        && (!empty || empty(r.results.a)),
       lesson: `${tool} answers a file that is not its format with supported:false and a stated reason, never by throwing, and the SHA-256 it reports is the digest of exactly the bytes the fixture wrote — compared against a value computed independently, so it cannot be the hash of a different or partial read. It returns every key it declares even when it could parse nothing, so a caller never branches on whether a key is present, and it marks the result untrusted because bytes from a file are evidence about that file and nothing more.`,
     })),
 
@@ -244,7 +273,8 @@ export function readerExercises() {
         write(dir, 'prog.exe', pe);
       },
       plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'artifact.inspect', input: { path: 'prog.exe' } }] },
-      expect: (r) => r.results.a.format === 'pe' && r.results.a.pe.entryPoint === 0x1234
+      expect: (r) => r.results.a.format === 'pe' && r.results.a.path === 'prog.exe'
+        && r.results.a.pe.entryPoint === 0x1234
         && r.results.a.pe.entryPointOffset === 0x634
         && r.results.a.pe.entryPointOffset !== r.results.a.pe.entryPoint
         && r.results.a.pe.entryPointAddress === 0x140001234
