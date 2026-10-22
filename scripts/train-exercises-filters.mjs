@@ -172,11 +172,89 @@ export function filterExercises() {
     },
     {
       family: 'filters', tool: 'sources.catalog',
-      plan: twice('catalog-by-source', 'sources.catalog', {}, { sourceId: 'ecc' }),
+      plan: twice('catalog-by-source', 'sources.catalog', {}, { sourceId: 'ecc' },
+        [{ id: 'byRole', tool: 'sources.catalog', input: { role: 'skills' } }]),
       expect: (r) => r.results.plain.sources.length === 14
         && r.results.filtered.sources.length === 1
-        && r.results.filtered.sources[0].id === 'ecc',
+        && r.results.filtered.sources[0].id === 'ecc'
+        // A role is a many-to-many fact - a source carries several and several sources carry one -
+        // so filtering by it selects a subset without the one-to-one shape an id filter has.
+        && r.results.byRole.sources.length >= 1
+        && r.results.byRole.sources.length <= r.results.plain.sources.length
+        && r.results.byRole.sources.every((entry) => entry.roles.includes('skills')),
       lesson: 'Asking the source catalogue for one source returns one entry out of fourteen, and the entry is the one asked for. A catalogue filter is the cheapest thing in this system to get wrong in a way nobody notices, because a filter that silently matched nothing and a source that genuinely has nothing look identical in an empty list - so the exercise asserts the identity of what came back rather than only its size.',
+    },
+    {
+      family: 'filters', tool: 'rea.catalog',
+      plan: twice('rea-filters', 'rea.catalog', {}, { provider: 'frida' },
+        [{ id: 'availableOnly', tool: 'rea.catalog', input: { availableOnly: true } }]),
+      expect: (r) => r.results.plain.tools.length > 0
+        && r.results.filtered.tools.every((entry) => entry.provider === 'frida')
+        && r.results.filtered.matched <= r.results.plain.matched
+        // availableOnly cannot return more than the catalogue says is available now, and the
+        // total it reports is still the whole catalogue: a filter on availability is a view, not
+        // a smaller catalogue.
+        && r.results.availableOnly.tools.length <= r.results.plain.availableNow
+        && r.results.availableOnly.total === r.results.plain.total,
+      lesson: 'The reverse-engineering catalogue filters by provider and by whether a tool is installed here, and keeps three numbers apart while doing it: total is the whole reviewed catalogue, availableNow how many of those are present on this machine, and matched how many the filter selected. A catalogue that collapsed them would make "this machine cannot do it" indistinguishable from "nobody reviewed it", which is the one distinction an operator needs before installing anything.',
+    },
+    {
+      family: 'filters', tool: 'foreign.catalog',
+      plan: twice('foreign-filters', 'foreign.catalog', {}, { source: 'rea-repo' },
+        [{ id: 'availableOnly', tool: 'foreign.catalog', input: { availableOnly: true } }]),
+      // Asserted as relations rather than as counts: how many foreign tools this round sees
+      // depends on which catalogue file the registry was built from, and the properties below
+      // are the ones that have to hold whether that is seventy-four tools or none.
+      expect: (r) => r.results.plain.matched === r.results.plain.total
+        && r.results.plain.availableNow <= r.results.plain.total
+        && r.results.filtered.total === r.results.plain.total
+        && r.results.filtered.matched <= r.results.plain.matched
+        && r.results.filtered.tools.every((entry) => entry.source === 'rea-repo')
+        && r.results.availableOnly.tools.every((entry) => entry.available === true)
+        && r.results.availableOnly.total === r.results.plain.total,
+      lesson: 'The foreign catalogue answers the same two questions as the reverse one and reports them the same way, which is the point of their sharing a shape: a caller choosing between a reviewed foreign tool and a reviewed local one compares like with like. Filtering by source narrows the tools and never the total, because the catalogue is what was reviewed and the filter is only what this question was about - and an unfiltered call matches everything it holds, which is the identity that makes matched worth reporting at all.',
+    },
+    {
+      family: 'filters', tool: 'artifact.ghidraLanguageMatch', workspace: 'temp',
+      plan: twice('language-match-filters', 'artifact.ghidraLanguageMatch',
+        { opinion: 'toy.opinion', languages: 'toy.ldefs', primary: '334' },
+        { opinion: 'toy.opinion', languages: 'toy.ldefs', primary: '334', loader: 'Portable Executable (PE)', secondary: 'default' }),
+      expect: (r) => r.results.plain.supported === true && r.results.filtered.supported === true
+        // rows is how many the .ldefs holds, not how many matched, so it cannot move with the
+        // query - and the query comes back echoed, with the hints that were not given as null.
+        && r.results.filtered.rows === r.results.plain.rows
+        && r.results.plain.query.loader === null && r.results.plain.query.secondary === null
+        && r.results.filtered.query.loader === 'Portable Executable (PE)'
+        && r.results.filtered.query.secondary === 'default'
+        && r.results.filtered.query.primary === '334'
+        // A narrower query can only match fewer rows, never more.
+        && r.results.filtered.counts.matched <= r.results.plain.counts.matched
+        // And a secondary constraint against a row that declares no secondary is reported as
+        // unconstrained rather than as a match or a miss.
+        && r.results.filtered.matched[0].secondaryMatch === 'unconstrained',
+      lesson: 'Matching a loader opinion against a language definition file accepts three narrowing hints - the loader that produced the opinion, and a primary and secondary language constraint - and a narrower query can only match fewer languages than a wider one. That monotonicity is the whole claim worth making about a matcher: a hint that could add a match would mean the unhinted query was already wrong. Two details measured rather than assumed - rows counts what the .ldefs holds and so does not move with the query, and a secondary constraint against a row that declares no secondary comes back as unconstrained rather than as a match or a miss, which is the only answer that does not invent agreement.',
+    },
+    {
+      family: 'filters', tool: 'artifact.dexSearch', workspace: 'temp',
+      plan: { version: 1, name: 'selectors-on-a-refusal', tasks: [
+        { id: 'method', tool: 'artifact.dexMethod', input: { path: 'notmine.bin', descriptor: 'La/B;', name: 'go' } },
+        { id: 'search', tool: 'artifact.dexSearch', input: { path: 'notmine.bin', query: 'anything', limit: 3 } },
+        { id: 'references', tool: 'artifact.dexReferences', input: { path: 'notmine.bin', type: 'La/B;', limit: 3 } },
+        { id: 'graph', tool: 'artifact.dexGraph', input: { path: 'notmine.bin', prefix: 'La/' } },
+        { id: 'managed', tool: 'artifact.managedGraph', input: { path: 'notmine.bin', namespace: 'System' } },
+      ] },
+      expect: (r) => ['method', 'search', 'references', 'graph', 'managed'].every((id) => {
+        const value = r.results[id];
+        return value.supported === false && typeof value.reason === 'string' && value.untrusted === true;
+      })
+        // And the selector changes nothing about what is returned in place of findings: the same
+        // empty shapes the unselected refusal gives, rather than a null where a list belongs.
+        && r.results.method.methods.length === 0
+        && r.results.search.matches.length === 0 && r.results.search.totalMatches === 0
+        && r.results.references.methods.length === 0 && r.results.references.fields.length === 0
+        && r.results.graph.edges.length === 0 && r.results.graph.roots.length === 0
+        && r.results.managed.edges.length === 0 && r.results.managed.roots.length === 0,
+      lesson: 'A selector supplied to a reader that cannot parse the file changes nothing about the refusal: the same supported:false, the same stated reason, and the same empty shapes in place of findings. Worth proving because the alternative is easy to write by accident - a filter applied before the format check, or a selector that turns an empty list into a null because nothing matched it. These five readers all take a name, a prefix, a namespace or a limit, and none of them lets it reach the answer before the file has been understood.',
     },
     ...(ASSEMBLY_PRESENT ? [{
       family: 'filters', tool: 'artifact.managedMembers', workspace: 'temp',
