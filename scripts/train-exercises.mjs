@@ -260,6 +260,30 @@ export function exercises(inventory, registry) {
       plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'skills.install', input: { id: skill.id } }] },
       expect: (r) => r.outcome.status === 'completed' && r.results.a.sha256 === skill.sourceSha256,
       lesson: 'skills.install verifies a file against the digest the inventory recorded before copying it, so an adopted skill is provably the reviewed bytes rather than whatever happens to be on disk now.',
+    }, {
+      family: 'composition', tool: 'skills.installed', grant: true, workspace: 'temp', expectApprovals: 2, needsCorpus: skill.path,
+      plan: { version: 1, name: 'adopt-list-and-drop-a-skill', tasks: [
+        { id: 'adopt', tool: 'skills.install', input: { id: skill.id } },
+        { id: 'listed', tool: 'skills.installed', dependsOn: ['adopt'], input: {} },
+        // The id the removal acts on comes from the installation's own result, not restated here.
+        { id: 'drop', tool: 'skills.remove', dependsOn: ['adopt', 'listed'], input: { id: { $task: 'adopt', path: '/id' } } },
+        { id: 'after', tool: 'skills.installed', dependsOn: ['drop'], input: {} },
+      ] },
+      expect: (r) => r.results.adopt.sha256 === skill.sourceSha256
+        && r.results.adopt.status === 'source-available-unreviewed'
+        && r.results.adopt.installedAs.startsWith('skills/')
+        && r.results.adopt.bytes > 0
+        && r.results.adopt.limitations.some((note) => note.includes('grants nothing'))
+        && r.results.listed.count === 1 && r.results.listed.installed.length === 1
+        && r.results.listed.changed === 0 && r.results.listed.missing === 0 && r.results.listed.upstreamChanged === 0
+        && r.results.listed.installed[0].id === r.results.adopt.id
+        && r.results.listed.installed[0].lockedSha256 === skill.sourceSha256
+        && r.results.listed.installed[0].present === true && r.results.listed.installed[0].localChanged === false
+        && r.results.listed.installed[0].status === r.results.adopt.status
+        && r.results.drop.removed === true && r.results.drop.fileRemoved === true
+        && r.results.drop.id === r.results.adopt.id && r.results.drop.remaining === 0
+        && r.results.after.count === 0 && r.results.after.installed.length === 0,
+      lesson: 'The whole skill lifecycle composes in one plan: adopt a reviewed skill, list what is installed, remove it by the id the installation itself reported, and list again. Two writes mean two approval hashes, each bound to its own resolved input, and the removal takes its id by reference rather than by restating it — so the plan cannot drift into removing something other than what it installed. The lock records the digest the inventory declared and the listing reports the installed copy against it, so localChanged distinguishes a skill someone edited in the workspace from one still matching its source, and upstreamChanged distinguishes a source that has moved on. Every stage repeats that an installed skill is inert text: installing it executes nothing and grants nothing, and the status the inventory recorded travels with it, so an unreviewed source stays unreviewed after adoption. Removal reports both that the lock entry went and that the file went, which are two different facts — a lock entry without its file, or a file without its entry, is the state worth being able to name.',
     }] : []),
 
     // ---- refusals, each naming its own code ------------------------------------------

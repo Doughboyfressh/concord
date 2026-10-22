@@ -84,6 +84,57 @@ export function composeExercises() {
       lesson: 'Two HTTP archives read by artifact.harCapture feed artifact.compareHar by reference, and the comparison is the point of both: it reports one request added, one changed and one unchanged, keying requests by method, origin and path so that a query string or a timing difference is not mistaken for a different request. It names the unchanged request explicitly rather than omitting it, which is what lets a reader tell "the same request still succeeds" from "the request is no longer in the capture". The reason this tool takes two reader results rather than two paths is that comparison is pure: nothing is read twice, and the same two captures can be compared again from the journal without touching the files. Its single stated limitation is the key itself, which a caller has to know in order to read the result correctly.',
     },
     {
+      family: 'composition', tool: 'peer.inbox', grant: true, expectApprovals: 1,
+      plan: { version: 1, name: 'file-a-message-and-read-the-box', tasks: [
+        { id: 'sent', tool: 'peer.post', input: {
+          message: 'Filed by a composed training exercise to prove the mailbox reports back the sequence it assigned. No reply is needed.',
+          subject: 'training composition', for: 'operator',
+        } },
+        { id: 'box', tool: 'peer.inbox', dependsOn: ['sent'], input: {} },
+      ] },
+      expect: (r) => Number.isInteger(r.results.sent.seq) && r.results.sent.seq >= 1
+        && r.results.sent.replyTo === null && r.results.sent.for === 'operator'
+        && r.results.sent.id.includes('-')
+        && r.results.sent.limitations.some((note) => note.includes('notifies nobody'))
+        && r.results.box.latestSeq === r.results.sent.seq
+        && r.results.box.total >= 1 && r.results.box.returned >= 1
+        && r.results.box.returned <= r.results.box.total
+        && r.results.box.openQuestions >= 1
+        // The default page is the OLDEST messages, so the message just filed appears only when
+        // the whole box fits in one page. Stated as an equivalence so it holds for a mailbox of
+        // one and for this one, which holds three hundred and eleven.
+        && (r.results.box.total <= r.results.box.returned)
+          === r.results.box.messages.some((entry) => entry.seq === r.results.sent.seq && entry.answered === false && entry.for === 'operator')
+        && r.results.box.messages[0].seq < r.results.sent.seq
+        && r.results.box.limitations.some((note) => note.includes('leaves the mailbox unchanged')),
+      lesson: 'A message filed by peer.post and read back by peer.inbox in the same plan shows what the mailbox is and is not. The write is approved on its own and returns the sequence number it assigned; the read reports that same number as latestSeq, so the two halves agree without the plan restating it. The trap is which messages come back: the default page is the oldest, not the newest, so in a mailbox of three hundred and eleven the message just filed is not in the result at all, and a caller reading the inbox to find what just arrived gets the opposite end of the history. latestSeq is the handle for that — the stated way to page is with `after` using it — and the box reports what it returned separately from what it holds precisely so the difference is visible rather than assumed. Open questions are counted separately again, because an unanswered message is usually what a caller is looking for. Both tools also say what they do not do: posting notifies nobody, so a record is evidence that a message was filed and not that anyone read it, and reading leaves the mailbox unchanged, so an inbox is not a queue that drains.',
+    },
+    {
+      family: 'composition', tool: 'experiment.compare',
+      plan: { version: 1, name: 'judge-two-real-measurements', tasks: [
+        { id: 'first', tool: 'json.hash', input: { reading: 1 } },
+        { id: 'again', tool: 'json.hash', input: { reading: 1 } },
+        { id: 'other', tool: 'json.hash', input: { reading: 2 } },
+        { id: 'verdict', tool: 'experiment.compare', dependsOn: ['first', 'again', 'other'], input: {
+          hypothesis: 'The digest of a value depends only on the value.',
+          conditions: [
+            { name: 'same-value', varied: 'nothing', expected: { $task: 'first', path: '/digest' }, actual: { $task: 'again', path: '/digest' } },
+            { name: 'different-value', varied: 'the reading', expected: { $task: 'first', path: '/digest' }, actual: { $task: 'other', path: '/digest' } },
+          ],
+        } },
+      ] },
+      expect: (r) => r.results.verdict.confirmed.join(',') === 'same-value'
+        && r.results.verdict.refuted.join(',') === 'different-value'
+        && r.results.verdict.untestable.length === 0
+        && r.results.verdict.verdicts.length === 2
+        && r.results.verdict.verdicts.find((entry) => entry.name === 'different-value').why.includes('differs from the declared expectation')
+        // The experiment this plan describes is itself flawed, and the tool says so.
+        && r.results.verdict.discriminating === false
+        && r.results.verdict.warnings.length === 1
+        && r.results.verdict.warnings[0].code === 'NONDISCRIMINATING_EXPECTATION',
+      lesson: 'experiment.compare judges real measurements when its conditions are references: two digests computed by actual tasks, compared against each other rather than against numbers someone typed into the plan. It names which conditions were confirmed and which refuted and emits no aggregate score, because "one of two" hides which one. The sharper half is that it audits the experiment as well as the result — this plan declares the same expectation in both conditions, so a pass could not have distinguished the varied factor from a test that would pass regardless, and the result says so with NONDISCRIMINATING_EXPECTATION and discriminating:false even though both verdicts are correct. The probe that was written to measure this tool built exactly that flaw by accident and was told about it, which is the whole reason the check exists in a harness rather than in advice.',
+    },
+    {
       family: 'composition', tool: 'artifact.compareWasmInterfaces', workspace: 'temp',
       fixture: (dir) => {
         write(dir, 'before.wasm', wasmModule(['run', 'version']));
