@@ -43,7 +43,7 @@ const task = (tool, input) => ({ version: 1, name: 't', tasks: [{ id: 'a', tool,
  * distribution actually tends to sit — and assuming it was not installed because it is not at
  * C:/ghidra is how this was got wrong once already.
  */
-const GHIDRA = (() => {
+export const GHIDRA = (() => {
   const marker = 'Ghidra/Processors/x86/data/languages/x86-64.sla';
   const holds = (root) => {
     try { return typeof root === 'string' && fs.statSync(path.join(root, marker)).isFile() ? root : null; }
@@ -68,7 +68,7 @@ const GHIDRA = (() => {
 })();
 
 /** x86-64's real table and specs, plus a real 76 KB PE, copied into the scratch workspace. */
-const REAL_FILES = {
+export const REAL_FILES = {
   'x86-64.sla': 'Ghidra/Processors/x86/data/languages/x86-64.sla',
   'x86.ldefs': 'Ghidra/Processors/x86/data/languages/x86.ldefs',
   'x86-64.pspec': 'Ghidra/Processors/x86/data/languages/x86-64.pspec',

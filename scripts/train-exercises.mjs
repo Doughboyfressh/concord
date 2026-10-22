@@ -9,6 +9,7 @@ import { webExercises } from './train-exercises-web.mjs';
 import { horizonExercises } from './train-exercises-horizon.mjs';
 import { hubExercises } from './train-exercises-hub.mjs';
 import { serverExercises } from './train-exercises-server.mjs';
+import { limitExercises } from './train-exercises-limits.mjs';
 import { buildExercises } from './train-exercises-build.mjs';
 import { composeExercises } from './train-exercises-compose.mjs';
 
@@ -48,6 +49,7 @@ export function exercises(inventory, registry) {
     ...horizonExercises(),
     ...hubExercises(),
     ...serverExercises(),
+    ...limitExercises(),
     ...buildExercises(),
     ...composeExercises(),
     ...derivedExercises(registry),

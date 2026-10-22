@@ -170,6 +170,25 @@ export function hubExercises() {
       lesson: "A hub already routing its sixteen links refuses the next session, and the refusal arrives as PEER_HUB_DENIED carrying the message - never as PEER_HUB_FULL, which is the code actually thrown. The session that bound the endpoint occupies one of those sixteen, so fifteen others fill it and a sixteenth guest is turned away. The throw happens inside the hub's own connection handler, which converts any registration failure into a denial frame holding only a reason string, so the code does not survive the process boundary it was raised at. Worth knowing in both directions: a bound is enforced where it belongs, and a code that never crosses a socket cannot be the thing a remote caller branches on.",
     },
     {
+      family: 'hub', tool: 'peer-hub.ask', expectThrow: 'PEER_HUB_TRANSPORT', workspace: 'temp',
+      call: (context) => onBus(context, 'unframeable', async ({ join }) => {
+        await join({ identity: identity('alpha'), onServe: async () => ({ text: 'unused' }) });
+        const spoke = await join({ identity: identity('beta') });
+        // A BigInt is exactly what canonical() refuses, and a spoke frames its own asks.
+        return spoke.ask('alpha', 1n, { timeoutMs: 2000 });
+      }),
+      lesson: 'A question that cannot be represented as JSON is refused PEER_HUB_TRANSPORT by the session trying to send it, before anything reaches the wire. The framing failure is PEER_HUB_FRAME one layer down and is deliberately reported as a transport failure to the caller: from where the caller stands the question did not go anywhere, and which half of the socket write failed is not a distinction it can act on. The hub reports the same code when it cannot write to the session it was routing to, for the same reason.',
+    },
+    {
+      family: 'hub', tool: 'peer-hub.serve', expectThrow: 'PEER_HUB_FRAME', workspace: 'temp',
+      call: (context) => onBus(context, 'unframeableanswer', async ({ join }) => {
+        const hub = await join({ identity: identity('alpha') });
+        await join({ identity: identity('beta'), onServe: async () => ({ text: 1n }) });
+        return hub.ask('beta', 'who is there?', { timeoutMs: 3000 });
+      }),
+      lesson: 'An answer that cannot be represented as JSON comes back to the asker as PEER_HUB_FRAME, because the serving session fails to frame it, describes that failure, and sends the description instead. The recovery is the interesting part: the second frame is small and always representable, so a session whose model returned something unserialisable still answers - with the reason it could not answer - rather than timing out and leaving the asker to guess. Only representable details are ever forwarded, which is what keeps a failed answer from becoming a failed transport.',
+    },
+    {
       family: 'hub', tool: 'peer.hubResponder', expectThrow: 'PEER_HUB_NO_CLIENT',
       call: () => createHubResponder({ channel: clientSaying(null) })({ question: 'who is there?', from: 'alpha' }),
       lesson: 'A brokered question arriving at a session whose client has not completed initialize is refused PEER_HUB_NO_CLIENT. The session can be on the bus before its client has said anything - tools are registered, the hub is joined, the link is live - and none of that means there is a model behind it yet. Answering would mean inventing the answer, so the asker is told the target is not ready rather than handed something Concord wrote.',
