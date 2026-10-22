@@ -338,6 +338,9 @@ export function buildExercises() {
         } },
       ] },
       expect: (r) => r.results.present.runnable.includes('npm')
+        && r.results.present.directory === ROOT && r.results.present.detector === 'markers-v1'
+        && r.results.present.markersChecked >= 12 && r.results.present.count === 2
+        && r.results.present.multiple === true && r.results.present.untrusted === true
         && r.results.present.systems.some((entry) => entry.system === 'npm' && entry.targets.includes('main'))
         && r.results.before.ok === true && r.results.after.ok === true
         && r.results.before.receipt === r.results.after.receipt

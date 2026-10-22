@@ -19,9 +19,9 @@
       "sourceId": "deepseek-harness"
     },
     {
-      "bytes": 1581,
+      "bytes": 2408,
       "file": "ecc.md",
-      "sha256": "365d4eadf088a9e68f30c3a7e3e490671641e66eb6c79086c1810808f81410ae",
+      "sha256": "b710d5744a74adf219a7ca817314c258c3570d3db7880a0bf6deba221c496769",
       "sourceId": "ecc"
     },
     {
@@ -55,9 +55,9 @@
       "sourceId": "orca"
     },
     {
-      "bytes": 16501,
+      "bytes": 16491,
       "file": "rea.md",
-      "sha256": "527e95bd263d10db13c34c526660c6cbc0b2d0cfedfac5bc42b1a9271f2f6bcc",
+      "sha256": "dbd6f74df2535e73c396530d54ba5aa5195da56027233da4ab775bde8960722d",
       "sourceId": "rea"
     },
     {

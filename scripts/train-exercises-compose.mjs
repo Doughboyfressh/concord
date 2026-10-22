@@ -1,6 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { canonical } from '../src/value.mjs';
+
+const harDigest = (text) => createHash('sha256').update(Buffer.from(text)).digest('hex');
 
 /**
  * Composition: the thing the kernel is actually for, and the thing nothing was testing.
@@ -80,7 +83,11 @@ export function composeExercises() {
         && canonical(r.results.diff.summary) === canonical({ added: 1, removed: 0, changed: 1, unchanged: 1, countDiffers: 0 })
         && r.results.diff.changes.find((change) => change.state === 'added').request === 'POST https://telemetry.example/collect'
         && r.results.diff.changes.find((change) => change.state === 'changed').right.status === 500
-        && r.results.before.untrusted === true && r.results.diff.limitations.length === 1,
+        && r.results.before.untrusted === true && r.results.diff.limitations.length === 1
+        // The reader's own envelope, checked against digests computed here.
+        && r.results.before.path === 'before.har' && r.results.after.path === 'after.har'
+        && r.results.before.sha256 === harDigest(BEFORE_HAR) && r.results.after.sha256 === harDigest(AFTER_HAR)
+        && r.results.before.supported === true && Array.isArray(r.results.before.limitations),
       lesson: 'Two HTTP archives read by artifact.harCapture feed artifact.compareHar by reference, and the comparison is the point of both: it reports one request added, one changed and one unchanged, keying requests by method, origin and path so that a query string or a timing difference is not mistaken for a different request. It names the unchanged request explicitly rather than omitting it, which is what lets a reader tell "the same request still succeeds" from "the request is no longer in the capture". The reason this tool takes two reader results rather than two paths is that comparison is pure: nothing is read twice, and the same two captures can be compared again from the journal without touching the files. Its single stated limitation is the key itself, which a caller has to know in order to read the result correctly.',
     },
     {

@@ -288,6 +288,70 @@ export function exercises(inventory, registry) {
       lesson: 'The whole skill lifecycle composes in one plan: adopt a reviewed skill, list what is installed, remove it by the id the installation itself reported, and list again. Two writes mean two approval hashes, each bound to its own resolved input, and the removal takes its id by reference rather than by restating it — so the plan cannot drift into removing something other than what it installed. The lock records the digest the inventory declared and the listing reports the installed copy against it, so localChanged distinguishes a skill someone edited in the workspace from one still matching its source, and upstreamChanged distinguishes a source that has moved on. Every stage repeats that an installed skill is inert text: installing it executes nothing and grants nothing, and the status the inventory recorded travels with it, so an unreviewed source stays unreviewed after adoption. Removal reports both that the lock entry went and that the file went, which are two different facts — a lock entry without its file, or a file without its entry, is the state worth being able to name.',
     }] : []),
 
+    // ---- the strictest rule wins, and nothing is enforced ------------------------------
+    {
+      family: 'governance', tool: 'hooks.evaluate',
+      plan: { version: 1, name: 'one-allow-one-deny', tasks: [
+        { id: 'verdict', tool: 'hooks.evaluate', input: {
+          rules: [
+            { id: 'allow-reads', decision: 'allow', when: { effect: 'read' } },
+            { id: 'warn-artifacts', decision: 'warn', reason: 'artifact readers see untrusted bytes', when: { toolPrefix: 'artifact.' } },
+            { id: 'deny-secrets', decision: 'deny', reason: 'that path holds credentials', when: { pathPrefix: 'secrets/' } },
+            { id: 'never-matches', decision: 'deny', reason: 'unrelated', when: { tool: 'files.write' } },
+          ],
+          event: { tool: 'artifact.inspect', effect: 'read', input: { path: 'secrets/key.pem' } },
+        } },
+      ] },
+      expect: (r) => r.results.verdict.decision === 'deny'
+        && r.results.verdict.evaluated === 4
+        && r.results.verdict.matched.map((entry) => entry.id).join(',') === 'allow-reads,warn-artifacts,deny-secrets'
+        && r.results.verdict.matched.find((entry) => entry.id === 'allow-reads').reason === null
+        && r.results.verdict.reasons.length === 2
+        && r.results.verdict.limitations.some((note) => note.includes('does not enforce'))
+        && r.results.verdict.limitations.some((note) => note.includes('hidden control flow')),
+      lesson: 'hooks.evaluate is a pure verdict about an event, and three of its properties are deliberate. The strictest matching decision wins, so a rule set where one rule allows and another denies has not expressed a preference and the deny stands — treating deny as the weaker side would make the safer rule the easiest to cancel by accident. Every matching rule is listed with its own decision and reason even though only one decides, because an operator reading a deny needs to know what else fired. And it enforces nothing: it reports, a caller that ignores a deny is not stopped, and no host command runs on any tool-call boundary, because hidden control flow at effect boundaries is the thing this kernel exists to remove. A matched rule with no reason reports null rather than being dropped from the list.',
+    },
+    {
+      family: 'catalog', tool: 'rea.catalog',
+      plan: { version: 1, name: 'ask-a-catalog-what-it-holds', tasks: [
+        { id: 'all', tool: 'rea.catalog', input: {} },
+        { id: 'matched', tool: 'rea.catalog', input: { query: 'disassemble' } },
+      ] },
+      expect: (r) => r.results.all.total === 117 && r.results.all.schemaVersion >= 1
+        && typeof r.results.all.revision === 'string'
+        && r.results.all.grantsCapabilities === false
+        && r.results.all.availableNow <= r.results.all.total
+        && r.results.all.matched === r.results.all.total
+        && r.results.matched.matched < r.results.all.matched
+        && r.results.matched.matched === r.results.matched.tools.length
+        && r.results.matched.total === r.results.all.total,
+      lesson: 'A catalog answers three different counts and keeping them apart is the point: total is everything the pinned table declares, availableNow is how much of it this machine could actually reach, and matched is how much of it answered the query. A query narrows matched while leaving total alone, so "there are 117 of these" and "I found 4 of them" and "I could run n of them here" never collapse into one number. grantsCapabilities is false on every reply, which is the same statement sources.catalog makes: finding a capability in a catalogue is not acquiring it, and the revision travels with the answer so a count can be rechecked against the table it came from.',
+    },
+    {
+      family: 'catalog', tool: 'foreign.catalog',
+      plan: { version: 1, name: 'a-catalog-of-things-not-installed', tasks: [
+        { id: 'all', tool: 'foreign.catalog', input: {} },
+      ] },
+      expect: (r) => r.results.all.grantsCapabilities === false
+        && r.results.all.availableNow === 0
+        && r.results.all.schemaVersion >= 1
+        && Array.isArray(r.results.all.sources)
+        && r.results.all.matched === r.results.all.total
+        && r.results.all.tools.length === r.results.all.matched,
+      lesson: 'The foreign catalogue reports availableNow as zero while still listing what it knows, which is exactly the distinction a reader needs: the manifest describes tools belonging to other projects, and nothing in this workspace is configured to run any of them. A catalogue that hid unavailable entries would answer "there is no such tool" to a question whose true answer is "that tool exists and is not wired up here", and those lead to different next steps. Listing the sources beside the tools is what makes the second answer actionable.',
+    },
+    {
+      family: 'instructions', tool: 'instructions.lesson',
+      plan: { version: 1, name: 'fetch-a-lesson-that-is-not-there', tasks: [
+        { id: 'asked', tool: 'instructions.lesson', input: { ids: ['nothing:such-lesson', 'also:absent'] } },
+      ] },
+      expect: (r) => r.results.asked.requested === 2 && r.results.asked.returned === 0
+        && r.results.asked.lessons.length === 0 && r.results.asked.missing.length === 2
+        && r.results.asked.missing.join(',') === 'also:absent,nothing:such-lesson'
+        && Array.isArray(r.results.asked.limitations),
+      lesson: 'Asking for lessons that do not exist returns a result rather than a refusal: requested two, returned none, and both ids named in missing. A batch fetch that failed on the first unknown id would be the wrong shape for its actual caller, which is usually working from an omission record a turn or two old and needs the lessons that are still there plus an honest list of the ones that went stale. The missing ids come back sorted, so the answer is the same whatever order they were asked in.',
+    },
+
     // ---- delegation: a sub-plan that runs on no authority of its own --------------------
     {
       family: 'authority', tool: 'agent.delegate',

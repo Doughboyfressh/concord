@@ -11,5 +11,6 @@ Each line below came from a plan that ran through this kernel, behaved exactly a
 and replayed. These are observations about behaviour, not permissions: nothing here grants
 anything, and an unreviewed source stays unreviewed.
 
+- `hooks.evaluate` — hooks.evaluate is a pure verdict about an event, and three of its properties are deliberate. The strictest matching decision wins, so a rule set where one rule allows and another denies has not expressed a preference and the deny stands — treating deny as the weaker side would make the safer rule the easiest to cancel by accident. Every matching rule is listed with its own decision and reason even though only one decides, because an operator reading a deny needs to know what else fired. And it enforces nothing: it reports, a caller that ignores a deny is not stopped, and no host command runs on any tool-call boundary, because hidden control flow at effect boundaries is the thing this kernel exists to remove. A matched rule with no reason reports null rather than being dropped from the list.
 - `hooks.evaluate` — hooks.evaluate returns the strictest matching decision, so an allow rule never cancels a deny that also matched. It reports a decision and enforces nothing.
 <!-- trained:end -->

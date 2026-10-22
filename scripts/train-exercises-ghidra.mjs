@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { writeGhidraFixtures, buildSla } from '../test/ghidra-fixtures.mjs';
 
 /**
@@ -78,6 +79,10 @@ const REAL_FILES = {
 const realFixture = (dir) => {
   for (const [name, relative] of Object.entries(REAL_FILES)) fs.copyFileSync(path.join(GHIDRA, relative), path.join(dir, name));
 };
+/** The digest of an installed file, computed here so a reader's sha256 is checked independently. */
+/** A SHA-256-shaped string: used where the fixture's own bytes are written by the test helper. */
+const hex64 = (value) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+const realDigest = (name) => createHash('sha256').update(fs.readFileSync(path.join(GHIDRA, REAL_FILES[name]))).digest('hex');
 /** x86-64 decodes as 64-bit only when the context says so; the defaults describe a 16-bit machine. */
 const LONG_MODE = { addrsize: 2, opsize: 1, rexprefix: 0, longMode: 1 };
 const realTask = (tool, input) => ({ version: 1, name: 'real-corpus', tasks: [{ id: 'a', tool, input }] });
@@ -135,7 +140,12 @@ export function ghidraExercises() {
         const out = r.results.a;
         return out.counts.constraints === 4
           && out.constraints.every((row) => row.loader === 'Portable Executable (PE)')
-          && out.constraints.filter((row) => row.compilerSpecID === 'windows').length === 2;
+          && out.constraints.filter((row) => row.compilerSpecID === 'windows').length === 2
+          // The envelope: the path asked for, a digest of the bytes read, understood with no
+          // reason to give, somebody else's data, and a limitations list.
+          && out.path === 'toy.opinion' && hex64(out.sha256) && out.supported === true
+          && out.reason === null && out.untrusted === true && Array.isArray(out.limitations)
+          && out.loaders.length >= 1;
       },
       lesson: 'artifact.ghidraLoaderOpinion flattens the constraint tree, because the nesting exists only to share attributes: an inner constraint inherits everything its ancestors set, so the leaf rows with ancestor attributes merged in are the decision table a loader actually matches against. A .opinion file also carries no XML declaration — none of the 29 shipped ones does — so requiring a prolog would reject every real file of this type.',
     },
@@ -147,7 +157,9 @@ export function ghidraExercises() {
       // matched would be false, and assembling Toy:BE:64:absent would be worse.
       expect: (r) => r.results.a.counts.matched === 1 && r.results.a.counts.resolved === 0
         && r.results.a.matched[0].resolved === false && r.results.a.matched[0].languages.length === 0
-        && r.results.a.limitations.some((line) => /none names a language present/.test(line)),
+        && r.results.a.limitations.some((line) => /none names a language present/.test(line))
+        && r.results.a.supported === true && r.results.a.reason === null
+        && r.results.a.query.primary === '334' && r.results.a.rows >= 1,
       lesson: 'artifact.ghidraLanguageMatch resolves a loader row only against languages the .ldefs really declares, and reports a row that matched but resolved to nothing as exactly that. Assembling an identifier of the form processor:LE:32:variant would produce a plausible answer for every matching row, including rows whose language is not installed, and an id that resolves to nothing is worse than a row openly reported as unresolved. The reverse matters too: a row that constrains the secondary key is not matched by a query that supplies none, because treating an absent key as a wildcard would select a clang-only row for a binary that never claimed to be clang.',
     },
     {
@@ -417,7 +429,13 @@ export function ghidraExercises() {
             && r.results.values.counts.definitions === 19 && r.results.values.counts.uses === 20
             && r.results.values.counts.fixpointRounds === 1 && r.results.values.counts.stores === 1
             && r.results.values.summary.inputs.length === 1 && r.results.values.slice === null
-            && [code, r.results.flow, r.results.graph, r.results.values].every((value) => value.untrusted === true);
+            && [code, r.results.flow, r.results.graph, r.results.values].every((value) =>
+              value.untrusted === true && value.table === 'x86-64.sla' && value.path === 'program.exe'
+              && value.sha256 === realDigest('program.exe') && value.supported === true
+              && value.reason === null && Array.isArray(value.limitations))
+            && r.results.flow.entries.length === 1 && r.results.graph.entries.length === 1
+            && r.results.values.entries.length === 1
+            && r.results.graph.external.length === 1 && r.results.graph.unresolved.length === 1;
         },
         lesson: 'The whole reading chain composes in one plan against the installed distribution: identify a real PE, then disassemble, recover control flow, build a call graph and track values at its entry point using Ghidra\'s own half-megabyte x86-64 table. Every later task takes the file offset from the inspection by reference, which makes the entry-point lesson structural instead of advisory — measured here, the RVA is 43324 and the bytes live at offset 40252, a gap of exactly 3072 from the section layout, and the image base plus the RVA is the address the code believes it runs at. All three numbers appear in the same result and none of them substitutes for another. The proof that the conversion was right is the decode itself: the first instruction is SUB RSP,0x28, the stack-room prologue a real entry point begins with, where feeding the RVA to the disassembler would have landed three kilobytes away and still produced plausible instructions, because a stream of x86 bytes almost always decodes as something. Four readers over the same bytes then agree: four instructions, one block, one call, two nodes with one edge to one external target, and nineteen definitions against twenty uses settled in a single fixpoint round.',
       },
@@ -471,6 +489,33 @@ export function ghidraExercises() {
           && r.results.a.spaces.length === 0 && r.results.a.endian === null
           && r.results.a.untrusted === true,
         lesson: 'x86.slaspec is 491 bytes and declares almost nothing: no tokens, no subtables, no spaces, not even an endianness — just 21 includes. The entire instruction set lives in the included .sinc files, so a reader of the top-level source alone would report an empty language and be exactly right about the file while being useless about x86. That is worth knowing before trusting any single-file answer about a SLEIGH language, and it is the reason the compiled table is the thing to read when the question is what the processor does. An empty answer here is correct rather than a parse failure, which is why supported is true with every list empty rather than a reason being set.',
+      },
+      {
+        family: 'composition', tool: 'artifact.ghidraProcessorSpec', workspace: 'temp', fixture: realFixture,
+        plan: { version: 1, name: 'four-real-specs-in-one-plan', tasks: [
+          { id: 'languages', tool: 'artifact.ghidraLanguages', input: { path: 'x86.ldefs' } },
+          { id: 'processor', tool: 'artifact.ghidraProcessorSpec', input: { path: 'x86-64.pspec' } },
+          { id: 'compiler', tool: 'artifact.ghidraCompilerSpec', input: { path: 'x86-64-win.cspec' } },
+          { id: 'source', tool: 'artifact.sleighSource', input: { path: 'x86.slaspec' } },
+        ] },
+        expect: (r) => {
+          const names = { languages: 'x86.ldefs', processor: 'x86-64.pspec', compiler: 'x86-64-win.cspec', source: 'x86.slaspec' };
+          return Object.entries(names).every(([id, file]) => {
+            const value = r.results[id];
+            // The envelope every reader here shares, checked rather than assumed: the path it was
+            // asked for, the digest of exactly those bytes computed independently from the
+            // installed file, no reason because it is supported, and untrusted bytes.
+            return value.path === file && value.sha256 === realDigest(file)
+              && value.supported === true && value.reason === null
+              && value.untrusted === true && Array.isArray(value.limitations);
+          })
+            // And the four together are the set a loader needs to pick a language and read it.
+            && r.results.processor.contextFields.length === 5
+            && r.results.compiler.counts.conventions >= 2
+            && r.results.languages.languages.length >= 4
+            && r.results.source.includes.length >= 20;
+        },
+        lesson: 'Four readers over four real specification files in one plan, and the useful part is the envelope they share: each reports the path it was asked for, the SHA-256 of exactly those bytes — matched here against a digest computed independently from the installed distribution — a null reason because the file was understood, an untrusted flag because a specification is still somebody else\'s data, and a limitations list. That uniformity is what lets a caller treat eight different readers as one kind of answer. The four together are also exactly the set a loader needs: the language definitions to choose an id, the processor spec for its context fields, the compiler spec for its calling conventions, and the source for what it defers to its includes.',
       },
     ] : []),
   ];
