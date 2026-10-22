@@ -12,6 +12,7 @@ import { serverExercises } from './train-exercises-server.mjs';
 import { limitExercises } from './train-exercises-limits.mjs';
 import { decompilerExercises } from './train-exercises-decompiler.mjs';
 import { formatExercises } from './train-exercises-formats.mjs';
+import { specExercises } from './train-exercises-specs.mjs';
 import { buildExercises } from './train-exercises-build.mjs';
 import { composeExercises } from './train-exercises-compose.mjs';
 
@@ -54,6 +55,7 @@ export function exercises(inventory, registry) {
     ...limitExercises(),
     ...decompilerExercises(),
     ...formatExercises(),
+    ...specExercises(),
     ...buildExercises(),
     ...composeExercises(),
     ...derivedExercises(registry),
