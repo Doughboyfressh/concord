@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 
 /**
  * The input fields nothing ever passed.
@@ -38,6 +39,36 @@ const RANKABLE = [
   { id: 'disassemble', text: 'Decode instructions from a compiled table.' },
 ];
 
+/**
+ * A minimal Mach-O, written to the specification, and a bundle plist that names it.
+ *
+ * Sixty-four bit header, two load commands: an LC_UUID and an LC_LOAD_DYLIB naming libSystem.
+ * Small enough to write by hand and real enough for the reader, which says in its own
+ * limitations that it takes link edges from the dylib path strings in the image rather than from
+ * decoded load commands - so this image is honest about being exactly what that disclosure
+ * describes, and the exercise asserts the disclosure alongside the edge it produced.
+ */
+const le32 = (value) => { const out = Buffer.alloc(4); out.writeUInt32LE(value); return out; };
+const DYLIB_PATH = Buffer.from('/usr/lib/libSystem.B.dylib' + String.fromCharCode(0).repeat(6));
+const MACH_O = Buffer.concat([
+  // magic (64-bit little-endian), arm64, no subtype, MH_EXECUTE, two commands
+  Buffer.from([0xcf, 0xfa, 0xed, 0xfe]), le32(0x0100000c), le32(0), le32(2), le32(2),
+  le32(24 + 24 + DYLIB_PATH.length), le32(0x00200085), le32(0),
+  le32(0x1b), le32(24), Buffer.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
+  le32(0x0c), le32(24 + DYLIB_PATH.length), le32(24), le32(0), le32(0x10000), le32(0x10000), DYLIB_PATH,
+]);
+const BUNDLE_PLIST = [
+  '<?xml version="1.0" encoding="UTF-8"?>',
+  '<plist version="1.0">', '<dict>',
+  '  <key>CFBundleIdentifier</key><string>com.example.concord</string>',
+  '  <key>CFBundleExecutable</key><string>app.bin</string>',
+  '</dict>', '</plist>', '',
+].join(String.fromCharCode(10));
+const bundleFixture = (dir) => {
+  if (!fs.existsSync(path.join(dir, 'app.bin'))) fs.writeFileSync(path.join(dir, 'app.bin'), MACH_O);
+  if (!fs.existsSync(path.join(dir, 'bundle-Info.plist'))) fs.writeFileSync(path.join(dir, 'bundle-Info.plist'), BUNDLE_PLIST);
+};
+
 const twice = (name, tool, plain, filtered, extra = []) => ({
   version: 1, name, tasks: [
     { id: 'plain', tool, input: plain },
@@ -46,7 +77,7 @@ const twice = (name, tool, plain, filtered, extra = []) => ({
   ],
 });
 
-export function filterExercises() {
+export function filterExercises(skill = null) {
   return [
     {
       family: 'filters', tool: 'capabilities.search',
@@ -256,6 +287,59 @@ export function filterExercises() {
         && r.results.managed.edges.length === 0 && r.results.managed.roots.length === 0,
       lesson: 'A selector supplied to a reader that cannot parse the file changes nothing about the refusal: the same supported:false, the same stated reason, and the same empty shapes in place of findings. Worth proving because the alternative is easy to write by accident - a filter applied before the format check, or a selector that turns an empty list into a null because nothing matched it. These five readers all take a name, a prefix, a namespace or a limit, and none of them lets it reach the answer before the file has been understood.',
     },
+    {
+      family: 'filters', tool: 'artifact.appleGraph', workspace: 'temp', fixture: bundleFixture,
+      plan: twice('bundle-with-and-without-its-binary', 'artifact.appleGraph',
+        { plist: 'bundle-Info.plist' }, { plist: 'bundle-Info.plist', binary: 'app.bin' }),
+      expect: (r) => r.results.plain.supported === true && r.results.filtered.supported === true
+        // The bundle is read from the plist, so naming the binary adds to the answer without
+        // changing what was already there.
+        && r.results.filtered.bundle.identifier === r.results.plain.bundle.identifier
+        && r.results.filtered.bundle.executable === 'app.bin'
+        && r.results.filtered.bundle.plistFormat === 'xml'
+        && r.results.plain.edges.length === 0
+        // And the binary is what turns a description into a graph.
+        && r.results.filtered.edges.length === 1
+        && r.results.filtered.edges[0].from === 'app.bin'
+        && r.results.filtered.edges[0].to === '/usr/lib/libSystem.B.dylib'
+        && r.results.filtered.edges[0].kind === 'links'
+        && r.results.filtered.edges[0].system === true
+        && r.results.filtered.externalFrameworks === 0
+        // One more disclosure than the plist-only read, naming how the edges were found.
+        && r.results.filtered.limitations.length === r.results.plain.limitations.length + 1
+        && r.results.filtered.limitations.some((note) => note.includes('path strings')),
+      lesson: 'A bundle plist describes an application and its binary describes what that application links, and appleGraph keeps them separable: naming the binary adds edges without changing anything the plist already said. A system dylib is marked as one rather than counted as an external framework, which is the distinction that matters when the question is what a bundle brings with it. And the reader states how it found the edges - from the dylib path strings in the image rather than from decoded load commands - which is exactly why a hand-written header with two load commands is enough to exercise it, and exactly what would make an unusual install name invisible.',
+    },
+    ...(skill ? [
+      {
+        family: 'filters', tool: 'skills.snapshot', workspace: 'temp', needsCorpus: skill.path,
+        plan: { version: 1, name: 'snapshot-verifies-its-own-digest', tasks: [
+          { id: 'first', tool: 'skills.snapshot', input: { path: skill.path, sourceId: skill.sourceId } },
+          // The second snapshot is handed the digest the first produced, in the same run, through
+          // a task reference. Nothing types a digest in: the tool is asked to agree with itself.
+          { id: 'again', tool: 'skills.snapshot', dependsOn: ['first'], input: {
+            path: skill.path, sourceId: skill.sourceId,
+            expectedDigest: { $task: 'first', path: '/snapshotDigest' },
+          } },
+        ] },
+        expect: (r) => r.results.first.snapshotDigest === r.results.again.snapshotDigest
+          && /^[a-f0-9]{64}$/.test(r.results.first.snapshotDigest)
+          && r.results.again.digestAlgorithm === 'sha256-canonical-json-v1'
+          && r.results.again.fileCount === r.results.first.fileCount
+          && r.results.again.trust === 'unreviewed-data',
+        lesson: 'expectedDigest is what turns a snapshot from a reading into a check, and the cheapest honest way to exercise it is to have the tool agree with itself: one task snapshots a reviewed skill, the next snapshots it again with the first digest passed in by reference. Nothing types a digest in, so the exercise cannot be satisfied by a stale constant - and it states the property the whole catalogue rests on, that a snapshot of unchanged bytes is the same snapshot. The algorithm is named in the answer because a digest without its canonicalisation is not reproducible by anyone else.',
+      },
+      {
+        family: 'filters', tool: 'skills.installed', workspace: 'temp',
+        plan: twice('installed-by-source', 'skills.installed', {}, { sourceId: skill.sourceId }),
+        expect: (r) => r.results.filtered.count <= r.results.plain.count
+          && r.results.filtered.installed.every((entry) => entry.sourceId === skill.sourceId)
+          && r.results.filtered.installed.length === r.results.filtered.count
+          // Whatever the store holds, the count and the list it returns agree with each other.
+          && r.results.plain.installed.length === r.results.plain.count,
+        lesson: 'Filtering the installed-skill store by source narrows the list and the count together, and the exercise states that agreement rather than any particular number - the store is whatever earlier exercises left in it, and a prediction about its size would be a prediction about exercise ordering. A count that disagreed with its own list is the failure worth catching here, because every caller that pages uses one to decide how far to read the other.',
+      },
+    ] : []),
     ...(ASSEMBLY_PRESENT ? [{
       family: 'filters', tool: 'artifact.managedMembers', workspace: 'temp',
       plan: twice('members-by-type', 'artifact.managedMembers',

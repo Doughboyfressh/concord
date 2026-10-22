@@ -64,7 +64,7 @@ export function exercises(inventory, registry) {
     ...sessionExercises(),
     ...processExercises(),
     // Last on purpose: these read fixtures the families above write into the same workspace.
-    ...filterExercises(),
+    ...filterExercises(skill),
 
     // ---- determinism -----------------------------------------------------------------
     {
