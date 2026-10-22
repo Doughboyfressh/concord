@@ -68,7 +68,13 @@ async function waitForDevToolsPort(portFile, deadline, signal) {
 
 /** Exported for direct unit testing of the loopback re-verification; not part of the tool contract. */
 export async function discoverPageTarget(port, signal) {
-  const response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal });
+  let response;
+  // Guarded because an unguarded await let a transport failure escape as a raw TypeError rather
+  // than a BROWSER_CDP refusal — so a caller catching HarnessError saw nothing at all, and the
+  // training exercise that calls this twice reported "BROWSER_CDP then no refusal" at random.
+  // A browser that is not listening is the same kind of fact as one that answers with nonsense.
+  try { response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal }); }
+  catch { fail('BROWSER_CDP', 'Browser DevTools target list could not be fetched'); }
   if (!response.ok) fail('BROWSER_CDP', 'Browser DevTools target list request failed');
   let targets;
   try { targets = parseJson(await response.text()); }

@@ -62,8 +62,74 @@ const AFTER_HAR = har([
   capture('POST', 'https://telemetry.example/collect', 204, 'application/json', 0),
 ]);
 
+/** One tree holding a file for every reader in the batch below. */
+const READER_FILES = {
+  'sem.js': 'export async function go() { await fetch("/x"); }\n',
+  'bundle.js': '/*! bundled */\nvar __webpack_require__ = 1;\nexport const a = 2;\n',
+  'code.js': 'export const a = 1;\nexport function b() {}\n',
+  'imports.js': 'import x from "./code.js";\nimport "./side-effect.js";\n',
+  'page.html': '<html><body><script src="/a.js"></script><script>var inline = 1;</script></body></html>',
+  'c.evm': '6080604052',
+  'blob.bin': '0123456789abcdef',
+  'entry.js': 'import helper from "./helper.js";\nexport const main = helper;\n',
+  'helper.js': 'export default 1;\n',
+};
+const readerFixture = (dir) => {
+  for (const [name, body] of Object.entries(READER_FILES)) write(dir, name, body);
+  write(dir, 'fw.bin', Buffer.concat([Buffer.from('UBI#'), Buffer.alloc(64)]));
+  write(dir, 'm.wasm', Buffer.from([0x00, 0x61, 0x73, 0x6d, 1, 0, 0, 0]));
+};
+const bodyDigest = (name) => (name in READER_FILES
+  ? createHash('sha256').update(Buffer.from(READER_FILES[name])).digest('hex')
+  : null);
+
 export function composeExercises() {
   return [
+    {
+      family: 'composition', tool: 'artifact.jsSemantics', workspace: 'temp', fixture: readerFixture,
+      plan: { version: 1, name: 'ten-readers-over-one-tree', tasks: [
+        { id: 'semantics', tool: 'artifact.jsSemantics', input: { path: 'sem.js' } },
+        { id: 'bundle', tool: 'artifact.webBundle', input: { path: 'bundle.js' } },
+        { id: 'exports', tool: 'artifact.jsExports', input: { path: 'code.js' } },
+        { id: 'imports', tool: 'artifact.moduleImports', input: { path: 'imports.js' } },
+        { id: 'scripts', tool: 'artifact.htmlScripts', input: { path: 'page.html' } },
+        { id: 'firmware', tool: 'artifact.firmware', input: { path: 'fw.bin' } },
+        { id: 'wasm', tool: 'artifact.wasmInterface', input: { path: 'm.wasm' } },
+        { id: 'evm', tool: 'artifact.evmInterface', input: { path: 'c.evm', encoding: 'hex' } },
+        { id: 'region', tool: 'artifact.firmwareRegion', input: { path: 'blob.bin', offset: 4, length: 4 } },
+        { id: 'application', tool: 'artifact.jsApplication', input: { entry: 'entry.js' } },
+      ] },
+      expect: (r) => {
+        // The envelope every path-taking reader shares, over ten readers and one tree.
+        const envelope = [
+          ['semantics', 'sem.js'], ['bundle', 'bundle.js'], ['exports', 'code.js'],
+          ['imports', 'imports.js'], ['scripts', 'page.html'], ['region', 'blob.bin'],
+        ].every(([id, file]) => {
+          const value = r.results[id];
+          return value.path === file && value.sha256 === bodyDigest(file) && value.untrusted === true;
+        });
+        return envelope
+          && r.results.firmware.untrusted === true && r.results.wasm.untrusted === true
+          // And one fact from each, so the envelope is not the only thing being claimed.
+          && r.results.exports.exports.length === 2
+          && r.results.imports.imports.length === 2
+          && r.results.scripts.scripts.length === 2
+          && r.results.firmware.regions.length === 1
+          && r.results.wasm.entries.length === 0 && r.results.wasm.state === 'complete'
+          // A region reports the digest of the slice as well as of the file it came from.
+          && r.results.region.region.length === 4 && r.results.region.preview === '34353637'
+          && r.results.region.region.sha256 !== r.results.region.sha256
+          // The carrier and the bytecode are two different things with two different digests.
+          && r.results.evm.carrierSha256 === bodyDigest('c.evm')
+          && r.results.evm.bytecodeSha256 !== r.results.evm.carrierSha256
+          && r.results.evm.bytecodeBytes === 5 && r.results.evm.untrusted === true
+          // And an application is a module graph rather than a file.
+          && r.results.application.entry === 'entry.js'
+          && r.results.application.modules.length === 2
+          && r.results.application.modules.every((module) => module.readable === true);
+      },
+      lesson: 'Ten readers over one tree in a single plan, which is how a caller actually meets them: a directory arrives and several formats are in it. The envelope holds across all of them — each reports the path it was asked for, the digest of exactly those bytes computed independently here, and the untrusted flag — and each still answers its own question: two exports, two imports, two scripts in the page, one firmware region, an empty but complete WebAssembly interface, four bytes of a region whose slice carries its own digest beside the one for the whole file, five bytes of EVM bytecode whose digest differs from that of the hex text carrying it, and two readable modules reached from one entry. The uniformity is the useful part. A caller handling ten formats writes one result-shaped branch rather than ten, and a reader that broke its envelope would be visible immediately instead of at whichever call site happened to depend on it.',
+    },
     // ---- compositions that do real work ----------------------------------------------
     {
       family: 'composition', tool: 'artifact.compareHar', workspace: 'temp',

@@ -90,6 +90,23 @@ const realTask = (tool, input) => ({ version: 1, name: 'real-corpus', tasks: [{ 
 export function ghidraExercises() {
   return [
     {
+      family: 'composition', tool: 'artifact.sleighCompiled', workspace: 'temp',
+      fixture: (dir) => writeGhidraFixtures(dir),
+      plan: { version: 1, name: 'four-specification-readers-over-one-fixture-set', tasks: [
+        { id: 'opinion', tool: 'artifact.ghidraLoaderOpinion', input: { path: 'toy.opinion' } },
+        { id: 'match', tool: 'artifact.ghidraLanguageMatch', input: { opinion: 'toy.opinion', languages: 'toy.ldefs', primary: '334' } },
+        { id: 'compiled', tool: 'artifact.sleighCompiled', input: { path: 'toy.sla' } },
+        { id: 'agreement', tool: 'artifact.compareSleighSource', input: { compiled: 'toy.sla', source: 'toy.slaspec' } },
+      ] },
+      expect: (r) => r.results.opinion.supported === true && r.results.opinion.counts.constraints === 4
+        && r.results.match.counts.matched === 1 && r.results.match.counts.resolved === 0
+        && r.results.compiled.supported === true && hex64(r.results.compiled.sha256)
+        && r.results.agreement.supported === true
+        && [r.results.opinion, r.results.compiled].every((value) => value.untrusted === true)
+        && Array.isArray(r.results.agreement.limitations),
+      lesson: 'The four specification readers in one plan over one fixture set, which is how they are actually used: a loader opinion says which languages could apply, the match resolves those rows against the declarations that exist, the compiled table is what the processor really does, and the comparison checks the table against its source. Running them together is the point — each answers a different question about the same language, and the interesting failure is disagreement between them rather than any one of them refusing. Here the match resolves nothing while still reporting a matched row, which is the honest shape: a loader row that names a language nobody declared is a fact about the opinion file, not a parse failure.',
+    },
+    {
       family: 'ghidra', tool: 'artifact.ghidraLanguages', workspace: 'temp',
       fixture: (dir) => writeGhidraFixtures(dir),
       plan: task('artifact.ghidraLanguages', { path: 'toy.ldefs' }),

@@ -288,6 +288,44 @@ export function exercises(inventory, registry) {
       lesson: 'The whole skill lifecycle composes in one plan: adopt a reviewed skill, list what is installed, remove it by the id the installation itself reported, and list again. Two writes mean two approval hashes, each bound to its own resolved input, and the removal takes its id by reference rather than by restating it — so the plan cannot drift into removing something other than what it installed. The lock records the digest the inventory declared and the listing reports the installed copy against it, so localChanged distinguishes a skill someone edited in the workspace from one still matching its source, and upstreamChanged distinguishes a source that has moved on. Every stage repeats that an installed skill is inert text: installing it executes nothing and grants nothing, and the status the inventory recorded travels with it, so an unreviewed source stays unreviewed after adoption. Removal reports both that the lock entry went and that the file went, which are two different facts — a lock entry without its file, or a file without its entry, is the state worth being able to name.',
     }] : []),
 
+    {
+      family: 'composition', tool: 'json.mergeShallow',
+      plan: { version: 1, name: 'nine-kernel-tools-in-one-chain', tasks: [
+        { id: 'pinned', tool: 'json.value', input: { reading: 1 } },
+        { id: 'hashed', tool: 'json.hash', dependsOn: ['pinned'], input: { $task: 'pinned' } },
+        { id: 'merged', tool: 'json.mergeShallow', input: { values: [{ a: 1 }, { b: 2 }] } },
+        { id: 'joined', tool: 'text.concat', dependsOn: ['hashed'], input: {
+          values: ['digest', { $task: 'hashed', path: '/digest' }], separator: ':',
+        } },
+        { id: 'checked', tool: 'json.assert', dependsOn: ['merged'], input: {
+          value: { $task: 'merged', path: '/value/a' }, schema: { const: 1 },
+        } },
+        { id: 'ranked', tool: 'skills.rank', input: { query: 'deterministic replay', skills: [
+          { id: 'replay', text: 'deterministic replay of a recorded run' },
+          { id: 'unrelated', text: 'something else entirely' },
+        ] } },
+        { id: 'searched', tool: 'capabilities.search', input: { query: 'deterministic replay', limit: 3 } },
+        { id: 'sources', tool: 'sources.catalog', input: {} },
+        { id: 'drafted', tool: 'memory.candidate', dependsOn: ['hashed', 'ranked'], input: {
+          lesson: 'A chain of pure and read tools can carry one value from end to end without any effect.',
+          evidence: [{ $task: 'hashed' }, { $task: 'ranked', path: '/strategy' }],
+        } },
+      ] },
+      expect: (r) => canonical(r.results.pinned) === canonical({ reading: 1 })
+        && r.results.hashed.digest === digest({ reading: 1 })
+        && canonical(r.results.merged.value) === canonical({ a: 1, b: 2 })
+        // The reference resolved to the digest string and the join used it verbatim.
+        && (r.results.joined.value ?? r.results.joined.text) === `digest:${r.results.hashed.digest}`
+        && r.results.checked.passed === true
+        && r.results.ranked.ranked[0].id === 'replay'
+        && r.results.ranked.strategy === 'lexical-overlap-v1'
+        && r.results.searched.grantsCapabilities === false
+        && r.results.sources.sources.length === 14
+        && r.results.drafted.evidenceHashes.length === 2
+        && r.results.drafted.status === 'proposed' && r.results.drafted.executable === false,
+      lesson: 'Nine pure and read tools in one plan, with a single value carried from end to end: a literal pinned into the plan, hashed, the digest spliced into a string by reference, and that same digest filed as one of two pieces of evidence on a memory candidate. Nothing in the chain requires an approval, because nothing in it leaves the process — which is what makes this the shape to reach for first: everything a plan can establish without an effect should be established before an effect is proposed, since a blocked write is cheaper to review when the evidence behind it already exists and is hashed. The candidate at the end is still marked proposed and not executable, so a chain of nine verified steps produces a claim rather than a permission.',
+    },
+
     // ---- the strictest rule wins, and nothing is enforced ------------------------------
     {
       family: 'governance', tool: 'hooks.evaluate',

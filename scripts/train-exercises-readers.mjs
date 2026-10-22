@@ -86,6 +86,35 @@ const SCANNERS = [
 
 export function readerExercises() {
   return [
+    /**
+     * Every one of those readers, in one plan, refusing the same wrong file.
+     *
+     * The per-reader exercises below prove each one individually. This proves the uniformity: the
+     * same file handed to twenty-three readers produces twenty-three answers of one shape, with
+     * one digest, inside a single run. That is the claim a caller depends on when a directory
+     * arrives and the format is unknown, and it is the claim the kernel exists to let a plan
+     * make — the composition axis this round keeps naming, over the widest set available.
+     */
+    {
+      family: 'composition', tool: 'artifact.dex', workspace: 'temp',
+      fixture: (dir) => write(dir, 'notmine.bin', NOT_MINE),
+      plan: { version: 1, name: 'one-wrong-file-and-every-reader', tasks: [
+        ...BINARY_READERS.map((tool, index) => ({ id: `b${index}`, tool, input: { path: 'notmine.bin' } })),
+        ...NARROWED_READERS.map((entry, index) => ({ id: `n${index}`, tool: entry.tool, input: { path: 'notmine.bin', ...entry.extra } })),
+      ] },
+      expect: (r) => {
+        const values = Object.values(r.results);
+        return values.length === BINARY_READERS.length + NARROWED_READERS.length
+          && values.every((value) => value.supported === false && typeof value.reason === 'string'
+            && value.sha256 === NOT_MINE_DIGEST && value.untrusted === true
+            && value.path === 'notmine.bin' && Array.isArray(value.limitations))
+          // Each reason is that reader's own, not one shared string.
+          && new Set(values.map((value) => value.reason)).size > 1
+          && NARROWED_READERS.every((entry, index) => entry.empty(r.results[`n${index}`]));
+      },
+      lesson: 'Twenty-three readers, one file none of them can parse, one plan. Every answer has the same shape — supported:false, a reason, the digest of exactly those bytes, the untrusted flag, the path asked for, and a limitations list — while the reasons differ from one another, so a caller learns both that nothing parsed the file and what each reader was looking for. The readers taking an extra argument still return an empty list or an explicit null where findings would go. Proven together rather than only one at a time because the uniformity is itself the property: a caller meeting an unknown file writes one branch for twenty-three formats, and a reader that broke the shape would show up here rather than at whichever call site happened to depend on it.',
+    },
+
     ...BINARY_READERS.map((tool) => ({
       family: 'readers', tool, workspace: 'temp',
       fixture: (dir) => write(dir, 'notmine.bin', NOT_MINE),
