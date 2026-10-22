@@ -180,6 +180,10 @@ export function composeExercises() {
         { id: 'box', tool: 'peer.inbox', dependsOn: ['sent'], input: {} },
       ] },
       expect: (r) => Number.isInteger(r.results.sent.seq) && r.results.sent.seq >= 1
+        // The size of the letter rather than of the message: a posted letter carries the subject,
+        // the addressee and the sequence as well, so the recorded size necessarily exceeds what
+        // the caller wrote - and it is the letter, not the message, that the mailbox has to hold.
+        && r.results.sent.bytes > 108
         && r.results.sent.replyTo === null && r.results.sent.for === 'operator'
         && r.results.sent.id.includes('-')
         && r.results.sent.limitations.some((note) => note.includes('notifies nobody'))

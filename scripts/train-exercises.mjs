@@ -292,8 +292,23 @@ export function exercises(inventory, registry) {
     ...(skill ? [{
       family: 'skills', tool: 'skills.install', grant: true, workspace: 'temp', expectApprovals: 1, needsCorpus: skill.path,
       plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'skills.install', input: { id: skill.id } }] },
-      expect: (r) => r.outcome.status === 'completed' && r.results.a.sha256 === skill.sourceSha256,
-      lesson: 'skills.install verifies a file against the digest the inventory recorded before copying it, so an adopted skill is provably the reviewed bytes rather than whatever happens to be on disk now.',
+      expect: (r) => r.outcome.status === 'completed' && r.results.a.sha256 === skill.sourceSha256
+        // The source it came from and the title it was catalogued under travel with the install,
+        // so an installed skill can be traced back to the inventory row that authorised it
+        // rather than only to the bytes.
+        && r.results.a.sourceId === skill.sourceId && r.results.a.title === skill.title,
+      lesson: 'skills.install verifies a file against the digest the inventory recorded before copying it, so an adopted skill is provably the reviewed bytes rather than whatever happens to be on disk now. It reports the source id and the title the inventory recorded alongside that digest, which is what lets an installed skill be traced back to the row that authorised it.',
+    }, {
+      family: 'skills', tool: 'skills.remove', grant: true, workspace: 'temp', expectApprovals: 1,
+      plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'skills.remove', input: { id: skill.id } }] },
+      expect: (r) => r.outcome.status === 'completed' && r.results.a.id === skill.id
+        && r.results.a.removed === true && r.results.a.fileRemoved === true
+        && r.results.a.remaining === 0
+        // Empty because the removal was uniform: both the lock entry and the file went. The key
+        // is where the other case is reported - a lock entry can outlive its file if someone
+        // deleted the copy by hand, and the removal says so rather than looking identical.
+        && r.results.a.limitations.length === 0,
+      lesson: 'skills.remove takes out the lock entry and the installed copy, and reports the two separately: removed is about the entry and fileRemoved about the file, because a lock entry can outlive its file if someone deleted the copy by hand. When both go, limitations is empty; when only the entry goes, it says so instead of reporting a uniform removal. It runs here on the skill the install exercise above adopted into the same workspace, which is the only honest way to exercise a removal - a store this round never wrote to has nothing to remove but a refusal.',
     }, {
       family: 'composition', tool: 'judgment.gate', workspace: 'temp', needsCorpus: skill.path,
       fixture: (dir) => write(dir, 'a.map', JSON.stringify({ version: 3, file: 'out.js', sources: ['a.js'], names: [], mappings: 'AAAA' })),
