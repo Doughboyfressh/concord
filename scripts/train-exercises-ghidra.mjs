@@ -27,6 +27,61 @@ import { writeGhidraFixtures, buildSla } from '../test/ghidra-fixtures.mjs';
 
 const task = (tool, input) => ({ version: 1, name: 't', tasks: [{ id: 'a', tool, input }] });
 
+/**
+ * The installed Ghidra distribution, or null.
+ *
+ * Everything above this line is deliberately independent of it and stays that way: the synthetic
+ * fixtures keep this family meaningful on a machine that has never seen Ghidra. What an install
+ * adds is the other half of the claim — that these readers hold against the real corpus, where a
+ * table is half a megabyte of packed binary rather than something an encoder in this repository
+ * wrote. Absent rather than failing, like the browser exercises: a machine without Ghidra should
+ * report fewer exercises, not a finding about its own installation.
+ *
+ * CONCORD_GHIDRA overrides the search. Otherwise a short list of literal roots is tried and then
+ * the download directory is scanned one level deep, because that is where an unpacked
+ * distribution actually tends to sit — and assuming it was not installed because it is not at
+ * C:/ghidra is how this was got wrong once already.
+ */
+const GHIDRA = (() => {
+  const marker = 'Ghidra/Processors/x86/data/languages/x86-64.sla';
+  const holds = (root) => {
+    try { return typeof root === 'string' && fs.statSync(path.join(root, marker)).isFile() ? root : null; }
+    catch { return null; }
+  };
+  const home = process.env.USERPROFILE ?? process.env.HOME ?? '';
+  for (const candidate of [process.env.CONCORD_GHIDRA, 'C:/ghidra', '/opt/ghidra', path.join(home, 'ghidra')]) {
+    const found = holds(candidate);
+    if (found) return found;
+  }
+  for (const parent of [path.join(home, 'Downloads'), home]) {
+    let names = [];
+    try { names = fs.readdirSync(parent).filter((name) => name.toLowerCase().startsWith('ghidra')).sort(); }
+    catch { continue; }
+    for (const name of names) {
+      // An unpacked archive usually nests one directory deep, with the date suffix dropped.
+      const found = holds(path.join(parent, name)) ?? holds(path.join(parent, name, name.replace(/_\d{8}$/, '')));
+      if (found) return found;
+    }
+  }
+  return null;
+})();
+
+/** x86-64's real table and specs, plus a real 76 KB PE, copied into the scratch workspace. */
+const REAL_FILES = {
+  'x86-64.sla': 'Ghidra/Processors/x86/data/languages/x86-64.sla',
+  'x86.ldefs': 'Ghidra/Processors/x86/data/languages/x86.ldefs',
+  'x86-64.pspec': 'Ghidra/Processors/x86/data/languages/x86-64.pspec',
+  'x86-64-win.cspec': 'Ghidra/Processors/x86/data/languages/x86-64-win.cspec',
+  'x86.slaspec': 'Ghidra/Processors/x86/data/languages/x86.slaspec',
+  'program.exe': 'Ghidra/Features/PDB/os/win_x86_64/pdb.exe',
+};
+const realFixture = (dir) => {
+  for (const [name, relative] of Object.entries(REAL_FILES)) fs.copyFileSync(path.join(GHIDRA, relative), path.join(dir, name));
+};
+/** x86-64 decodes as 64-bit only when the context says so; the defaults describe a 16-bit machine. */
+const LONG_MODE = { addrsize: 2, opsize: 1, rexprefix: 0, longMode: 1 };
+const realTask = (tool, input) => ({ version: 1, name: 'real-corpus', tasks: [{ id: 'a', tool, input }] });
+
 export function ghidraExercises() {
   return [
     {
@@ -316,5 +371,107 @@ export function ghidraExercises() {
       },
       lesson: 'artifact.compareSleighSource has three outcomes rather than two, and the third is the point: a source file that writes its endianness as an unresolved macro has not disagreed with the compiled table, it has not spoken. Recording that as a mismatch would manufacture a finding out of the preprocessor, so it lands in unstated with the reason it could not be compared, while a fact the source does state unconditionally is still compared normally in the same call. Across the 137 shipped table and source pairs this reports agreements and no disagreements at all, which is a joint check: the binary decoder and the text reader are verified against each other rather than each only against its own format.',
     },
+
+    // ---- the installed distribution, where the files are not ours ------------------------
+    ...(GHIDRA ? [
+      {
+        family: 'composition', tool: 'artifact.disassemble', workspace: 'temp', fixture: realFixture,
+        plan: { version: 1, name: 'read-a-real-binary-with-a-real-table', tasks: [
+          { id: 'seen', tool: 'artifact.inspect', input: { path: 'program.exe' } },
+          // Every later task takes the file offset from the inspection rather than restating it.
+          { id: 'code', tool: 'artifact.disassemble', dependsOn: ['seen'], input: {
+            table: 'x86-64.sla', path: 'program.exe', offset: { $task: 'seen', path: '/pe/entryPointOffset' },
+            length: 64, limit: 8, pcode: true, context: LONG_MODE } },
+          { id: 'flow', tool: 'artifact.controlFlow', dependsOn: ['seen'], input: {
+            table: 'x86-64.sla', path: 'program.exe', offset: { $task: 'seen', path: '/pe/entryPointOffset' },
+            length: 128, limit: 32, context: LONG_MODE } },
+          { id: 'graph', tool: 'artifact.callGraph', dependsOn: ['seen'], input: {
+            table: 'x86-64.sla', path: 'program.exe', offset: { $task: 'seen', path: '/pe/entryPointOffset' },
+            length: 128, limit: 32, regionLimit: 4, context: LONG_MODE } },
+          { id: 'values', tool: 'artifact.dataflow', dependsOn: ['seen'], input: {
+            table: 'x86-64.sla', path: 'program.exe', offset: { $task: 'seen', path: '/pe/entryPointOffset' },
+            length: 64, limit: 32, detail: true, context: LONG_MODE } },
+        ] },
+        expect: (r) => {
+          const pe = r.results.seen.pe;
+          const code = r.results.code;
+          const first = code.instructions[0];
+          return r.results.seen.format === 'pe'
+            // The three entry points are three different numbers, and the gap is a real section gap.
+            && pe.entryPoint !== pe.entryPointOffset
+            && pe.entryPoint - pe.entryPointOffset === 3072
+            && pe.entryPointAddress === pe.imageBase + pe.entryPoint
+            && code.supported === true && code.language.formatVersion === 4
+            && code.language.defaultSpace === 'ram' && code.language.bigEndian === false
+            && code.language.sourceFiles.includes('ia.sinc')
+            // A real entry point begins by making stack room. Decoding the RVA instead would land
+            // three kilobytes away and still disassemble into something plausible.
+            && first.offset === pe.entryPointOffset && first.decoded === true
+            && first.mnemonic === 'SUB' && first.text === 'SUB RSP,0x28' && first.bytes === '4883ec28'
+            && first.pcode.some((op) => op.op === 'INT_SUB') && first.constructors.length > 0
+            && r.results.flow.supported === true && r.results.flow.counts.instructions === 4
+            && r.results.flow.counts.blocks === 1 && r.results.flow.counts.calls === 1
+            && r.results.flow.entries.join(',') === '0x0'
+            && r.results.graph.counts.nodes === 2 && r.results.graph.counts.edges === 1
+            && r.results.graph.counts.external === 1 && r.results.graph.counts.regions === 1
+            && r.results.values.counts.definitions === 19 && r.results.values.counts.uses === 20
+            && r.results.values.counts.fixpointRounds === 1 && r.results.values.counts.stores === 1
+            && r.results.values.summary.inputs.length === 1 && r.results.values.slice === null
+            && [code, r.results.flow, r.results.graph, r.results.values].every((value) => value.untrusted === true);
+        },
+        lesson: 'The whole reading chain composes in one plan against the installed distribution: identify a real PE, then disassemble, recover control flow, build a call graph and track values at its entry point using Ghidra\'s own half-megabyte x86-64 table. Every later task takes the file offset from the inspection by reference, which makes the entry-point lesson structural instead of advisory — measured here, the RVA is 43324 and the bytes live at offset 40252, a gap of exactly 3072 from the section layout, and the image base plus the RVA is the address the code believes it runs at. All three numbers appear in the same result and none of them substitutes for another. The proof that the conversion was right is the decode itself: the first instruction is SUB RSP,0x28, the stack-room prologue a real entry point begins with, where feeding the RVA to the disassembler would have landed three kilobytes away and still produced plausible instructions, because a stream of x86 bytes almost always decodes as something. Four readers over the same bytes then agree: four instructions, one block, one call, two nodes with one edge to one external target, and nineteen definitions against twenty uses settled in a single fixpoint round.',
+      },
+      {
+        family: 'ghidra', tool: 'artifact.sleighCompiled', workspace: 'temp', fixture: realFixture,
+        plan: realTask('artifact.sleighCompiled', { path: 'x86-64.sla' }),
+        expect: (r) => r.results.a.supported === true
+          && r.results.a.registers.length > 1000
+          && r.results.a.registers.some((entry) => entry.name === 'RSP')
+          && r.results.a.elementCounts.length > 20
+          // Ordered by descending count, which only survives because this is a list.
+          && r.results.a.elementCounts[0].count >= r.results.a.elementCounts[1].count
+          && r.results.a.elementCounts.find((entry) => entry.element === 'const_real').count > 100_000
+          && r.results.a.elementCounts.find((entry) => entry.element === 'op_tpl').count > 10_000
+          // The element whose name is why this is a list and not an object.
+          && r.results.a.elementCounts.some((entry) => entry.element === 'constructor')
+          && r.results.a.counts.constructors > 1000
+          && r.results.a.untrusted === true,
+        lesson: 'The real x86-64 table decodes end to end: 1440 register varnodes in Ghidra 12.1.4 and an element tally in the hundreds of thousands, with const_real past 136,000 and 39,870 op templates. That scale is the argument for reading the compiled table rather than the source, and it is why the elements are reported as a tally rather than as elements: returning them all would hand back a structure larger than the file. The tally is a list of pairs and not an object, which this exercise is the reason for — every real SLEIGH table contains constructor elements, canonical() refuses that key outright, and as an object the entire read of a 490 KB table failed with OUTPUT_REJECTED naming only "Unsafe object key: constructor" and nothing about which field held it. A name read out of a file must never become an object key. The same change rescued an ordering that was already lost: the tally was sorted by descending count and then canonicalised into an object, which re-sorts keys lexicographically, so the order the code computed never reached a caller. The synthetic fixture beside this one has no constructor element, which is exactly why the suite could not have found either problem.',
+      },
+      {
+        family: 'ghidra', tool: 'artifact.ghidraLanguages', workspace: 'temp', fixture: realFixture,
+        plan: realTask('artifact.ghidraLanguages', { path: 'x86.ldefs' }),
+        expect: (r) => r.results.a.supported === true
+          && r.results.a.languages.length >= 4
+          && r.results.a.languages[0].id === 'x86:LE:32:default'
+          && r.results.a.languages[0].processor === 'x86' && r.results.a.languages[0].size === 32
+          && r.results.a.languages[0].endian === 'little'
+          && r.results.a.languages[0].defaultCompiler === 'windows'
+          && r.results.a.languages[0].compilers.length >= 2
+          && r.results.a.languages.some((entry) => entry.id.includes('64')),
+        lesson: 'Ghidra\'s own x86 language definitions parse into six declared languages, each naming the table file, processor spec and manual index it depends on, with its compiler list and the default named explicitly rather than inferred from list position. This is the file a loader consults to answer "which language is this binary", so a reader that dropped the compiler list or guessed the default would make that answer unreproducible — and the ids are not reconstructible from processor, size and variant, which is exactly why they are read rather than assembled.',
+      },
+      {
+        family: 'ghidra', tool: 'artifact.ghidraCompilerSpec', workspace: 'temp', fixture: realFixture,
+        plan: realTask('artifact.ghidraCompilerSpec', { path: 'x86-64-win.cspec' }),
+        expect: (r) => r.results.a.supported === true
+          && r.results.a.stackPointer.register === 'RSP'
+          && r.results.a.stackPointer.growth === 'negative'
+          && r.results.a.returnAddress.space === 'stack' && r.results.a.returnAddress.size === 8
+          && r.results.a.counts.conventions >= 2 && r.results.a.counts.callFixups >= 3
+          && r.results.a.globals.length >= 2 && r.results.a.untrusted === true,
+        lesson: 'The real Windows x86-64 compiler spec reports RSP growing downward, a return address eight bytes wide in the stack space, two calling conventions, three call fixups and two global ranges. Those are the facts that make a decompiled signature mean anything: the stack direction decides which side of the frame an argument is on, and the return-address width and space decide where the frame ends. A reader that folded the conventions together or inferred the stack direction from the architecture would produce a plausible prototype for the wrong ABI — which is the same failure the pentry-ordering lesson beside this one is about, met on the shipped file rather than a fixture.',
+      },
+      {
+        family: 'ghidra', tool: 'artifact.sleighSource', workspace: 'temp', fixture: realFixture,
+        plan: realTask('artifact.sleighSource', { path: 'x86.slaspec' }),
+        expect: (r) => r.results.a.supported === true
+          && r.results.a.includes.length >= 20
+          && r.results.a.tokens.length === 0 && r.results.a.subtables.length === 0
+          && r.results.a.spaces.length === 0 && r.results.a.endian === null
+          && r.results.a.untrusted === true,
+        lesson: 'x86.slaspec is 491 bytes and declares almost nothing: no tokens, no subtables, no spaces, not even an endianness — just 21 includes. The entire instruction set lives in the included .sinc files, so a reader of the top-level source alone would report an empty language and be exactly right about the file while being useless about x86. That is worth knowing before trusting any single-file answer about a SLEIGH language, and it is the reason the compiled table is the thing to read when the question is what the processor does. An empty answer here is correct rather than a parse failure, which is why supported is true with every list empty rather than a reason being set.',
+      },
+    ] : []),
   ];
 }

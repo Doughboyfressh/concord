@@ -1066,7 +1066,25 @@ export function makeGhidraTools() {
         if (read.truncated) {
           limitations.push(`The decode stopped early (${read.truncated}), so every list below is partial and the counts describe only what was read`);
         }
-        const elementCounts = Object.fromEntries([...read.counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])));
+        /**
+         * A list of pairs, not an object keyed by element name, for two reasons that were both
+         * invisible until this ran against a real table.
+         *
+         * Every real SLEIGH table contains `<constructor>` elements, and `constructor` is one of
+         * the three keys canonical() refuses outright — so as an object this result could not be
+         * recorded at all. The whole read of a 490 KB table was lost to OUTPUT_REJECTED naming
+         * only "Unsafe object key: constructor", with nothing to say which field held it. The
+         * synthetic fixture beside it has no constructor element, which is why the suite never saw
+         * this. Names read out of a file must not become object keys — the same rule the reference
+         * resolver and json.mergeShallow already apply.
+         *
+         * And the sort was already dead. Keys were ordered by descending count deliberately, then
+         * canonicalisation re-sorted them lexicographically, so the ordering this line computed
+         * never reached a caller. In an array it survives.
+         */
+        const elementCounts = [...read.counts.entries()]
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+          .map(([element, count]) => ({ element, count }));
         const counts = { spaces: read.spaces.length, sourceFiles: read.sourceFiles.length,
           registers: read.registers.length, userops: read.userops.length, subtables: read.subtables.length,
           constructors: read.counts.get('constructor') ?? 0, inflatedBytes: opened.flat.length, maxDepth: read.maxDepth };

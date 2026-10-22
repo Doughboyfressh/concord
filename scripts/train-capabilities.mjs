@@ -104,7 +104,12 @@ async function buildRegistry(webOrigin) {
     // Exactly the fixture origin, and nothing else: the round can reach its own loopback server
     // and no other host, which is the same statement any operator's policy makes.
     allowedEffects: ['pure', 'read', 'write', 'network', 'process'], allowedOrigins: [webOrigin],
-    maxTasks: 32, maxOutputBytes: 1048576, maxJournalBytes: 16777216, timeoutMs: 60000,
+    // Four megabytes rather than one, because the readers that take a SLEIGH table read it under a
+    // quarter of this budget and Ghidra's real x86-64 table is 490 KB — so a one-megabyte round
+    // could only ever exercise them against fixtures written here. Raising it widens nothing else:
+    // every exercise that exists to meet a bound narrows the policy itself, and narrowing is the
+    // only direction an exercise is permitted to move.
+    maxTasks: 32, maxOutputBytes: 4194304, maxJournalBytes: 16777216, timeoutMs: 60000,
   };
   return { registry, policy, sourceLock, inventory };
 }

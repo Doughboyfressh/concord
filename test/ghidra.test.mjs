@@ -202,7 +202,10 @@ test('a compiled table decodes to the facts the SLEIGH compiler recorded', () =>
   assert.deepEqual(output.registers.map((r) => r.name), ['r0', 'r1', 'PC', 'SP', 'SWI_VECTOR']);
   assert.deepEqual(output.userops.map((u) => u.name), ['toyHalt']);
   assert.deepEqual(output.subtables.map((s) => s.name), ['instruction']);
-  assert.equal(output.elementCounts.sleigh, 1);
+  // A list of pairs rather than an object: element names come out of the file, and every real
+  // SLEIGH table carries one called "constructor", which canonical() refuses as an object key.
+  assert.equal(output.elementCounts.find((entry) => entry.element === 'sleigh').count, 1);
+  assert.doesNotThrow(() => canonical(output), 'the whole result has to be recordable, which it was not while the tally was an object');
 });
 
 test('a big endian table is not read as a little endian one', () => {
