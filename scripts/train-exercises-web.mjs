@@ -164,6 +164,27 @@ export function webExercises(registry) {
         },
         lesson: 'Retrieved inside a plan, a page arrives as a recorded retrieval: the digest of exactly the bytes received, the byte count, the content type, the named reduction that produced the text, the counts of script and style bodies removed, the links resolved against the URL that answered, and an empty redirect chain. The task blocks once for an approval hash bound to the resolved URL, and the journal replays without fetching anything again — which is the difference between a citation and a transcript. The same facts were already proven by calling the tool twice; what a plan adds is that the kernel recorded them, so a later run can be checked against this one rather than against a memory of it.',
       }),
+      {
+        family: 'composition', tool: 'web.fetch', grant: true, expectApprovals: 1,
+        evidenceKey: 'cite-a-retrieval-by-its-digest',
+        plan: { version: 1, name: 'cite-a-retrieval-by-its-digest', tasks: [
+          { id: 'page', tool: 'web.fetch', input: { url: `${origin}/page` } },
+          // The digest of the retrieved bytes becomes the evidence of a claim about them.
+          { id: 'claim', tool: 'memory.candidate', dependsOn: ['page'], input: {
+            lesson: 'The page retrieved for this exercise declared a title and carried one script body.',
+            evidence: [{ $task: 'page', path: '/bodySha256' }, { $task: 'page', path: '/droppedScripts' }],
+          } },
+          { id: 'checked', tool: 'json.assert', dependsOn: ['page'], input: {
+            value: { $task: 'page', path: '/status' }, schema: { const: 200 },
+          } },
+        ] },
+        expect: (r) => r.results.page.bodySha256 === PAGE_DIGEST
+          && r.results.claim.evidenceHashes.length === 2
+          && r.results.claim.candidateHash !== r.results.page.bodySha256
+          && r.results.claim.status === 'proposed'
+          && r.results.checked.passed === true,
+        lesson: 'A retrieval and a claim about it in one plan: the page is fetched under its own approval, the digest of exactly those bytes becomes one of two pieces of evidence on a memory candidate, and the plan refuses to continue unless the status was 200. That is the whole point of recording a retrieval rather than narrating it — the claim is bound to the bytes by hash, so editing either the claim or the page changes the identity of the candidate, and a reader who doubts the claim can re-fetch and compare. The candidate is still proposed rather than executable, so a citation is evidence and never permission.',
+      },
       fetchPlan('fetch-a-missing-page', { url: `${origin}/missing` }, {
         expect: (r) => r.results.a.ok === false && r.results.a.status === 404
           && r.results.a.text === 'no such page' && r.results.a.title === null

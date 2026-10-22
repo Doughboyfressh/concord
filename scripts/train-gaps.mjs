@@ -194,7 +194,19 @@ export function analyseGaps({ root, exercises, registry, observedCodes = new Set
 
   const composed = composedTools(exercises);
   const exercised = new Set(exercises.map((exercise) => exercise.tool));
-  const singleTaskOnly = [...exercised].filter((name) => !composed.has(name)).sort();
+  /**
+   * Only a registry tool can appear in a plan, so only a registry tool can be a composition gap.
+   *
+   * This counted every exercise label, and most of the stragglers it kept reporting were labels
+   * no plan could ever name: factories, engine entry points, value helpers, and the configured
+   * tools a round registers nothing for. Thirty-nine of forty-one were in that class, which made
+   * the number say "the suite is barely composing" when the truth was that it had nearly run out
+   * of composable tools. A denominator containing permanently unreachable entries is the same
+   * mistake the refusal count made with warnings returned as data, fixed the same way.
+   */
+  const addressable = [...exercised].filter((name) => registry?.has?.(name));
+  const singleTaskOnly = addressable.filter((name) => !composed.has(name)).sort();
+  const notAddressable = [...exercised].filter((name) => !registry?.has?.(name)).sort();
 
   return {
     codes: {
@@ -209,7 +221,11 @@ export function analyseGaps({ root, exercises, registry, observedCodes = new Set
       unread: unreadKeys.sort((a, b) => b.missing.length - a.missing.length).slice(0, 25),
       overdeclared,
     },
-    composition: { composed: composed.size, singleTaskOnly: singleTaskOnly.length, examples: singleTaskOnly.slice(0, 20) },
+    composition: {
+      composed: composed.size, addressable: addressable.length,
+      singleTaskOnly: singleTaskOnly.length, examples: singleTaskOnly.slice(0, 20),
+      notAddressable: notAddressable.length,
+    },
   };
 }
 
@@ -225,7 +241,7 @@ export function renderGaps(gaps) {
     '',
     `**Output keys.** ${gaps.outputKeys.asserted}/${gaps.outputKeys.declared} declared output keys are read by some prediction. A key no prediction reads has never been checked against a real run.`,
     '',
-    `**Composition.** ${gaps.composition.composed} tools appear in a plan with more than one task; ${gaps.composition.singleTaskOnly} are exercised only alone. The kernel exists to compose tools, so this is the axis where a high tool count is most misleading.`,
+    `**Composition.** ${gaps.composition.composed} of the ${gaps.composition.addressable} registry tools an exercise names appear in a plan with more than one task; ${gaps.composition.singleTaskOnly === 1 ? 'one is exercised only alone' : gaps.composition.singleTaskOnly + ' are exercised only alone'}. A further ${gaps.composition.notAddressable} exercise labels are not plan-addressable at all - factories, engine entry points, value helpers, and tools a configured adapter would have to register - and are counted separately rather than held against this axis. The kernel exists to compose tools, so this is the axis where a high tool count is most misleading.`,
     '',
   ];
   if (gaps.codes.reachableUnnamed.length) {

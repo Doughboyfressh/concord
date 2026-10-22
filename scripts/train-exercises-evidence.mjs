@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { digest } from '../src/value.mjs';
 
 /**
  * The compositional tools: the ones that take other tools' output as their input.
@@ -34,6 +35,22 @@ const one = (tool, input) => ({ version: 1, name: 't', tasks: [{ id: 'a', tool, 
  */
 export function evidenceExercises() {
   return [
+    {
+      family: 'composition', tool: 'artifact.appleGraph', workspace: 'temp',
+      fixture: (dir) => fs.writeFileSync(path.join(dir, 'notplist.bin'), 'this is not a plist'),
+      plan: { version: 1, name: 'a-refusal-and-a-recall-together', tasks: [
+        { id: 'apple', tool: 'artifact.appleGraph', input: { plist: 'notplist.bin' } },
+        { id: 'recalled', tool: 'memory.recall', input: { query: 'approval grant hash', limit: 3 } },
+        { id: 'pinned', tool: 'json.hash', dependsOn: ['apple'], input: { $task: 'apple', path: '/reason' } },
+      ] },
+      expect: (r) => r.results.apple.supported === false && r.results.apple.reason === 'not_a_plist'
+        && r.results.apple.bundle === null && Array.isArray(r.results.apple.edges)
+        && r.results.recalled.strategy === 'lexical-overlap-v1'
+        && r.results.recalled.corruptedEntries === 0
+        // A refusal is a value, so the reason can be hashed and cited like any other evidence.
+        && r.results.pinned.digest === digest('not_a_plist'),
+      lesson: 'The last two tools that had only ever run alone, composed with the thing that makes a refusal usable: its reason is a value, so it can be hashed and cited like any other evidence. A file that is not a plist comes back supported:false with the reason not_a_plist, a null bundle and an empty edge list rather than a throw, and the digest of that reason is pinned in the same run. Beside it, memory.recall reports its lexical strategy and counts stored entries it could not parse instead of skipping them, so a corrupted lesson is visible rather than quietly absent. Both are reads, so the whole plan costs no approval.',
+    },
     /**
      * The managed-reconstruction pipeline in one plan, with the inputs each stage proves alone.
      *

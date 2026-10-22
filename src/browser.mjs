@@ -81,23 +81,35 @@ export async function discoverPageTarget(port, signal, deadline = Date.now() + P
    * runs it made this the flakiest step in the suite — measured, as an automate exercise failing
    * perhaps one round in four. An unguarded await also let that failure escape as a raw TypeError
    * rather than a BROWSER_CDP refusal, so a caller catching HarnessError saw nothing at all.
-   * A response the browser did send is never retried: a malformed target list is its answer.
+   * A response the browser did send is never retried: a malformed target list is its answer. The
+   * one exception is a *well-formed* list with no page target yet, which is the same race one step
+   * later - the endpoint is answering and the page has not been created - so that is retried too.
+   * The "no inspectable page target" refusal now means the deadline passed without one appearing.
    */
+  let page;
   for (;;) {
     if (signal?.aborted) fail('BROWSER_ABORTED', 'Browser snapshot was cancelled');
-    try { response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal }); break; }
+    const expired = () => Date.now() >= deadline;
+    const wait = () => new Promise((resolve) => setTimeout(resolve, PORT_POLL_INTERVAL_MS));
+    try { response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal }); }
     catch {
-      if (Date.now() >= deadline) fail('BROWSER_CDP', 'Browser DevTools endpoint never accepted a connection');
-      await new Promise((resolve) => setTimeout(resolve, PORT_POLL_INTERVAL_MS));
+      if (expired()) fail('BROWSER_CDP', 'Browser DevTools endpoint never accepted a connection');
+      await wait();
+      continue;
     }
+    if (!response.ok) fail('BROWSER_CDP', 'Browser DevTools target list request failed');
+    let targets;
+    try { targets = parseJson(await response.text()); }
+    catch { fail('BROWSER_CDP', 'Browser DevTools target list was not strict JSON'); }
+    if (!Array.isArray(targets)) fail('BROWSER_CDP', 'Browser DevTools target list had an unexpected shape');
+    page = targets.find((t) => t && typeof t === 'object' && t.type === 'page' && typeof t.webSocketDebuggerUrl === 'string');
+    if (page) break;
+    // An empty list is the second half of the same race: the endpoint is up and answering, and
+    // the page target has not been created yet. Retried for the same reason and under the same
+    // deadline, while a list that is malformed or not JSON is still refused on the first answer.
+    if (expired()) fail('BROWSER_CDP', 'Browser has no inspectable page target');
+    await wait();
   }
-  if (!response.ok) fail('BROWSER_CDP', 'Browser DevTools target list request failed');
-  let targets;
-  try { targets = parseJson(await response.text()); }
-  catch { fail('BROWSER_CDP', 'Browser DevTools target list was not strict JSON'); }
-  if (!Array.isArray(targets)) fail('BROWSER_CDP', 'Browser DevTools target list had an unexpected shape');
-  const page = targets.find((t) => t && typeof t === 'object' && t.type === 'page' && typeof t.webSocketDebuggerUrl === 'string');
-  if (!page) fail('BROWSER_CDP', 'Browser has no inspectable page target');
   let url;
   try { url = new URL(page.webSocketDebuggerUrl); } catch { fail('BROWSER_CDP', 'Browser returned an invalid DevTools WebSocket URL'); }
   if (url.protocol !== 'ws:' || !loopbackHostname(url.hostname)) fail('BROWSER_CDP', 'Browser DevTools WebSocket endpoint is not loopback');
