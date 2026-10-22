@@ -273,7 +273,10 @@ export function exercises(inventory, registry) {
     {
       family: 'skills', tool: 'skills.installed', workspace: 'temp',
       plan: { version: 1, name: 't', tasks: [{ id: 'a', tool: 'skills.installed', input: {} }] },
-      expect: (r) => r.results.a.count === 0 && Array.isArray(r.results.a.installed),
+      expect: (r) => r.results.a.count === 0 && Array.isArray(r.results.a.installed)
+        // The disclosure is present even when the store is empty: unavailable upstream means the
+        // source tree is not in this workspace, which is not the same as gone.
+        && r.results.a.limitations.some((note) => note.includes('not that it is gone')),
       lesson: 'skills.installed reads an empty store as empty rather than failing, and separates a changed local copy from a changed upstream so a local edit is never reported as an update.',
     },
 

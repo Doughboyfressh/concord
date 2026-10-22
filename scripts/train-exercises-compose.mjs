@@ -115,6 +115,19 @@ export function composeExercises() {
           && r.results.imports.imports.length === 2
           && r.results.imports.counts.import === 2
           && r.results.scripts.scripts.length === 2
+          // One external script and one inline, neither a module, neither carrying integrity -
+          // counted by kind, because "two scripts" is the least useful thing to know about a page.
+          && r.results.scripts.counts.total === 2 && r.results.scripts.counts.external === 1
+          && r.results.scripts.counts.inline === 1 && r.results.scripts.counts.modules === 0
+          && r.results.scripts.counts.withIntegrity === 0
+          // A bundle with no sourceMappingURL comment reports null rather than guessing at a
+          // sibling .map file, which would be a claim about a file nobody read.
+          && r.results.bundle.sourceMappingUrl === null
+          // An application is edges as well as modules: one import, from the entry to its helper.
+          && r.results.application.edges.length === 1
+          && r.results.application.edges[0].from === 'entry.js'
+          && r.results.application.edges[0].to === 'helper.js'
+          && r.results.application.edges[0].kind === 'import'
           && r.results.firmware.regions.length === 1
           && r.results.wasm.entries.length === 0 && r.results.wasm.state === 'complete'
           // A region reports the digest of the slice as well as of the file it came from.
@@ -265,7 +278,10 @@ export function composeExercises() {
       ] },
       expect: (r) => r.results.c.summary.added === 1 && r.results.c.summary.removed === 1
         && r.results.c.summary.unchanged === 1
-        && r.results.l.exports.length === 2 && r.results.c.changes.length === 3,
+        && r.results.l.exports.length === 2 && r.results.c.changes.length === 3
+        // Unchanged means the name and kind are the same, and the comparison says so itself: a
+        // const whose value changed is reported as unchanged, because nothing here reads values.
+        && r.results.c.limitations.some((note) => note.includes('changed value or signature behind the same name')),
       lesson: 'Two artifact.jsExports scans feed artifact.compareJsExports through /exports pointers in one plan, so the comparison is computed from bytes this run actually read rather than from a summary someone typed in. A JSON pointer selects part of an upstream output, which is what lets a tool expecting a narrow shape consume a tool that returns a wide one.',
     },
     {
@@ -298,7 +314,7 @@ export function composeExercises() {
       ] },
       expect: (r) => r.results.r.text.includes(r.results.h.digest)
         && typeof r.results.r.sha256 === 'string' && r.results.r.untrusted === true
-        && r.results.r.bytes > 0,
+        && r.results.r.bytes > 0 && r.results.r.path === 'derived.json',
       lesson: 'A pure result can be written and read back within one plan, and the file that comes back is still marked untrusted with its own digest reported. Content this run computed itself is given no more standing than content found on disk, because the tool that reads a file cannot know who wrote it.',
     },
 

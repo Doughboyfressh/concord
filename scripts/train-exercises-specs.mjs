@@ -106,6 +106,7 @@ const declaringFixture = (dir) => write(dir, 'declaring.slaspec', DECLARING_SLAS
 const plistFixture = (dir) => write(dir, 'Info.plist', INFO_PLIST);
 const jsFixture = (dir) => write(dir, 'semantics.mjs', JS_MODULE);
 const pspecFixture = (dir) => copyReal(dir, 'x86-64.pspec');
+const cspecFixture = (dir) => copyReal(dir, 'x86-64-win.cspec');
 const compiledFixture = (dir) => copyReal(dir, 'x86-64.sla');
 const comparisonFixture = (dir) => { copyReal(dir, 'x86-64.sla'); copyReal(dir, 'x86.slaspec'); };
 const assemblyFixture = (dir) => {
@@ -148,6 +149,17 @@ export function specExercises() {
         && r.results.a.contextFields.some((field) => field.name === 'addrsize' && field.value === 2)
         && r.results.a.limitations.length === 1,
       lesson: 'A processor spec is where the facts a disassembler needs before it can read a single byte are written down: which register is the program counter, what the context fields start at, and 201 named registers with their groups. The context default this reader reports is the same addrsize=2 that an x86-64 decode has to be given by hand - so the spec and the decoder agree on paper, and the exercise that reads both is what makes that checkable. memoryBlocks is empty here and that is a fact about x86-64 rather than a gap: a spec that declared memory would be describing a device.',
+    },
+    {
+      family: 'specs', tool: 'artifact.ghidraCompilerSpec', workspace: 'temp', fixture: cspecFixture,
+      plan: one('artifact.ghidraCompilerSpec', { path: 'x86-64-win.cspec' }),
+      expect: (r) => r.results.a.supported === true
+        && r.results.a.callFixups.length === 3
+        && r.results.a.callFixups.every((entry) => entry.kind === 'callfixup' && typeof entry.name === 'string')
+        && r.results.a.callFixups.some((entry) => entry.name === 'alloca_probe' && entry.targets.length === 5)
+        && r.results.a.callFixups.some((entry) => entry.name === 'guard_dispatch_icall')
+        && r.results.a.callFixups.some((entry) => entry.name === 'security_check_cookie'),
+      lesson: 'A compiler spec declares the call fixups a decompiler must apply, and the Windows x86-64 spec names three: the stack probe, the control-flow-guard dispatch, and the security cookie check. Each lists the symbols it applies to - alloca_probe covers five, because the same probe ships under five names across compiler versions. These matter more than their obscurity suggests: a decompilation that did not elide a stack probe would show it as a real call in every function that allocates, and the reader that can list them is what makes checking that possible.',
     },
     {
       family: 'specs', tool: 'artifact.sleighCompiled', workspace: 'temp', fixture: compiledFixture,

@@ -45,6 +45,9 @@ export function evidenceExercises() {
       ] },
       expect: (r) => r.results.apple.supported === false && r.results.apple.reason === 'not_a_plist'
         && r.results.apple.bundle === null && Array.isArray(r.results.apple.edges)
+        // Empty rather than absent: a reader that parsed nothing has no bound to disclose, and
+        // the key is still there so a caller never branches on whether it exists.
+        && r.results.apple.limitations.length === 0
         && r.results.recalled.strategy === 'lexical-overlap-v1'
         && r.results.recalled.corruptedEntries === 0
         // A refusal is a value, so the reason can be hashed and cited like any other evidence.
@@ -161,6 +164,11 @@ export function evidenceExercises() {
           && r.results.view.summary.dangling === 1 && r.results.view.summary.distinctIds === 2
           && r.results.versions.summary.added === 1 && r.results.versions.summary.removed === 1
           && r.results.versions.summary.unchanged === 1
+          // Keyed by kind and name, so a shared name with no digest on both sides is "present"
+          // rather than "unchanged" - the comparison says which of the two it is able to claim.
+          && r.results.versions.limitations.some((note) => note.includes('shared name is reported as present'))
+          // And the trace carries the feature it was asked about, beside what it matched.
+          && r.results.feature.feature === 'login'
           && r.results.coverage.status === 'covered' && r.results.coverage.counts.obligations === 1
           && r.results.coverage.reasons.length === 0
           && r.results.feature.matches.length === 2 && r.results.feature.summary.scanned === 3
