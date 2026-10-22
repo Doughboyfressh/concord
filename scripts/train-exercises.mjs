@@ -263,6 +263,30 @@ export function exercises(inventory, registry) {
       expect: (r) => r.outcome.status === 'completed' && r.results.a.sha256 === skill.sourceSha256,
       lesson: 'skills.install verifies a file against the digest the inventory recorded before copying it, so an adopted skill is provably the reviewed bytes rather than whatever happens to be on disk now.',
     }, {
+      family: 'composition', tool: 'judgment.gate', workspace: 'temp', needsCorpus: skill.path,
+      fixture: (dir) => write(dir, 'a.map', JSON.stringify({ version: 3, file: 'out.js', sources: ['a.js'], names: [], mappings: 'AAAA' })),
+      plan: { version: 1, name: 'six-reads-and-judgements-together', tasks: [
+        { id: 'gate', tool: 'judgment.gate', input: { score: 0.9, threshold: 0.8, evidence: { why: 'a composed training exercise' } } },
+        { id: 'hooks', tool: 'hooks.evaluate', input: {
+          rules: [{ id: 'warn-reads', decision: 'warn', reason: 'a read still sees untrusted bytes', when: { effect: 'read' } }],
+          event: { tool: 'artifact.sourceMap', effect: 'read', input: { path: 'a.map' } },
+        } },
+        { id: 'lessons', tool: 'instructions.lesson', input: { ids: ['nothing:such-lesson'] } },
+        { id: 'foreign', tool: 'foreign.catalog', input: {} },
+        { id: 'map', tool: 'artifact.sourceMap', input: { path: 'a.map' } },
+        { id: 'snapshot', tool: 'skills.snapshot', input: { path: skill.path, sourceId: skill.sourceId } },
+      ] },
+      expect: (r) => r.results.gate.accepted === true && r.results.gate.grantsCapabilities === false
+        && r.results.hooks.decision === 'warn' && r.results.hooks.matched.length === 1
+        && r.results.lessons.requested === 1 && r.results.lessons.returned === 0
+        && r.results.lessons.missing.length === 1
+        && r.results.foreign.grantsCapabilities === false && r.results.foreign.availableNow === 0
+        && r.results.map.supported === true && r.results.map.path === 'a.map'
+        && r.results.map.sources.length === 1 && r.results.map.mappingCount >= 1
+        && r.results.map.untrusted === true
+        && r.results.snapshot !== undefined,
+      lesson: 'Six reads and judgements in one plan, which is the turn a session actually takes before proposing anything: a score checked against a threshold, a rule set consulted about the read that is about to happen, a lesson looked up by id, a catalogue of tools that are not installed here, a source map parsed, and a reviewed skill snapshotted. Not one of them needs an approval and not one of them grants anything — the gate says grantsCapabilities:false in the same breath as accepting, the catalogue says it while listing, and the hook warns without stopping. That is the shape of everything a plan can establish before it asks for authority, and establishing it first is what makes a later blocked effect cheap to review: the evidence behind the request already exists and is already hashed.',
+    }, {
       family: 'composition', tool: 'skills.installed', grant: true, workspace: 'temp', expectApprovals: 2, needsCorpus: skill.path,
       plan: { version: 1, name: 'adopt-list-and-drop-a-skill', tasks: [
         { id: 'adopt', tool: 'skills.install', input: { id: skill.id } },

@@ -12,6 +12,9 @@ const DEFAULT_TIMEOUT = 30_000;
 const DEFAULT_OUTPUT = 1_048_576;
 const MAX_SNAPSHOT_CHARS = 200_000;
 const PORT_POLL_INTERVAL_MS = 50;
+// How long discoverPageTarget keeps trying a connection the browser has not opened yet, when no
+// caller deadline is supplied. The session path passes its own, which is always the tighter bound.
+const PORT_READY_WINDOW_MS = 2000;
 
 function fail(code, message) { throw new HarnessError(code, message); }
 function text(value, label) {
@@ -67,14 +70,27 @@ async function waitForDevToolsPort(portFile, deadline, signal) {
 }
 
 /** Exported for direct unit testing of the loopback re-verification; not part of the tool contract. */
-export async function discoverPageTarget(port, signal) {
+export async function discoverPageTarget(port, signal, deadline = Date.now() + PORT_READY_WINDOW_MS) {
   let response;
-  // Guarded because an unguarded await let a transport failure escape as a raw TypeError rather
-  // than a BROWSER_CDP refusal — so a caller catching HarnessError saw nothing at all, and the
-  // training exercise that calls this twice reported "BROWSER_CDP then no refusal" at random.
-  // A browser that is not listening is the same kind of fact as one that answers with nonsense.
-  try { response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal }); }
-  catch { fail('BROWSER_CDP', 'Browser DevTools target list could not be fetched'); }
+  /**
+   * Retried on a transport failure, refused on anything the browser actually answered.
+   *
+   * Chromium writes DevToolsActivePort before its HTTP endpoint is necessarily accepting
+   * connections, so the first fetch after the port appears can be refused by the socket on a
+   * loaded machine. Failing then is wrong twice over: the browser is fine, and under repeated
+   * runs it made this the flakiest step in the suite — measured, as an automate exercise failing
+   * perhaps one round in four. An unguarded await also let that failure escape as a raw TypeError
+   * rather than a BROWSER_CDP refusal, so a caller catching HarnessError saw nothing at all.
+   * A response the browser did send is never retried: a malformed target list is its answer.
+   */
+  for (;;) {
+    if (signal?.aborted) fail('BROWSER_ABORTED', 'Browser snapshot was cancelled');
+    try { response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal }); break; }
+    catch {
+      if (Date.now() >= deadline) fail('BROWSER_CDP', 'Browser DevTools endpoint never accepted a connection');
+      await new Promise((resolve) => setTimeout(resolve, PORT_POLL_INTERVAL_MS));
+    }
+  }
   if (!response.ok) fail('BROWSER_CDP', 'Browser DevTools target list request failed');
   let targets;
   try { targets = parseJson(await response.text()); }
@@ -316,7 +332,7 @@ async function launchBrowserSession(settings, bound, context, run) {
       waitForDevToolsPort(join(profileDir, 'DevToolsActivePort'), deadline, context?.signal),
       started,
     ]);
-    const wsUrl = await discoverPageTarget(port, context?.signal);
+    const wsUrl = await discoverPageTarget(port, context?.signal, deadline);
     result = await run(wsUrl, deadline);
     const text = JSON.stringify(result);
     if (Buffer.byteLength(text) > bound.maxOutputBytes) fail('BROWSER_OUTPUT_LIMIT', 'Browser result exceeds the output byte limit');

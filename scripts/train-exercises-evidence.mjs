@@ -34,6 +34,112 @@ const one = (tool, input) => ({ version: 1, name: 't', tasks: [{ id: 'a', tool, 
  */
 export function evidenceExercises() {
   return [
+    /**
+     * The managed-reconstruction pipeline in one plan, with the inputs each stage proves alone.
+     *
+     * These three are one workflow: what changed between two member sets, which reconstructed
+     * members the observed artifact actually declares, and whether the native modules a managed
+     * assembly imports are present. A caller reconstructing a .NET assembly runs all three, and
+     * the honest answer at each stage is a refusal to over-claim — a changed attribute is shown
+     * with both lists rather than judged, an invented member is rejected rather than accepted on
+     * plausibility, and a resolved module means the file was there and explicitly not that the
+     * named export exists inside it.
+     */
+    {
+      family: 'composition', tool: 'artifact.importManagedReconstruction',
+      plan: { version: 1, name: 'the-managed-reconstruction-pipeline', tasks: [
+        { id: 'members', tool: 'artifact.compareManagedMembers', input: {
+          left: { members: [{ declaringType: 'T', name: 'attrs', kind: 'method', attributes: ['public'] }] },
+          right: { members: [{ declaringType: 'T', name: 'attrs', kind: 'method', attributes: ['private'] }] },
+        } },
+        { id: 'imported', tool: 'artifact.importManagedReconstruction', input: {
+          observed: { members: [{ declaringType: 'T', name: 'real', kind: 'method' }, { declaringType: 'T', name: 'alsoReal', kind: 'field' }] },
+          reconstruction: [
+            { declaringType: 'T', name: 'real', kind: 'method', source: 'void real() {}' },
+            { declaringType: 'T', name: 'invented', kind: 'method', source: 'void invented() {}' },
+            { declaringType: 'T', name: 'alsoReal', kind: 'method', source: 'wrong kind' },
+          ],
+        } },
+        { id: 'boundaries', tool: 'artifact.verifyManagedNativeBoundaries', input: {
+          boundaries: [
+            { importName: 'ok', module: 'present.dll', moduleResolved: true },
+            { importName: 'absent', module: 'missing.dll', moduleResolved: true },
+            { importName: 'unresolved', module: null, moduleResolved: false },
+          ],
+          available: ['present.dll'],
+        } },
+        { id: 'owed', tool: 'artifact.obligationLedger', input: {
+          facts: [{ id: 'o1', subject: 'every reconstructed member is declared by the artifact', kind: 'static', required: true }],
+          verifiers: [{ obligationIds: ['o1'], result: 'pass', authority: 'inferred', evidenceIds: ['from-the-import-stage'] }],
+        } },
+      ] },
+      expect: (r) => r.results.members.summary.changed === 1
+        && r.results.members.changes[0].state === 'changed'
+        && r.results.imported.accepted.length === 1 && r.results.imported.rejected.length === 2
+        && r.results.imported.summary.coverage === 0.5
+        && r.results.imported.rejected.every((entry) => /declares no such member/.test(entry.reason))
+        && r.results.boundaries.summary.satisfied === 1 && r.results.boundaries.summary.missing === 1
+        && r.results.boundaries.summary.unknown === 1
+        && r.results.boundaries.limitations.some((note) => /not that the named export exists/.test(note))
+        // And the ledger refuses to close on an inferred verifier, which is the whole pipeline's
+        // posture in one field: half the members were covered, so nothing here is settled.
+        && r.results.owed.obligations[0].status === 'open'
+        && r.results.owed.summary.closed === 0,
+      lesson: 'The managed-reconstruction pipeline as one plan: compare two member sets, check a reconstruction against what the artifact actually declares, verify the native modules it imports, and ask the ledger what is still owed. Every stage refuses to over-claim in its own way — a changed attribute is reported with both lists rather than adjudicated, a member nobody observed is rejected rather than accepted because it looks plausible, a resolved module means the file was present and explicitly not that the named export exists in it, and the ledger leaves its obligation open because the verifier that would close it carries only inferred authority. Coverage of 0.5 with two rejections is the useful answer here: a reconstruction that imported everything offered would have reported total success and told a caller nothing.',
+    },
+    /**
+     * Four pure evidence tools in one plan, with the same inputs each proves alone below.
+     *
+     * They belong together because they answer four parts of one question — is this record set
+     * internally consistent, what changed between two versions, is this boundary covered, and
+     * where might a feature live — and a caller reviewing a reconstruction asks all four. Run
+     * together they also demonstrate what every one of them says separately: a pure tool reaches
+     * nothing, so all four can establish consistency and none of them can establish authenticity.
+     */
+    {
+      family: 'composition', tool: 'artifact.analysisView',
+      plan: { version: 1, name: 'four-pure-evidence-tools', tasks: [
+        { id: 'view', tool: 'artifact.analysisView', input: {
+          view: { records: [
+            { id: 'r1', kind: 'export', source: 'a.js', sha256: DIGEST_A, authority: 'replay' },
+            { id: 'r2', kind: 'export', source: 'a.js', authority: 'inferred' },
+            { id: 'r1', kind: 'import', source: 'b.js', authority: 'observed' },
+          ] },
+          references: ['r1', 'r404'],
+        } },
+        { id: 'versions', tool: 'artifact.compareApplicationVersions', input: {
+          left: { version: '1', entries: [{ name: 'same', sha256: DIGEST_A }, { name: 'gone', sha256: DIGEST_B }] },
+          right: { version: '2', entries: [{ name: 'same', sha256: DIGEST_A }, { name: 'added', sha256: DIGEST_B }] },
+        } },
+        { id: 'coverage', tool: 'artifact.reconstructionCoverage', input: {
+          boundaryId: 'B',
+          obligations: [{ id: 'a', status: 'closed', boundaryId: 'B' }, { id: 'z', status: 'closed', boundaryId: 'OTHER' }],
+          observations: [{ obligationId: 'a', authority: 'replay' }],
+        } },
+        { id: 'feature', tool: 'artifact.traceFeature', input: {
+          feature: 'login',
+          inventory: { version: '1', entries: [
+            { name: 'LoginController', kind: 'class', source: 'auth/login.js' },
+            { name: 'handleLogin', kind: 'function', source: 'auth/login.js' },
+            { name: 'unrelated', kind: 'function', source: 'other.js' },
+          ] },
+          limit: 10,
+        } },
+      ] },
+      expect: (r) => {
+        const issues = r.results.view.issues.map((issue) => issue.issue);
+        return issues.includes('duplicate-id-different-digest') && issues.includes('no-digest')
+          && issues.includes('reference-not-in-view')
+          && r.results.view.summary.dangling === 1 && r.results.view.summary.distinctIds === 2
+          && r.results.versions.summary.added === 1 && r.results.versions.summary.removed === 1
+          && r.results.versions.summary.unchanged === 1
+          && r.results.coverage.status === 'covered' && r.results.coverage.counts.obligations === 1
+          && r.results.coverage.reasons.length === 0
+          && r.results.feature.matches.length === 2 && r.results.feature.summary.scanned === 3
+          && r.results.feature.summary.allTermsMatched === true;
+      },
+      lesson: 'Four pure evidence tools in one plan: the record set is checked against itself and each problem named separately, two inventory versions are separated into added, removed and unchanged, a boundary is covered only because every obligation scoped to it is closed and backed by a replay observation, and a feature term is matched against names and paths to produce candidates. One run answers the four questions a caller reviewing a reconstruction actually has. All four also agree about their own limit: a pure tool reaches nothing, so each can establish internal consistency and none can establish authenticity, which is why coverage requires a replay observation rather than accepting a closure on its own word.',
+    },
     {
       family: 'evidence', tool: 'judgment.gate', expectCode: 'JUDGMENT_REJECTED', workspace: 'temp',
       plan: one('judgment.gate', { score: 0.2, threshold: 0.9, evidence: { sample: 'thin' } }),
