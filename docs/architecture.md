@@ -77,6 +77,18 @@ are idempotent by construction — `schedule.declare` replacing by id, `memory.p
 the path its own content digest names. A plan with a single effect is unaffected: it blocks before
 executing anything and the granted run performs it exactly once.
 
+The chat layer refuses the problem outright rather than meeting it: a proposal carrying more than
+one approval-requiring task is rejected `PLAN_UNEXECUTABLE`, with the reason stated in the message
+and the offending tools named. **So a long job is a chain of single-effect plans**, and the schedule
+store is what joins them: a stage declares its successor as data, the next stage is found by asking
+`schedule.due` rather than handed along in memory, and the plan that comes back is pinned by the
+digest the earlier stage recorded. A job in that shape survives the process ending between any two
+stages, needs one approval per stage, and never reaches `EFFECT_INDETERMINATE`. The cost is stated
+plainly: three stages means three approvals and three runs, and nothing advances a stage by itself,
+because there is no daemon and being due is a statement about a time the caller supplied rather
+than an event that fired. `scripts/train-exercises-horizon.mjs` runs exactly that three-stage job
+each round.
+
 With `--journal`, the kernel exclusively creates a JSONL sink and fsyncs the header and each event. The CLI reserves the final run file before effects. A crash may leave an empty envelope and a partial intent log. Partial logs are forensic evidence; replay accepts complete settled envelopes only. Automatic retry/resume of interrupted effects is absent. Future durable retries need idempotency keys and reconciliation.
 
 ## Chat context and review

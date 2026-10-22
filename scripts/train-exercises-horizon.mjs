@@ -54,6 +54,31 @@ const LEDGER_INPUT = {
 
 /** Counts invocations of the journal exercise, which the runner calls twice to check determinism. */
 let attempt = 0;
+/** The same, for the three-stage job below, whose stages write files and so cannot repeat a name. */
+let job = 0;
+
+const STAGE_TWO_AT = '2027-02-01T00:00:00Z';
+const STAGE_THREE_AT = '2027-03-01T00:00:00Z';
+
+/**
+ * A long job as the design actually permits one: a chain of single-effect plans.
+ *
+ * A plan may carry at most one task needing approval — the session layer refuses more with
+ * PLAN_UNEXECUTABLE, and the kernel exercise above shows why — so a job with three effects cannot
+ * be one plan. It is three, and the only thing joining them is the schedule store: each stage
+ * declares its successor as data, and the next stage is *discovered* from the store rather than
+ * handed over by whoever ran the first one. That is the shape a long-horizon job has here, and it
+ * is what these builders describe.
+ */
+const stageThree = (id) => ({ version: 1, name: 'stage-three', tasks: [
+  { id: 'done', tool: 'files.write', input: { path: `horizon-job-${id}.json`, content: { job: id, stage: 3 } } },
+] });
+const stageTwo = (id) => ({ version: 1, name: 'stage-two', tasks: [
+  { id: 'declare-three', tool: 'schedule.declare', input: { id: `job-${id}-stage-3`, dueAt: STAGE_THREE_AT, plan: stageThree(id) } },
+] });
+const stageOne = (id) => ({ version: 1, name: 'stage-one', tasks: [
+  { id: 'declare-two', tool: 'schedule.declare', input: { id: `job-${id}-stage-2`, dueAt: STAGE_TWO_AT, plan: stageTwo(id) } },
+] });
 
 export function horizonExercises() {
   return [
@@ -109,6 +134,63 @@ export function horizonExercises() {
         { id: 'b', tool: 'files.write', dependsOn: ['a'], input: { path: 'horizon-second.json', content: { n: 2 } } },
       ] },
       lesson: 'A plan with two non-idempotent effects cannot be completed by granting one approval at a time, and the kernel says so with EFFECT_INDETERMINATE rather than quietly applying the first effect twice. The sequence is forced: the first run blocks before executing anything, the second run performs the first write and blocks on the second, and the third run — which now carries both grants — reaches the first write again and finds the world already changed. files.write creates exclusively and never replaces, so its outcome cannot be re-established, and the honest answer is that this effect\'s state is indeterminate. There is no way around it by collecting every hash up front, because a request hash binds the resolved input and a later task\'s input may depend on an earlier task\'s output, which does not exist until that earlier effect has run. So a long-horizon plan either keeps to a single effect per run, or its effects are idempotent by construction — replacing a schedule by id, promoting a lesson to the path its own digest names — and this is the sharpest reason the write tools in this harness are built that way rather than as appends.',
+    },
+    {
+      family: 'horizon', tool: 'schedule.declare', workspace: 'temp',
+      /**
+       * Three runs, not one plan, because the design does not allow the one plan — and the point
+       * is that this works, cleanly, with one approval each and nothing held in memory between
+       * them. A call rather than a plan exercise because the stages are separate runs by
+       * definition; a plan exercise can only describe a single run.
+       */
+      call: async ({ registry, policy, sourceLock, workspaceRoot }) => {
+        job += 1;
+        const id = String(job);
+        const grants = [];
+        const runOnce = async (plan) => {
+          let result = await runPlan({ plan, policy, registry, sourceLock, approvals: [], workspaceRoot });
+          const approvals = [];
+          while (result.outcome.status === 'blocked' && approvals.length < 4) {
+            approvals.push(result.outcome.requestHash);
+            result = await runPlan({ plan, policy, registry, sourceLock, approvals, workspaceRoot });
+          }
+          grants.push(approvals.length);
+          return result;
+        };
+        const due = async (now) => {
+          const read = await runPlan({
+            plan: { version: 1, name: 'what-is-due', tasks: [{ id: 'd', tool: 'schedule.due', input: { now } }] },
+            policy, registry, sourceLock, approvals: [], workspaceRoot,
+          });
+          return read.results.d.due;
+        };
+
+        const first = await runOnce(stageOne(id));
+        // Nothing is carried forward in a variable: the next stage is looked up in the store.
+        const afterOne = (await due(STAGE_TWO_AT)).find((entry) => entry.id === `job-${id}-stage-2`);
+        const second = afterOne ? await runOnce(afterOne.plan) : null;
+        const afterTwo = (await due(STAGE_THREE_AT)).find((entry) => entry.id === `job-${id}-stage-3`);
+        const third = afterTwo ? await runOnce(afterTwo.plan) : null;
+
+        return {
+          statuses: [first, second, third].map((result) => result?.outcome.status ?? 'never-ran').join('>'),
+          grants: grants.join(','),
+          // Each stage's declaration pinned the next stage's plan by digest, and what came back
+          // out of the store hashes to the same thing.
+          twoDiscovered: afterOne?.planHash === digest(stageTwo(id)),
+          threeDiscovered: afterTwo?.planHash === digest(stageThree(id)),
+          declaredTwo: first?.results?.['declare-two']?.id === `job-${id}-stage-2`,
+          declaredThree: second?.results?.['declare-three']?.id === `job-${id}-stage-3`,
+          wrote: third?.results?.done?.created === true && third?.results?.done?.path === `horizon-job-${id}.json`,
+          // Nothing ever needed a second grant, which is the whole reason this shape works.
+          everTwoGated: grants.some((count) => count > 1),
+        };
+      },
+      expect: (r) => r.statuses === 'completed>completed>completed'
+        && r.grants === '1,1,1' && r.everTwoGated === false
+        && r.twoDiscovered === true && r.threeDiscovered === true
+        && r.declaredTwo === true && r.declaredThree === true && r.wrote === true,
+      lesson: 'This is what a long job looks like when a plan may hold at most one approval: three plans, one effect and one grant each, joined only by the schedule store. Stage one declares stage two as data; stage two is then found by asking what is due rather than being passed along, and running it declares stage three; stage three writes the file. Nothing is held in a variable between stages, so the job survives the process ending between any two of them — the store is the continuity, and the plan to run next is in it, pinned by a digest that matches what the earlier stage declared. No stage ever needed a second grant, which is exactly why the chain works where a single three-effect plan would have reached EFFECT_INDETERMINATE on its second approval. The cost is honest and worth stating: a three-stage job needs three approvals and three runs, and nothing advances it on its own, because there is no daemon here and being due is a statement rather than an event.',
     },
     {
       family: 'horizon', tool: 'artifact.obligationLedger',
