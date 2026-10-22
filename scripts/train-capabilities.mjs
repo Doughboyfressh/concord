@@ -22,7 +22,7 @@ import { makeWebTools } from '../src/web.mjs';
 import { makeBuildTools } from '../src/build.mjs';
 import { exercises } from './train-exercises.mjs';
 import { updateInstructions, verifyCorpus } from './train-consolidate.mjs';
-import { analyseGaps, renderGaps, observeAssertedKeys } from './train-gaps.mjs';
+import { analyseGaps, renderGaps, observeAssertedKeys, declaredCodes } from './train-gaps.mjs';
 import { CONTRACTS } from './train-exercises-derived.mjs';
 import { webFixtureHandler, enginesOn } from './train-exercises-web.mjs';
 import { trainingTargets as buildTargets } from './train-exercises-build.mjs';
@@ -165,6 +165,31 @@ async function main() {
   const findings = [];
   // A refusal code is only known to be reachable from a plan once a run has actually raised one.
   const observedCodes = new Set();
+  /**
+   * Codes a result *carries*, as against codes a call threw.
+   *
+   * The round could only ever see a refusal that was thrown to it, and that made the frontier
+   * wrong by construction for every code this system deliberately turns into data. The hub
+   * converts a registration failure into a denial frame holding a message; a search engine that
+   * fails becomes a row with its own code beside the engines that answered; the desktop server
+   * answers an HTTP request with a status and a code in the body. All three are measured
+   * behaviour, none of them throws, and the scanner counts every one of them as declared - so
+   * nine server codes and WEB_SECRET sat on the list of things no run had reached while runs
+   * were reaching them every time.
+   *
+   * The remedy is a measurement rather than a declaration: scan what the result actually
+   * contained and keep the strings the source is known to raise. An exercise cannot talk its way
+   * onto this list - a code counts only if a real result carried it - and intersecting with the
+   * declared set is what keeps GET, MZ and SHA256 out.
+   */
+  const raisable = new Set(declaredCodes(root).keys());
+  const observeCarried = (value) => {
+    let text;
+    try { text = canonical(value); } catch { return; }
+    const shape = /[A-Z][A-Z0-9_]{2,}/g;
+    let match;
+    while ((match = shape.exec(text)) !== null) if (raisable.has(match[0])) observedCodes.add(match[0]);
+  };
   // tool -> output keys some prediction was observed reading, accumulated across the round.
   const assertedByTool = new Map();
   // tool -> output keys a real result actually contained this round.
@@ -272,6 +297,7 @@ async function main() {
         const held = (() => { try { return Boolean(exercise.expect(first)); } catch { return false; } })();
         const stable = canonical(first) === canonical(second);
         if (held && stable) {
+          observeCarried(first);
           credit(exercise, { tool: exercise.tool, call: exercise.tool, outcome: 'returned', provenBy: 'direct-call-twice-identical' });
         } else {
           findings.push({
@@ -339,6 +365,9 @@ async function main() {
     if (failure?.data?.toolCode) observedCodes.add(failure.data.toolCode);
     if (failure?.data?.code) observedCodes.add(failure.data.code);
     if (result.outcome.code) observedCodes.add(result.outcome.code);
+    // Only the task outputs, never the plan or its input: an exercise that names a code in its
+    // own input would otherwise credit itself with reaching something it merely mentioned.
+    observeCarried(result.results);
     const held = (() => {
       try {
         if (exercise.expectCode) {

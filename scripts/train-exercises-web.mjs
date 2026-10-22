@@ -69,6 +69,16 @@ export function webFixtureHandler(request, response) {
   if (pathname === '/alpha') { json(ALPHA); return; }
   if (pathname === '/beta') { json(BETA); return; }
   if (pathname === '/notjson') { response.writeHead(200, { 'content-type': 'application/json' }); response.end('<html>not json at all</html>'); return; }
+  // Headers and part of a declared hundred bytes, then the socket goes away: the shape of a
+  // retrieval that fails after it looked like it was working.
+  if (pathname === '/abort') {
+    response.writeHead(200, { 'content-type': 'text/plain', 'content-length': '100' });
+    response.write('partial');
+    setTimeout(() => response.socket?.destroy(), 10);
+    return;
+  }
+  // Accepts the request and answers nothing at all, which only a deadline can end.
+  if (pathname === '/stall') return;
   if (pathname === '/echo') { json({ results: [{ url: 'https://example.com/leak', title: `the token is ${TOKEN}`, snippet: '' }] }); return; }
   response.writeHead(503, { 'content-type': 'text/plain' });
   response.end('this endpoint is deliberately unavailable');
@@ -266,6 +276,29 @@ export function webExercises(registry) {
       family: 'web', tool: 'web.fetch', expectThrow: 'WEB_ABORTED',
       call: () => fetchTool().execute({ url: 'http://127.0.0.1:9/' }, { policy: policyFor('http://127.0.0.1:9'), signal: AbortSignal.abort() }),
       lesson: 'A web call carrying an already-aborted signal is refused WEB_ABORTED before the request is made, and a signal that aborts mid-flight settles the same way through the listener registered for the duration of the call.',
+    },
+
+    {
+      family: 'web', tool: 'web.fetch', expectThrow: 'WEB_HTTP',
+      call: () => againstServer((origin) => fetchTool().execute({ url: `${origin}/abort` }, { policy: policyFor(origin) })),
+      lesson: 'A response that stops partway through the length it declared is refused WEB_HTTP rather than returned as a short body. This is the one case where a partial read must not become evidence: the digest would be of a prefix nobody chose, the text would be a document that was never served, and both would look exactly like a successful small page. A truncation the kernel performed on purpose is reported as truncated:true with the budget that caused it; a truncation the network performed is a failure, and the two are never conflated.',
+    },
+    {
+      family: 'web', tool: 'web.fetch', expectThrow: 'WEB_TIMEOUT',
+      call: () => againstServer((origin) => fetchTool({ timeoutMs: 200 }).execute({ url: `${origin}/stall` }, { policy: policyFor(origin) })),
+      lesson: 'A server that accepts the connection and then answers nothing is refused WEB_TIMEOUT at the configured deadline, and the socket is destroyed rather than left to the operating system. The deadline is the smaller of the tool configuration and the policy, so a plan can never wait longer than the operator reviewed - and a hung retrieval inside a plan would otherwise hold the whole run, since tasks run one after another.',
+    },
+    {
+      family: 'web', tool: 'web.search',
+      call: () => againstServer(async (origin) => {
+        const result = await searchTool([
+          { name: 'alpha', origin, path: '/alpha' },
+          { name: 'secured', origin, path: '/alpha', apiKeyEnv: TOKEN_ENV },
+        ]).execute({ query: 'one engine has no key' }, { policy: policyFor(origin) });
+        return { answered: result.answered, asked: result.asked, codes: Object.fromEntries(result.engines.map((entry) => [entry.name, entry.code])) };
+      }, { token: null }),
+      expect: (r) => r.asked === 2 && r.answered === 1 && r.codes.alpha === null && r.codes.secured === 'WEB_CREDENTIAL',
+      lesson: 'An engine whose configured credential is missing from the environment fails WEB_CREDENTIAL before its request is made, and it fails as a row beside the engine that answered rather than as an exception. The check is on the value and not only on its presence: a credential containing anything outside printable ASCII is refused too, because it would be sent as a header and a newline in a header value is a request-splitting primitive. Two engines configured and one answering is reported as asked:2, answered:1 - the asymmetry is the finding, and a result that reported only what answered would hide it.',
     },
 
     // ---- a page, as evidence ---------------------------------------------------------
