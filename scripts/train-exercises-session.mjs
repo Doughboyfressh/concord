@@ -6,6 +6,7 @@ import { makeSourceTools, loadSourceLock } from '../src/sources.mjs';
 import { makeReverseTools } from '../src/reverse.mjs';
 import { makeInstructionTools, splitTrained } from '../src/instructions.mjs';
 import { buildChatContext } from '../src/chat-context.mjs';
+import { main as mcpMain } from '../src/mcp.mjs';
 import { checkAppUrl, findAppBrowser, appWindowArgv, launchAppWindow } from '../src/desktop.mjs';
 import { createChatHarness } from '../src/chat.mjs';
 import os from 'node:os';
@@ -178,6 +179,38 @@ const chatRefusals = () => [
 
 export function sessionExercises() {
   return [
+    {
+      family: 'session', tool: 'mcp.main', expectThrow: 'MCP_USAGE',
+      call: () => mcpMain(['--not-a-flag', 'value']),
+      lesson: 'The MCP server refuses MCP_USAGE for a flag it does not recognise, before it builds a registry or opens stdio. Every flag it does accept names a file of reviewed configuration, so an unrecognised one means the operator intended a capability this build cannot provide - and starting anyway would present a tool surface that silently lacks it. A repeated flag is refused by the same guard, because the second value would otherwise win without anyone saying so.',
+    },
+    {
+      family: 'session', tool: 'chat.buildContext', expectThrow: 'CHAT_CONTEXT', workspace: 'temp',
+      fixture: (dir) => {
+        const root = path.join(dir, 'oversized-instructions');
+        fs.mkdirSync(root, { recursive: true });
+        // Larger than the 64 KiB bound the manifest read is given.
+        fs.writeFileSync(path.join(root, 'manifest.json'), JSON.stringify({ padding: 'x'.repeat(70_000) }));
+      },
+      call: ({ registry, policy, workspaceRoot }) => buildChatContext({
+        message: 'anything', history: [], observations: [], proposedPlan: null, policy,
+        sourceLock: { sources: [] }, inventory: { capabilities: [] }, registry,
+        instructionRoot: path.join(workspaceRoot, 'oversized-instructions'),
+      }),
+      lesson: 'An instruction manifest larger than its 64 KiB bound is refused CHAT_CONTEXT rather than read, and the refusal names the file. The turn context is the one place where reviewed text is assembled into what a model sees, so a bound there is not about memory - it is the limit on how much instruction can enter a turn without anyone having re-reviewed it. Reading the file first and checking afterwards would make the bound advisory.',
+    },
+    {
+      family: 'session', tool: 'instructions.lesson', expectCode: 'INSTRUCTION_LIMIT',
+      // 340, measured: one missing id answers in 360 bytes, so the output bound fires here while
+      // the input stays small. Sixteen ids tripped the engine's INPUT_INVALID instead, because a
+      // request large enough to grow the answer is already too large itself - the two bounds leave
+      // only a narrow window, and this is inside it.
+      narrow: { maxOutputBytes: 340 },
+      plan: { version: 1, name: 'ask-for-a-lesson-under-a-tiny-budget', tasks: [
+        { id: 'a', tool: 'instructions.lesson', input: { ids: ['nothing:such-lesson'] } },
+      ] },
+      lesson: 'A lesson fetch whose own result would exceed the output budget is refused INSTRUCTION_LIMIT by the tool, naming how many were requested - and it is reachable at a budget small enough that even the disclaimer travelling with every answer does not fit. That disclaimer is the reason the check exists: the result always carries the statement that a lesson records an observation and grants no capability, so the tool would rather refuse than return lessons with the caveat trimmed off to make room. The window is narrow and was found by measuring: one missing id answers in 360 bytes, so a 340-byte budget reaches this code, while asking for sixteen ids to grow the answer trips the engine own INPUT_INVALID first - a request big enough to make the output big is already too big itself.',
+    },
     /**
      * The desktop window's own refusals, which are decided before anything is launched.
      *
