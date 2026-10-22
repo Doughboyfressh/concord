@@ -430,6 +430,12 @@ export function webExercises(registry) {
         } },
       ] },
       expect: (r) => r.results.found.asked === 3 && r.results.found.answered === 2
+        // The query comes back with the answer, and hashed: a corroboration table cited later has
+        // to be attributable to the exact question that produced it, and the digest is what a
+        // journal can carry when the query itself is long.
+        && r.results.found.query === 'deterministic replay'
+        && /^[a-f0-9]{64}$/.test(r.results.found.queryHash)
+        && r.results.found.agreementMax === 2
         && r.results.found.uncorroborated === 1 && r.results.found.untrusted === true
         && r.results.found.ranking === 'agreement-then-best-rank-v1'
         && r.results.found.results.length === 3

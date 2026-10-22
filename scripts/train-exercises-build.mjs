@@ -172,6 +172,25 @@ export function buildExercises() {
      * round's own blind-spot list for that reason alone.
      */
     {
+      family: 'build', tool: 'build.compare',
+      plan: { version: 1, name: 'identical-bytes-broken-build', tasks: [
+        { id: 'a', tool: 'build.compare', input: {
+          // The same declared inputs, the same declared output bytes, and a build that now
+          // fails. Not a contrived pair: a failing run that leaves the previous artifact in
+          // place produces exactly this, which is why build.run digests its artifacts before
+          // and after rather than trusting what it finds afterwards.
+          left: { inputsSha256: 'a'.repeat(64), artifactsSha256: 'b'.repeat(64), exitCode: 0 },
+          right: { inputsSha256: 'a'.repeat(64), artifactsSha256: 'b'.repeat(64), exitCode: 1 },
+        } },
+      ] },
+      expect: (r) => r.results.a.inputsChanged === false && r.results.a.artifactsChanged === false
+        && r.results.a.verdict === 'identical'
+        && r.results.a.interpretation === 'The same declared inputs produced the same declared output bytes.'
+        && r.results.a.exitCodeChanged === true && r.results.a.transition === 'broken'
+        && r.results.a.sameReceipt === null,
+      lesson: 'build.compare answers on two axes that can disagree, and this is the pair that proves why: identical inputs, identical output bytes, and a build that now fails. The verdict is identical and the transition is broken, both true at once - a single pass/fail score would have to pick one and would hide the other. The interpretation is prose for the verdict rather than for the pair, so it says the bytes matched and says nothing about the exit code, which is the transition\u2019s job. sameReceipt is null rather than false when either side omitted its receipt, because two receipts that were never compared is not the same as two that differed.',
+    },
+    {
       family: 'build', tool: 'build.run', grant: true, expectApprovals: 1, workspace: 'temp', fixture,
       plan: { version: 1, name: 'one-reviewed-build', tasks: [
         { id: 'a', tool: 'build.run', input: { target: 'main' } },
@@ -188,6 +207,9 @@ export function buildExercises() {
           && result.artifactsProduced.join(',') === `${ROOT}/out.txt`
           && /^[a-f0-9]{64}$/.test(result.artifactsSha256) && /^[a-f0-9]{64}$/.test(result.receipt)
           && result.diagnostics.length === 0 && Object.keys(result.diagnosticCounts).length === 0
+          // An empty stderr is digested rather than left out, so "this build said nothing" and
+          // "nobody recorded what it said" are different values rather than the same absence.
+          && result.stderrSha256 === sha256(Buffer.alloc(0))
           && result.stdoutTail.trim() === 'build ok' && result.stdoutBytes > 0
           && result.stdoutSha256 === sha256(Buffer.from(result.stdoutTail))
           && result.stderrBytes === 0 && result.stderrTail === ''
