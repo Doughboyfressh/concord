@@ -61,6 +61,23 @@ export const targetFor = (over = {}) => ({
   inputs: [`${ROOT}/src`], artifacts: [`${ROOT}/out.txt`], ...over,
 });
 const toolsFor = (config = {}) => makeBuildTools({ timeoutMs: 20_000, maxOutputBytes: 262_144, ...config });
+
+/**
+ * The reviewed targets the round registers, so these tools can be driven by a plan.
+ *
+ * Four rather than one, because the interesting states of a build are different *targets* and not
+ * different inputs: a target that succeeds and writes its artifact, one that fails and prints a
+ * diagnostic, one that outruns its deadline, and one that declares an artifact it never produces.
+ * A plan selects among reviewed names and can never describe a command, so each state a round
+ * wants to reach has to exist as something an operator approved — which is the invariant, not a
+ * limitation of the fixture.
+ */
+export const trainingTargets = () => [
+  targetFor(),
+  targetFor({ name: 'fails', args: [`${ROOT}/src/fails.mjs`] }),
+  targetFor({ name: 'slow', args: [`${ROOT}/src/sleeps.mjs`], timeoutMs: 700 }),
+  targetFor({ name: 'noartifact', args: [`${ROOT}/src/builds.mjs`], artifacts: [`${ROOT}/never-written.txt`] }),
+];
 const runnerFor = (targets, over = {}) => toolsFor({ targets, ...over }).find((tool) => tool.name === 'build.run');
 
 export function buildExercises() {
@@ -143,29 +160,40 @@ export function buildExercises() {
     },
 
     // ---- run: the receipt --------------------------------------------------------------
+    /**
+     * A plan rather than a direct call, now that the round registers the reviewed targets.
+     *
+     * The assertions are the same ones this exercise made as a direct call; only the mechanism
+     * changed, and it changed for two reasons. A plan is the stronger evidence — blocked, granted,
+     * run through the kernel and replayed from the journal, instead of invoked twice and compared.
+     * And a direct call hides what it read: the round watches which output keys a prediction
+     * touches on a *plan* result, so every key this exercise checked was counted as unread while
+     * the projection it built was invisible. Twenty-one of build.run's keys sat at the top of the
+     * round's own blind-spot list for that reason alone.
+     */
     {
-      family: 'build', tool: 'build.run', workspace: 'temp', fixture,
-      call: async ({ workspaceRoot }) => {
-        const run = runnerFor([targetFor()]);
-        const result = await run.execute({ target: 'main' }, { policy: policyFor(), workspaceRoot });
-        return {
-          ok: result.ok, exitCode: result.exitCode, argv: result.argv.join(' '), matcher: result.matcher,
-          mentionsExecutablePath: result.argv.some((entry) => entry.includes(path.sep)),
-          inputs: result.inputs.map((entry) => entry.path).join('|'),
-          buildsDigest: result.inputs.find((entry) => entry.path.endsWith('builds.mjs'))?.sha256,
-          artifacts: result.artifacts.map((entry) => `${entry.path}:${entry.sha256}`).join('|'),
-          diagnostics: result.diagnostics.length, reproduced: result.reproduced,
-          stdout: result.stdoutTail.trim(), inputsSkipped: result.inputsSkipped,
-          everyDeclaredKeyPresent: run.outputKeys.every((key) => result[key] !== undefined),
-        };
+      family: 'build', tool: 'build.run', grant: true, expectApprovals: 1, workspace: 'temp', fixture,
+      plan: { version: 1, name: 'one-reviewed-build', tasks: [
+        { id: 'a', tool: 'build.run', input: { target: 'main' } },
+      ] },
+      expect: (r) => {
+        const result = r.results.a;
+        return result.target === 'main' && result.system === 'npm' && result.matcher === 'node-uncaught-v1'
+          && result.ok === true && result.exitCode === 0 && result.signal === null && result.truncated === false
+          && result.argv.join(' ') === `node.exe ${ROOT}/src/builds.mjs`
+          && !result.argv.some((entry) => entry.includes(path.sep))
+          && result.inputs.find((entry) => entry.path.endsWith('builds.mjs')).sha256 === sha256(Buffer.from(BUILDS))
+          && result.inputsSkipped === 0 && /^[a-f0-9]{64}$/.test(result.inputsSha256)
+          && result.artifacts.length === 1 && result.artifacts[0].sha256 === sha256(Buffer.from('built'))
+          && result.artifactsProduced.join(',') === `${ROOT}/out.txt`
+          && /^[a-f0-9]{64}$/.test(result.artifactsSha256) && /^[a-f0-9]{64}$/.test(result.receipt)
+          && result.diagnostics.length === 0 && Object.keys(result.diagnosticCounts).length === 0
+          && result.stdoutTail.trim() === 'build ok' && result.stdoutBytes > 0
+          && result.stdoutSha256 === sha256(Buffer.from(result.stdoutTail))
+          && result.stderrBytes === 0 && result.stderrTail === ''
+          && result.reproduced === null && result.untrusted === true;
       },
-      expect: (r) => r.ok === true && r.exitCode === 0 && r.matcher === 'node-uncaught-v1'
-        && r.argv === `node.exe ${ROOT}/src/builds.mjs` && r.mentionsExecutablePath === false
-        && r.buildsDigest === sha256(Buffer.from(BUILDS))
-        && r.artifacts === `${ROOT}/out.txt:${sha256(Buffer.from('built'))}`
-        && r.diagnostics === 0 && r.reproduced === null && r.stdout === 'build ok'
-        && r.inputsSkipped === 0 && r.everyDeclaredKeyPresent,
-      lesson: 'A successful build.run returns a receipt rather than a transcript: every declared input file with its digest, every declared artifact with its digest, the exact argv, and the exit code. The input digests are computed before the child runs and the artifact digests after, so the receipt describes what was compiled and what came out rather than whatever the tree looks like later. The executable\'s own path is never echoed back — its basename plus the reviewed args is what a reader needs, and the path belongs to the configuration. With nothing claimed about the expected output, reproduced is null rather than true.',
+      lesson: 'A successful build.run returns a receipt rather than a transcript: every declared input file with its digest, every declared artifact with its digest, the exact argv, the exit code, and the digest of each output stream beside the tail a human reads. The input digests are computed before the child runs and the artifact digests after, so the receipt describes what was compiled and what came out rather than whatever the tree looks like later. The executable\'s own path is never echoed back — its basename plus the reviewed args is what a reader needs, and the path belongs to the configuration. With nothing claimed about the expected output, reproduced is null rather than true. One process effect, one approval hash bound to the resolved target, and a journal that replays without building anything again.',
     },
     {
       family: 'build', tool: 'build.run', workspace: 'temp', fixture,
@@ -238,31 +266,34 @@ export function buildExercises() {
       lesson: 'The four verdicts are exactly the four combinations of "inputs moved" and "artifacts moved": identical, changed, inputs-changed-output-did-not, and nondeterministic-build — identical inputs producing different output bytes, which is the one no amount of rerunning a build will tell you about. The exit-code transition (still-succeeding, still-failing, broken, fixed) is reported on its own axis rather than folded in, because "the build now fails" and "the build is not reproducible" are independent findings and a single score would hide whichever one it did not name. Like experiment.compare, this deliberately emits no aggregate.',
     },
     {
-      family: 'build', tool: 'build.run', workspace: 'temp', fixture,
-      call: async ({ workspaceRoot }) => {
-        const run = runnerFor([targetFor({ args: [`${ROOT}/src/fails.mjs`] })]);
-        const result = await run.execute({ target: 'main' }, { policy: policyFor(), workspaceRoot });
+      family: 'build', tool: 'build.run', grant: true, expectApprovals: 1, workspace: 'temp', fixture,
+      plan: { version: 1, name: 'a-build-that-fails', tasks: [
+        { id: 'a', tool: 'build.run', input: { target: 'fails' } },
+      ] },
+      expect: (r) => {
+        const result = r.results.a;
         const [diagnostic] = result.diagnostics;
-        return {
-          ok: result.ok, exitCode: result.exitCode, counts: JSON.stringify(result.diagnosticCounts),
-          code: diagnostic?.code, message: diagnostic?.message, line: diagnostic?.line,
-          workspacePath: diagnostic?.workspacePath,
-          boundToTheFile: diagnostic?.fileSha256 === sha256(Buffer.from(FAILS)),
-          agreesWithInputSet: diagnostic?.fileSha256 === result.inputs.find((entry) => entry.path.endsWith('fails.mjs'))?.sha256,
-          everyDeclaredKeyPresent: run.outputKeys.every((key) => result[key] !== undefined),
-        };
+        return result.ok === false && result.exitCode === 1 && result.target === 'fails'
+          && result.stderrBytes > 0 && result.stdoutBytes === 0
+          && JSON.stringify(result.diagnosticCounts) === '{"error":1}'
+          && diagnostic.code === 'ERR_ASSERTION' && diagnostic.message === '1 == 2'
+          && diagnostic.line === 2 && diagnostic.column === 8 && diagnostic.severity === 'error'
+          && diagnostic.workspacePath === `${ROOT}/src/fails.mjs`
+          && diagnostic.fileSha256 === sha256(Buffer.from(FAILS))
+          && diagnostic.fileSha256 === result.inputs.find((entry) => entry.path.endsWith('fails.mjs')).sha256
+          // The declared artifact exists - an earlier exercise in this shared scratch workspace
+          // built it - and this run wrote nothing, which is exactly the distinction to assert.
+          && result.artifacts.length === 1 && result.artifactsProduced.length === 0;
       },
-      expect: (r) => r.ok === false && r.exitCode === 1 && r.counts === '{"error":1}'
-        && r.code === 'ERR_ASSERTION' && r.message === '1 == 2' && r.line === 2
-        && r.workspacePath === `${ROOT}/src/fails.mjs`
-        && r.boundToTheFile && r.agreesWithInputSet && r.everyDeclaredKeyPresent,
-      lesson: 'A failing build is a result, not an exception: build.run reports exitCode, ok:false and its structured diagnostics, where integrations\' spawnBounded would have rejected on the non-zero exit and discarded the diagnostics of every failing build — the case that matters most. Each diagnostic carries the SHA-256 of the file it blames as the build saw it, matching that file\'s entry in the input set, so a reported error is attributable to exact bytes and a diagnostic that outlived its file can be shown to be stale without rebuilding.',
+      lesson: 'A failing build is a result, not an exception: build.run reports exitCode, ok:false and its structured diagnostics, where integrations\' spawnBounded would have rejected on the non-zero exit and discarded the diagnostics of every failing build — the case that matters most. Each diagnostic carries the SHA-256 of the file it blames as the build saw it, matching that file\'s entry in the input set, so a reported error is attributable to exact bytes and a diagnostic that outlived its file can be shown to be stale without rebuilding. This failing run also lists a declared artifact that exists, because an earlier build in the same workspace wrote it, while reporting artifactsProduced as empty: the existence of an output and the authorship of it are different claims, and conflating them would let a receipt attest to bytes the run had nothing to do with. The distinction exists because this exercise caught the receipt making exactly that claim.',
     },
     {
-      family: 'build', tool: 'build.run', expectThrow: 'BUILD_TIMEOUT', workspace: 'temp', fixture: slowFixture,
-      call: ({ workspaceRoot }) => runnerFor([targetFor({ args: [`${ROOT}/src/sleeps.mjs`], timeoutMs: 700 })])
-        .execute({ target: 'main' }, { policy: policyFor(), workspaceRoot }),
-      lesson: 'A build that outruns its deadline is refused BUILD_TIMEOUT and the child is killed, rather than returning a partial receipt. A receipt whose artifact digests were taken while a compiler was still writing would attest to a half-written file, which is worse than no attestation: it would compare as a legitimate difference against the finished one.',
+      family: 'build', tool: 'build.run', expectCode: 'BUILD_TIMEOUT', grant: true, expectApprovals: 1,
+      workspace: 'temp', fixture: slowFixture,
+      plan: { version: 1, name: 'a-build-that-outruns-its-deadline', tasks: [
+        { id: 'a', tool: 'build.run', input: { target: 'slow' } },
+      ] },
+      lesson: 'A build that outruns its deadline is refused BUILD_TIMEOUT and the child is killed, rather than returning a partial receipt. From a plan the refusal arrives after the grant, because the gate precedes the tool. A receipt whose artifact digests were taken while a compiler was still writing would attest to a half-written file, which is worse than no attestation: it would compare as a legitimate difference against the finished one.',
     },
     {
       family: 'build', tool: 'build.run', expectThrow: 'INTEGRATION_EXECUTABLE', workspace: 'temp', fixture,
@@ -277,22 +308,22 @@ export function buildExercises() {
       lesson: 'build.run is refused BUILD_POLICY when the policy does not allow the process effect, while build.detect continues to work under the same policy because it is a read. The split is what lets an operator permit a harness to see what a tree would build without permitting it to build anything.',
     },
     {
-      family: 'build', tool: 'build.run', workspace: 'temp', fixture,
-      call: async ({ workspaceRoot }) => {
-        const run = runnerFor([
-          targetFor({ name: 'declares', artifacts: [`${ROOT}/never-written.txt`] }),
-          targetFor({ name: 'declaresNothing', artifacts: [] }),
-        ]);
-        const context = { policy: policyFor(), workspaceRoot };
-        const declared = await run.execute({ target: 'declares' }, context);
-        const nothing = await run.execute({ target: 'declaresNothing' }, context);
-        return {
-          bothFoundNothing: declared.artifacts.length === 0 && nothing.artifacts.length === 0,
-          digestsDiffer: declared.artifactsSha256 !== nothing.artifactsSha256,
-        };
-      },
-      expect: (r) => r.bothFoundNothing && r.digestsDiffer,
-      lesson: 'The declared path list is part of the inputs and artifacts digest, not only the files found under it. Without that, a target asked for an artifact it never produced and a target asked for no artifacts at all both hash the empty list and compare as identical — so a build that produced nothing would look perfectly reproducible against one that was never asked to produce anything.',
+      family: 'build', tool: 'build.compare', grant: true, expectApprovals: 2, workspace: 'temp', fixture,
+      plan: { version: 1, name: 'a-missing-artifact-is-not-no-artifact', tasks: [
+        { id: 'declared', tool: 'build.run', input: { target: 'noartifact' } },
+        { id: 'produced', tool: 'build.run', dependsOn: ['declared'], input: { target: 'main' } },
+        { id: 'verdict', tool: 'build.compare', dependsOn: ['declared', 'produced'], input: {
+          left: { $task: 'declared' }, right: { $task: 'produced' },
+        } },
+      ] },
+      expect: (r) => r.results.declared.ok === true && r.results.declared.artifacts.length === 0
+        && r.results.produced.artifacts.length === 1
+        && r.results.declared.inputsSha256 === r.results.produced.inputsSha256
+        && r.results.declared.artifactsSha256 !== r.results.produced.artifactsSha256
+        && r.results.verdict.verdict === 'nondeterministic-build'
+        && r.results.verdict.inputsChanged === false && r.results.verdict.artifactsChanged === true
+        && r.results.verdict.transition === 'still-succeeding',
+      lesson: 'Two targets over the same source tree, one asked for an artifact it never writes and one that writes it, hash their inputs identically and their artifacts differently — because the declared path list is part of each digest, not only the files found under it. Without that, a build that produced nothing would hash the empty list exactly like one that was never asked to produce anything, and the two would compare as identical. The verdict here reads nondeterministic-build, which is the honest answer to the question build.compare was asked: identical declared inputs did produce different output bytes. It is also the clearest demonstration that a verdict is about the two receipts handed to it and not about a target\'s identity, so a caller comparing receipts from different targets gets a true statement about the digests and a misleading one about the world — the verdict names what moved, never why.',
     },
 
     // ---- composed: the whole chain in one plan, each process effect approved separately --

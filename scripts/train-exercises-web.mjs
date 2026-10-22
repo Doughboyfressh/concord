@@ -119,8 +119,79 @@ const fetchPath = (path, { policy, config } = {}) => againstServer(async (origin
   };
 });
 
-export function webExercises() {
+/**
+ * The round's own fixture origin, read out of the configuration it registered.
+ *
+ * A plan naming a URL needs the port, and the port is only known once the round has started its
+ * fixture server — so rather than threading it through every exercise family, the one exercise
+ * that needs it asks the registry for the tool's frozen config. That is also how an operator's
+ * plan comes by a URL: from the configuration someone reviewed. Absent when no web tool is
+ * registered, in which case the plan-shaped exercises below are simply not emitted, the same way
+ * the browser exercises are absent on a machine with no browser.
+ */
+const fixtureOrigin = (registry) => registry?.get('web.fetch')?.config?.engines?.[0]?.origin ?? null;
+
+export function webExercises(registry) {
+  const origin = fixtureOrigin(registry);
+  const fetchPlan = (name, input, extra = {}) => ({
+    family: 'web', tool: 'web.fetch', grant: true, expectApprovals: 1, evidenceKey: name,
+    plan: { version: 1, name, tasks: [{ id: 'a', tool: 'web.fetch', input }] },
+    ...extra,
+  });
   return [
+    // ---- the same retrievals, as plans, so the kernel records what they read --------------
+    /**
+     * Every assertion here was already made by a direct-call exercise below. What changes is the
+     * evidence and the measurement: a plan is blocked, granted, journaled and replayed, and the
+     * round can see which output keys a prediction touches on a plan result. Seventeen of
+     * web.fetch's keys sat at the top of the round's blind-spot list purely because a projection
+     * built inside a direct call is invisible to that watcher.
+     */
+    ...(origin ? [
+      fetchPlan('fetch-a-page', { url: `${origin}/page` }, {
+        expect: (r) => {
+          const result = r.results.a;
+          return result.url === `${origin}/page` && result.finalUrl === result.url
+            && result.ok === true && result.status === 200 && result.contentType.startsWith('text/html')
+            && result.bytes === Buffer.byteLength(PAGE) && result.bodySha256 === PAGE_DIGEST
+            && result.truncated === false && result.strategy === 'html-reduction-v1'
+            && result.title === 'A page with a title' && result.textTruncated === false
+            && !result.text.includes('var secret') && result.text.includes('Second paragraph.')
+            && result.droppedScripts === 1 && result.droppedStyles === 1
+            && result.links.length === 2 && result.links[0].href === `${origin}/next`
+            && result.links[0].text === 'next page'
+            && result.redirects.length === 0 && result.untrusted === true;
+        },
+        lesson: 'Retrieved inside a plan, a page arrives as a recorded retrieval: the digest of exactly the bytes received, the byte count, the content type, the named reduction that produced the text, the counts of script and style bodies removed, the links resolved against the URL that answered, and an empty redirect chain. The task blocks once for an approval hash bound to the resolved URL, and the journal replays without fetching anything again — which is the difference between a citation and a transcript. The same facts were already proven by calling the tool twice; what a plan adds is that the kernel recorded them, so a later run can be checked against this one rather than against a memory of it.',
+      }),
+      fetchPlan('fetch-a-missing-page', { url: `${origin}/missing` }, {
+        expect: (r) => r.results.a.ok === false && r.results.a.status === 404
+          && r.results.a.text === 'no such page' && r.results.a.title === null
+          && r.results.a.links.length === 0 && r.results.a.strategy === 'utf8-text'
+          && r.results.a.bodySha256 === sha256(Buffer.from('no such page')),
+        lesson: 'A 404 inside a plan is a completed task carrying ok:false, its status and its body — not a failed task. The distinction matters for composition: a plan that treats "this page does not exist" as a task failure cannot go on to record the absence, and absence is frequently the finding. A plain-text body is reduced by the utf8-text strategy rather than the HTML one, so a caller can tell from the result which reader ran.',
+      }),
+      fetchPlan('follow-a-redirect', { url: `${origin}/hop` }, {
+        expect: (r) => r.results.a.url === `${origin}/hop` && r.results.a.finalUrl === `${origin}/page`
+          && r.results.a.redirects.length === 1 && r.results.a.redirects[0].status === 302
+          && r.results.a.redirects[0].from === `${origin}/hop`
+          && r.results.a.redirects[0].to === `${origin}/page`
+          && r.results.a.bodySha256 === PAGE_DIGEST,
+        lesson: 'A redirect followed inside a plan records every hop with its status, where it came from and where it went, and keeps the requested URL beside the one that answered. The approval hash was bound to the URL the plan asked for, not to the one that served the bytes — so the grant covers asking, and the recorded chain is how a reader learns where the answer actually came from.',
+      }),
+      fetchPlan('fetch-bytes-that-are-not-text', { url: `${origin}/binary` }, {
+        expect: (r) => r.results.a.strategy === 'none' && r.results.a.text === ''
+          && r.results.a.textTruncated === false && r.results.a.title === null
+          && r.results.a.droppedScripts === 0 && r.results.a.droppedStyles === 0
+          && r.results.a.contentType === 'application/octet-stream'
+          && r.results.a.bytes === 4 && r.results.a.bodySha256 === sha256(Buffer.from([0x4d, 0x5a, 0x90, 0x00])),
+        lesson: 'Bytes that are not text come back digested and counted with the strategy reported as none: the retrieval is attested even though nothing was read from it. In a plan that is what lets a later task cite having fetched a binary without any tool having pretended to understand one.',
+      }),
+      fetchPlan('a-truncated-body-cannot-fit-the-budget-it-exceeded', { url: `${origin}/big` }, {
+        expectCode: 'OUTPUT_REJECTED', expectReason: 'byte budget', narrow: { maxOutputBytes: 20_000 },
+        lesson: 'Truncation is not reachable from a plan, and the reason is two bounds meeting with no gap between them. The tool reads at most the policy budget and flags the result truncated; the kernel then admits a task result only if it canonicalises to at most that same budget, and a result carrying a budget-sized body plus its own keys is always larger than the body alone. So the engine refuses the task with OUTPUT_REJECTED - "Tool output exceeds byte budget", the engine\'s own code rather than a tool code - before any caller can read the flag. Measured on a forty-kilobyte page: refused at a twenty-kilobyte budget, and returned whole with truncated:false at sixty. So from a plan an oversized page either fits or fails the task; it never arrives half-read and labelled, which is the safer of the two behaviours. The flag is real and is exercised by calling the tool directly, where no engine bound applies.',
+      }),
+    ] : []),
     // ---- what exists at all ----------------------------------------------------------
     {
       family: 'web', tool: 'web.factory',

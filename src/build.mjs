@@ -486,7 +486,7 @@ export function makeBuildTools(config) {
     outputKeys: ['target', 'system', 'matcher', 'argv', 'exitCode', 'signal', 'ok', 'truncated',
       'stdoutBytes', 'stdoutSha256', 'stdoutTail', 'stderrBytes', 'stderrSha256', 'stderrTail',
       'diagnostics', 'diagnosticCounts', 'inputs', 'inputsSkipped', 'inputsSha256',
-      'artifacts', 'artifactsSha256', 'receipt', 'reproduced', 'untrusted'],
+      'artifacts', 'artifactsProduced', 'artifactsSha256', 'receipt', 'reproduced', 'untrusted'],
     async execute(input, context) {
       validateSchema(input, runTool.inputSchema);
       const target = byName.get(input.target);
@@ -508,11 +508,19 @@ export function makeBuildTools(config) {
       // Inputs are digested before the build so the receipt describes what was compiled, not
       // whatever the tree looks like afterwards; artifacts are digested after, for the same reason.
       const inputs = digestPaths(root, target.inputs);
+      // The declared artifacts are digested before the run as well as after, so the receipt can
+      // say which of them this run actually wrote. Without the before-snapshot a file left by an
+      // earlier build is reported exactly like one this build produced, and the receipt attests
+      // to an output it had nothing to do with. Found by a training round whose failing target
+      // declared the same artifact path as a successful one that had already run.
+      const before = digestPaths(root, target.artifacts);
       const run = await runBounded({
         executable, args: target.args, cwd, env,
         timeoutMs: bound.timeoutMs, maxOutputBytes: bound.maxOutputBytes, signal: context?.signal,
       });
       const artifacts = digestPaths(root, target.artifacts);
+      const previous = new Map(before.files.map((entry) => [entry.path, entry.sha256]));
+      const produced = artifacts.files.filter((entry) => previous.get(entry.path) !== entry.sha256).map((entry) => entry.path);
       const matcher = MATCHERS[target.diagnostics];
       const diagnostics = bindDiagnostics(matcher.parse(normaliseOutput(`${run.stdout}\n${run.stderr}`)), root);
       const counts = {};
@@ -534,7 +542,13 @@ export function makeBuildTools(config) {
         stderrBytes: Buffer.byteLength(run.stderr), stderrSha256: sha256(run.stderr), stderrTail: tail(run.stderr),
         diagnostics, diagnosticCounts: counts,
         inputs: inputs.files, inputsSkipped: inputs.skipped, inputsSha256: inputs.sha256,
-        artifacts: artifacts.files, artifactsSha256: artifacts.sha256,
+        artifacts: artifacts.files,
+        // Which declared artifacts this run changed or created, as distinct from which exist.
+        // Deliberately outside artifactsSha256 and outside the receipt: the digest has to stay a
+        // statement about bytes, so that two runs over identical inputs keep an identical receipt
+        // whether the second one needed to rewrite the file or found it already correct.
+        artifactsProduced: produced,
+        artifactsSha256: artifacts.sha256,
         receipt,
         // A rebuild that was asked to match and did not is the finding, so it is a value rather
         // than a refusal: the diagnostics and both digests travel with the answer.

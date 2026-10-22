@@ -191,6 +191,27 @@ test('the same inputs through the same toolchain produce the same receipt, and a
   assert.equal(compare.execute({ left: first, right: fourth }).verdict, 'changed');
 });
 
+test('an artifact that already existed is reported as present but not as produced, and that never moves the receipt', async () => {
+  const root = workspace({ 'src/main.mjs': BUILDS });
+  // A second target over the same source that declares the same artifact and never writes it.
+  const [, run] = toolsFor({ targets: [target(), target({ name: 'reads', args: ['src/nothing.mjs'] })] });
+  fs.writeFileSync(path.join(root, 'src', 'nothing.mjs'), 'console.log("wrote nothing");\n');
+  const context = { policy, workspaceRoot: root };
+
+  const first = await run.execute({ target: 'main' }, context);
+  assert.deepEqual(first.artifactsProduced, ['out.txt'], 'the run that wrote it says so');
+
+  const second = await run.execute({ target: 'main' }, context);
+  assert.deepEqual(second.artifacts, first.artifacts, 'the file is still there with the same bytes');
+  assert.deepEqual(second.artifactsProduced, [], 'rewriting identical bytes is indistinguishable from not writing, and is reported as not produced');
+  assert.equal(second.receipt, first.receipt,
+    'artifactsProduced is deliberately outside the receipt: identical inputs must keep an identical receipt whether or not the file had to be rewritten');
+
+  const other = await run.execute({ target: 'reads' }, context);
+  assert.equal(other.artifacts.length, 1, 'the declared artifact exists, left by the earlier build');
+  assert.deepEqual(other.artifactsProduced, [], 'but this build wrote nothing, which is a different claim from "there is no output"');
+});
+
 test('a declared artifact that was never produced does not hash the same as declaring no artifacts', async () => {
   const root = workspace({ 'src/main.mjs': 'console.log("no artifact");\n' });
   const [, run] = toolsFor({ targets: [target(), target({ name: 'nodeclare', artifacts: [] })] });

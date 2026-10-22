@@ -41,7 +41,7 @@ export function exercises(inventory, registry) {
     ...ghidraExercises(),
     ...evidenceExercises(),
     ...writeExercises(),
-    ...webExercises(),
+    ...webExercises(registry),
     ...buildExercises(),
     ...composeExercises(),
     ...derivedExercises(registry),

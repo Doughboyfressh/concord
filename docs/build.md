@@ -62,6 +62,14 @@ One call produces:
   inside the digest too, so a target asked for an artifact it never produced does not hash the
   same as a target asked for no artifacts at all; otherwise a build that produced nothing would
   look perfectly reproducible against one that was never asked to produce anything.
+- `artifactsProduced` — which of the declared artifacts this run actually **changed or created**,
+  from a digest taken before the child ran as well as after. Existence and authorship are
+  different claims: a file left by an earlier build is listed in `artifacts` like any other, and a
+  receipt that called it this build's output would be attesting to bytes the run had nothing to do
+  with. A build that rewrites a file with identical bytes is indistinguishable from one that did
+  not write it, and is reported as not produced, which is the honest reading. Deliberately
+  **outside** `artifactsSha256` and outside the receipt, so that two runs over identical inputs
+  keep an identical receipt whether or not the second had to rewrite anything.
 - `exitCode`, `signal`, `ok`. **A non-zero exit is the result, not an exception.** This is why
   `build.run` does not reuse integrations' `spawnBounded`, whose contract is to reject on any
   non-zero exit: that would discard the diagnostics of every failing build, which is the case that

@@ -25,7 +25,7 @@ import { updateInstructions, verifyCorpus } from './train-consolidate.mjs';
 import { analyseGaps, renderGaps, observeAssertedKeys } from './train-gaps.mjs';
 import { CONTRACTS } from './train-exercises-derived.mjs';
 import { webFixtureHandler, enginesOn } from './train-exercises-web.mjs';
-import { targetFor as buildTargetFor } from './train-exercises-build.mjs';
+import { trainingTargets as buildTargets } from './train-exercises-build.mjs';
 
 /**
  * Fast training: exercise every capability, keep what the runs prove.
@@ -90,7 +90,7 @@ async function buildRegistry(webOrigin) {
     // The write side, configured exactly as the direct-call families configure it, so a composed
     // lesson and a direct one cannot disagree about what the engines said or what the target built.
     ...makeWebTools({ timeoutMs: 8000, maxOutputBytes: 262_144, engines: enginesOn(webOrigin) }),
-    ...makeBuildTools({ timeoutMs: 20_000, maxOutputBytes: 262_144, targets: [buildTargetFor()] }),
+    ...makeBuildTools({ timeoutMs: 20_000, maxOutputBytes: 262_144, targets: buildTargets() }),
   ];
   const registry = new Map(descriptors.map((tool) => [tool.name, tool]));
   const runtimeFiles = fs.readdirSync(path.join(root, 'src')).filter((f) => f.endsWith('.mjs')).map((f) => 'src/' + f).sort();
@@ -422,11 +422,22 @@ async function main() {
       continue;
     }
 
-    // Evidence names what proved the lesson, not which run happened to prove it. The run root
-    // changes on every execution, so including it made each round mint a fresh copy of an
-    // identical lesson: 114 files for 61 lessons before this was caught. A plan digest plus
-    // the outcome is reproducible by anyone, which is what evidence is supposed to be.
-    credit(exercise, { tool: exercise.tool, planHash: digest(exercise.plan), outcome: result.outcome.status, approvals: approvals.length, replayed: true });
+    /**
+     * Evidence names what proved the lesson, not which run happened to prove it.
+     *
+     * The run root changes on every execution, so including it made each round mint a fresh copy
+     * of an identical lesson: 114 files for 61 lessons before that was caught. A plan digest plus
+     * the outcome is reproducible by anyone, which is what evidence is supposed to be.
+     *
+     * `evidenceKey` is for the one case where the plan itself cannot be reproducible: a loopback
+     * fixture gets an ephemeral port, so a plan naming its URL hashes differently every round and
+     * would mint that same duplicate. Hashing a plan nobody else can reconstruct is not evidence
+     * anyway, so such an exercise names itself instead — a stable string a reader can look up in
+     * this file. It is opt-in precisely so the default stays the digest.
+     */
+    credit(exercise, exercise.evidenceKey
+      ? { tool: exercise.tool, exercise: exercise.evidenceKey, outcome: result.outcome.status, approvals: approvals.length, replayed: true }
+      : { tool: exercise.tool, planHash: digest(exercise.plan), outcome: result.outcome.status, approvals: approvals.length, replayed: true });
   }
 
   /**
