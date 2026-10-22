@@ -152,8 +152,37 @@ async function chatOver({ registry, policy, workspaceRoot }) {
   return createChatHarness({ registry, policy, sourceLock: catalog, workspaceRoot, buildContext });
 }
 
+/**
+ * The session's own four refusals, which no plan can reach.
+ *
+ * These are the chat surface rather than a tool: a malformed hash, a hash nothing is waiting for,
+ * an execute with nothing proposed, a replay of a run that does not exist. Each is the boundary
+ * between an operator's intent and the kernel, and each is worth proving reachable because the
+ * alternative to a named refusal here is a harness that quietly does nothing.
+ */
+const chatRefusals = () => [
+  { code: 'CHAT_INPUT', what: 'a request hash that is not a SHA-256',
+    act: (harness) => harness.approve('not-a-hash-at-all'),
+    lesson: 'chat refuses CHAT_INPUT for anything that is not a lowercase SHA-256 hex string, before it looks at what is pending. An approval is the one input that carries authority, so its shape is checked first and separately from whether it matches: "that is not a hash" and "no such approval is waiting" are different mistakes and an operator should be told which they made.' },
+  { code: 'CHAT_APPROVAL', what: 'a well-formed hash nothing is waiting for',
+    act: (harness) => harness.approve('a'.repeat(64)),
+    lesson: 'A well-formed hash that does not match the pending request is refused CHAT_APPROVAL rather than stored for later. There is no queue of future approvals: a grant applies to exactly the operation that blocked, so an approval arriving for anything else is a mistake to report and never a permission to keep.' },
+  { code: 'CHAT_PLAN', what: 'an execute with nothing proposed',
+    act: (harness) => harness.executePlan(),
+    lesson: 'Executing with no proposed plan is refused CHAT_PLAN. The session never invents a plan to run, not even an empty one, so "execute" with nothing proposed is a caller error rather than a no-op — which keeps the proposal step visible instead of letting a turn slide into execution.' },
+  { code: 'CHAT_REPLAY', what: 'a replay of a run id that does not exist',
+    act: (harness) => harness.replay('no-such-run-id'),
+    lesson: 'Replaying an unknown run id is refused CHAT_REPLAY rather than answering with an empty result. The run ledger is content-addressed and never truncated, so an id that is absent means it was never recorded here, and saying so is more useful than a successful-looking reply about nothing.' },
+];
+
 export function sessionExercises() {
   return [
+    ...chatRefusals().map((entry) => ({
+      family: 'session', tool: 'chat.' + entry.code.toLowerCase().replace('chat_', ''),
+      expectThrow: entry.code, workspace: 'temp',
+      call: async (context) => entry.act(await chatOver(context)),
+      lesson: entry.lesson,
+    })),
     {
       family: 'session', tool: 'chat.recall', workspace: 'temp', fixture: storeLesson,
       call: async (context) => {

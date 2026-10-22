@@ -404,6 +404,20 @@ export function ghidraExercises() {
     // ---- the installed distribution, where the files are not ours ------------------------
     ...(GHIDRA ? [
       {
+        family: 'ghidra', tool: 'artifact.dataflow', workspace: 'temp', fixture: realFixture,
+        plan: realTask('artifact.dataflow', {
+          table: 'x86-64.sla', path: 'program.exe', offset: 40252, length: 64, limit: 32,
+          context: LONG_MODE, sliceFrom: 'no-such-identifier', sliceDirection: 'backward',
+        }),
+        expect: (r) => r.results.a.supported === false
+          && r.results.a.reason === 'slice_target_unknown'
+          && r.results.a.slice === null
+          && r.results.a.definitions.length === 0 && r.results.a.uses.length === 0
+          && r.results.a.table === 'x86-64.sla' && r.results.a.path === 'program.exe'
+          && r.results.a.untrusted === true,
+        lesson: 'Asking for a backward slice from an identifier the analysis never produced comes back supported:false with reason slice_target_unknown and a null slice - not an empty slice, and not a thrown refusal. An empty slice and a misspelled starting point look identical to a caller, and the first is a claim about the program while the second is a mistake in the question, so they are different answers. It also settles where DATAFLOW_SLICE lives: the guard exists inside the analysis and is converted into this reader envelope at the tool boundary, so the code is unreachable from a plan. Predicting the thrown form produced a finding, which is how that was established. Two tools have now shown the same pattern - a reader reports rather than throws, and an internal code that never reaches a caller is a property of the design rather than a hole in the training.',
+      },
+      {
         family: 'composition', tool: 'artifact.disassemble', workspace: 'temp', fixture: realFixture,
         plan: { version: 1, name: 'read-a-real-binary-with-a-real-table', tasks: [
           { id: 'seen', tool: 'artifact.inspect', input: { path: 'program.exe' } },

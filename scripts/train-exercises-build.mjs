@@ -364,6 +364,19 @@ export function buildExercises() {
       lesson: 'A build hands its own output to a reader by reference, and the two agree about the bytes: the path comes from the receipt rather than from the plan, and the digest artifact.inspect computes independently equals the one build.run attested. That equality is the point of the receipt - it is the difference between a harness that says a build succeeded and one that can show which bytes it produced - and it closes the loop between the write side and the sixty-five readers, since whatever a build emits is immediately an artifact the rest of the harness can inspect.',
     },
 
+    {
+      family: 'build', tool: 'build.run', expectThrow: 'SCHEMA_MISMATCH', workspace: 'temp', fixture,
+      call: ({ workspaceRoot }) => runnerFor([targetFor()])
+        .execute({ target: 'main-but-not-really' }, { policy: policyFor(), workspaceRoot }),
+      lesson: 'An unreviewed target name is refused SCHEMA_MISMATCH even by a direct call, because build.run validates its own input against the enum generated from the configuration before looking the name up. So BUILD_UNKNOWN_TARGET, the tool own guard for a name it does not hold, is unreachable from anywhere - predicting it here produced a finding, which is how that was established rather than assumed. The guard stays as the backstop for a future schema that stops enumerating the names, and the honest accounting is that an unreachable code is a property of the design rather than a gap in the training: a declaration tight enough to make a check unnecessary is the better place for it.',
+    },
+    {
+      family: 'build', tool: 'build.run', expectThrow: 'BUILD_ABORTED', workspace: 'temp', fixture,
+      call: ({ workspaceRoot }) => runnerFor([targetFor()])
+        .execute({ target: 'main' }, { policy: policyFor(), workspaceRoot, signal: AbortSignal.abort() }),
+      lesson: 'A build carrying an already-aborted signal is refused BUILD_ABORTED before the toolchain is resolved or any child is spawned, so cancelling costs nothing and leaves nothing half-built. The check sits with the policy narrowing rather than inside the spawn, which is what makes that guarantee structural instead of a race the caller has to win.',
+    },
+
     // ---- what a plan can and cannot reach, now that the target is in the registry --------
     {
       family: 'build', tool: 'build.run', expectCode: 'BUILD_INPUT', grant: true, expectApprovals: 1, workspace: 'temp', fixture,

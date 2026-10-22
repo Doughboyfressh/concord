@@ -6,6 +6,7 @@ import { spawnBounded, limits, resolveExecutable, makeIntegrationTools } from '.
 import { makeReverseTools } from '../src/reverse.mjs';
 import { makeAgentTools } from '../src/workers.mjs';
 import { makeBrowserTools, discoverPageTarget } from '../src/browser.mjs';
+import { makeDecompilerTools } from '../src/decompiler.mjs';
 import { findAppBrowser } from '../src/desktop.mjs';
 import { makeForeignTools } from '../src/foreign.mjs';
 
@@ -269,8 +270,52 @@ function automateWith(workspaceRoot, url, actions, timeoutMs = 45000) {
   });
 }
 
+/**
+ * The decompiler's four refusals that need no Ghidra at all.
+ *
+ * Its configuration, its input, the policy in force and an aborted signal are all decided before
+ * a binary is read or a process is spawned, which is what makes them reachable on a machine with
+ * no distribution installed. The rest of its codes need the real protocol and stay unproven here
+ * rather than being faked with a stub that would prove something about the stub.
+ */
+const decompilerFor = (over = {}) => makeDecompilerTools({
+  executable: NODE, executableSha256: nodeDigest(), timeoutMs: 5000, maxOutputBytes: 262144, ...over,
+})[0];
+const DECOMPILE_INPUT_SHAPE = {
+  path: 'program.exe', table: 'x86-64.sla', processorSpec: 'x86-64.pspec',
+  compilerSpec: 'x86-64-win.cspec', address: '0x401000',
+};
+
 export function processExercises() {
   return [
+    {
+      family: 'process', tool: 'artifact.decompile', expectThrow: 'DECOMPILE_CONFIG',
+      call: () => decompilerFor({ unexpected: true }),
+      lesson: 'An unrecognised field in the decompiler configuration is refused DECOMPILE_CONFIG at registration. The configuration is the whole of what an operator reviewed about which binary will be executed, so a key the code cannot honour means the reviewer intended something that will not happen - which is worth refusing rather than ignoring.',
+    },
+    {
+      family: 'process', tool: 'artifact.decompile', expectThrow: 'DECOMPILE_INPUT', workspace: 'temp',
+      call: ({ workspaceRoot }) => decompilerFor().execute(
+        { ...DECOMPILE_INPUT_SHAPE, address: 'not-an-address' },
+        { workspaceRoot, policy: policyFor({ allowedTools: ['artifact.decompile'] }) },
+      ),
+      lesson: 'An address that is not 0x-prefixed hex is refused DECOMPILE_INPUT before the binary is opened, and the check lives in execute rather than in the declared schema because the kernel schema subset has no pattern keyword - declaring one would fail every plan using this tool at compile time with INVALID_SCHEMA. So the shape is declared as far as the subset allows and the alphabet is checked in code, which is the same division build.run makes for a claimed artifact digest.',
+    },
+    {
+      family: 'process', tool: 'artifact.decompile', expectThrow: 'DECOMPILE_POLICY', workspace: 'temp',
+      call: ({ workspaceRoot }) => decompilerFor().execute(
+        DECOMPILE_INPUT_SHAPE,
+        { workspaceRoot, policy: policyFor({ allowedTools: ['something.else'] }) },
+      ),
+      lesson: 'A decompiler missing from policy allowedTools is refused DECOMPILE_POLICY before any file is read, and the same code covers a policy that does not permit the process effect. Driving a decompiler means handing an untrusted binary to a parser that then defines what the program is taken to be, so the permission is checked first and reported under this layer own code rather than the browser or integration one.',
+    },
+    {
+      family: 'process', tool: 'artifact.decompile', expectThrow: 'DECOMPILE_ABORTED', workspace: 'temp',
+      call: ({ workspaceRoot }) => decompilerFor().execute(DECOMPILE_INPUT_SHAPE, {
+        workspaceRoot, policy: policyFor({ allowedTools: ['artifact.decompile'] }), signal: AbortSignal.abort(),
+      }),
+      lesson: 'An already-aborted signal refuses DECOMPILE_ABORTED before the binary is read and before decompile.exe is spawned, so cancelling a decompilation costs nothing and leaves no process behind. The check sits beside the policy narrowing rather than inside the protocol loop, which is what makes that true of a cancellation arriving before the work starts as well as during it.',
+    },
     // ---- the DevTools target list, which is the first thing a browser is believed about --
     {
       family: 'process', tool: 'browser.discoverPageTarget', expectThrow: 'BROWSER_CDP',
