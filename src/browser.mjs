@@ -191,9 +191,43 @@ function openCdpSession(wsUrl, deadline, signal) {
   return { call, ready, close, get stopped() { return stopped; } };
 }
 
+/**
+ * Open a session, retrying a connection the browser has not accepted yet.
+ *
+ * discoverPageTarget already retries its HTTP probe, for a stated reason: Chromium writes
+ * DevToolsActivePort before its endpoint is necessarily accepting connections, so the first
+ * attempt after the port appears can be refused by the socket on a loaded machine. That reason
+ * applies in full to the WebSocket opened immediately afterwards, and it was the one step with
+ * no retry - which made "CDP WebSocket connection failed" a routine outcome under load. Measured
+ * on this machine before the change: two runs of the suite in five failed, every time on a
+ * transport error rather than on anything a test asserted.
+ *
+ * Only the initial open is retried. A socket that drops while carrying a session stays fatal:
+ * the browser went away mid-conversation, and reconnecting would resume against a page whose
+ * state nobody has established.
+ */
+async function connectCdpSession(wsUrl, deadline, signal) {
+  for (;;) {
+    if (signal?.aborted) fail('BROWSER_ABORTED', 'Browser snapshot was cancelled');
+    if (Date.now() >= deadline) fail('BROWSER_TIMEOUT', 'Browser did not accept a CDP connection in time');
+    const session = openCdpSession(wsUrl, deadline, signal);
+    try {
+      await session.ready;
+      return session;
+    } catch (error) {
+      await session.close();
+      // A deadline or an abort is the answer, not something to attempt again.
+      const code = error instanceof HarnessError ? error.code : null;
+      if (code === 'BROWSER_ABORTED' || code === 'BROWSER_TIMEOUT') throw error;
+      if (Date.now() + PORT_POLL_INTERVAL_MS >= deadline) throw error;
+      await new Promise((r) => setTimeout(r, PORT_POLL_INTERVAL_MS));
+    }
+  }
+}
+
 /** Connect, navigate, wait for load, extract a bounded text snapshot, disconnect. */
 async function runCdpSession(wsUrl, url, deadline, signal, maxChars) {
-  const session = openCdpSession(wsUrl, deadline, signal);
+  const session = await connectCdpSession(wsUrl, deadline, signal);
   try {
     if (session.stopped) throw session.stopped;
     await session.ready;
@@ -251,7 +285,7 @@ const EXTRACT_FORM_FUNCTION = "function(sel,maxFields,maxValueChars){var el=docu
  * cannot pull the automation onto a different, unintended target.
  */
 async function runCdpAutomation(wsUrl, url, actions, deadline, signal, maxExtractChars) {
-  const session = openCdpSession(wsUrl, deadline, signal);
+  const session = await connectCdpSession(wsUrl, deadline, signal);
   try {
     if (session.stopped) throw session.stopped;
     await session.ready;
