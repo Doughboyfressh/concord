@@ -17,8 +17,10 @@
     config/concord-live.json. This one is committed, so a clone carries it.
 
 .PARAMETER Live
-    Point the Start Menu and Desktop shortcuts at the live model too, rather than starting in the
-    offline deterministic demonstration.
+    Name config\concord-live.json on the shortcut's own command line, and install to the Start Menu
+    alongside -InRepo. It no longer selects a mode: every entry point defaults to the live model when
+    that file exists, and there is no demonstration mode to start in instead. The switch now only makes
+    the choice explicit on the command line, so a shortcut states which configuration it opened with.
 
 .PARAMETER Remove
     Delete the shortcuts this script created, including the one in the repository.
@@ -97,7 +99,10 @@ foreach ($path in $targets) {
     $link.Arguments = "scripts\desktop.mjs$liveArgs"
     $link.WorkingDirectory = $repo
     $link.IconLocation = "$icon,0"
-    $link.Description = if ($Live) { 'Concord - live model, running locally' } else { 'Concord - policy-bound AI orchestration, running locally' }
+    # One description, because there is now only one thing to describe: both forms start the live
+    # model. The old text labelled the default shortcut as something other than live, which stopped
+    # being true when every entry point began defaulting to config\concord-live.json.
+    $link.Description = 'Concord - policy-bound AI orchestration against a live model, running locally'
     # 7 is minimised: the console that hosts the harness stays out of the way, and the
     # application window is the only thing on screen.
     $link.WindowStyle = 7

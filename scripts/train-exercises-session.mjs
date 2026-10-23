@@ -131,9 +131,11 @@ const sourceTools = () => loadSourceLock(path.join(root, 'sources.lock.json'))
  * directory nothing reads, and nothing in the suite would notice: coverage, codes and composition
  * would all stay green while the harness quietly stopped learning.
  *
- * Driven offline on purpose. The turn runs in offline-demo mode, so the recalled excerpt is
- * observed in the plan the harness proposes rather than in a model's prose — the only form of this
- * claim that can be checked deterministically, and the same form test/chat-flow.test.mjs checks.
+ * Driven with a pure proposal stand-in rather than a model, because this harness has no
+ * demonstration mode to fall back to: send() refuses CHAT_NO_MODEL without one. The recalled
+ * lesson is therefore observed in the prompt that stand-in records rather than in a model's
+ * prose - the only form of this claim that can be checked deterministically, and the same form
+ * test/chat-flow.test.mjs checks.
  */
 const RECALLED_LESSON = 'When reviewing changes for security vulnerabilities, check the authentication boundaries first.';
 const RECALL_QUERY = 'Review this change for security vulnerabilities around authentication.';
@@ -145,15 +147,45 @@ function storeLesson(dir) {
   fs.writeFileSync(path.join(dir, 'memory', `${candidateHash}.json`), JSON.stringify({ ...candidate, candidateHash }) + '\n');
 }
 
-/** A chat harness over the round's own registry, pointed at the scratch workspace. */
+/**
+ * The stand-in that lets a turn be exercised at all.
+ *
+ * There is no demonstration mode in this harness: a turn needs a model to propose, or send()
+ * refuses CHAT_NO_MODEL before it mutates anything. The exercises here are about context
+ * assembly and enrichment rather than about a model call, so they supply one. Declared `pure`
+ * because it reaches no network, which is what keeps these turns from stopping at a grant - the
+ * same stand-in, for the same stated reason, as test/chat-flow.test.mjs.
+ *
+ * It records the prompt it was given. That is the whole instrument: what reached the model is the
+ * only place an enrichment can be observed without asking a model to describe its own input.
+ */
+let lastProposalPrompt = null;
+const proposalFixture = {
+  name: 'model.propose', version: 'fixture-1', effect: 'pure',
+  inputSchema: { type: 'object' }, config: { fixture: true },
+  execute(input) {
+    lastProposalPrompt = parseJson(input.prompt);
+    return { model: 'fixture-1', proposal: {
+      reply: 'Proposed a pure-tool plan over the reviewed sources.',
+      plan: { version: 1, tasks: [{ id: 'coverage', tool: 'sources.catalog', input: {} }] },
+    } };
+  },
+};
+
+/** A chat harness over the round's own registry plus the proposal stand-in, pointed at the scratch workspace. */
 async function chatOver({ registry, policy, workspaceRoot }) {
   const catalog = await loadSourceLock(path.join(root, 'sources.lock.json'));
   const inventory = parseJson(fs.readFileSync(path.join(root, 'capabilities.lock.json'), 'utf8'));
-  const buildContext = ({ message, history, observations, proposedPlan, policy: turnPolicy }) => buildChatContext({
-    message, history, observations, proposedPlan, policy: turnPolicy,
-    sourceLock: catalog, inventory, registry, instructionRoot: path.join(root, 'instructions'),
+  // Added rather than substituted, and the policy widened to match: a tool absent from
+  // allowedTools is filtered out of the turn entirely, so registering the stand-in without
+  // naming it here would leave the session with nothing able to propose.
+  const withProposal = new Map([...registry, [proposalFixture.name, proposalFixture]]);
+  const turnPolicy = { ...policy, allowedTools: [...new Set([...policy.allowedTools, proposalFixture.name])] };
+  const buildContext = ({ message, history, observations, proposedPlan, policy: contextPolicy }) => buildChatContext({
+    message, history, observations, proposedPlan, policy: contextPolicy,
+    sourceLock: catalog, inventory, registry: withProposal, instructionRoot: path.join(root, 'instructions'),
   });
-  return createChatHarness({ registry, policy, sourceLock: catalog, workspaceRoot, buildContext });
+  return createChatHarness({ registry: withProposal, policy: turnPolicy, sourceLock: catalog, workspaceRoot, buildContext });
 }
 
 /**
@@ -261,13 +293,19 @@ export function sessionExercises() {
       family: 'session', tool: 'chat.recall', workspace: 'temp', fixture: storeLesson,
       call: async (context) => {
         const harness = await chatOver(context);
+        lastProposalPrompt = null;
         const turn = await harness.send(RECALL_QUERY);
-        const memoryTask = turn.proposedPlan?.tasks?.find((task) => task.id === 'memory');
-        const lesson = memoryTask?.input?.lesson ?? '';
+        const recalled = lastProposalPrompt?.references?.memory ?? null;
         return {
           mode: turn.mode,
-          recalled: lesson.includes('Relevant past memory'),
-          carriesTheLesson: lesson.includes('authentication boundaries'),
+          // Observed where the lesson actually lands: in the prompt the model was given. Reading
+          // it back out of the proposed plan would only prove the stand-in copied it forward.
+          reachedTheModel: typeof recalled?.lesson === 'string' && recalled.lesson.includes('authentication boundaries'),
+          // It travels with its evidence standing, which is what keeps a recalled lesson
+          // reference rather than authority: nothing here can ground it, and the turn says so.
+          groundedCount: recalled?.evidence?.groundedCount ?? null,
+          unverifiedHereCount: recalled?.evidence?.unverifiedHereCount ?? null,
+          truncated: recalled?.truncated ?? null,
           // Measured rather than predicted on the first attempt: one of the three runs fails, and
           // asserting "every run completed" turned a healthy turn into a finding.
           statuses: turn.runs.map((run) => run.status).join(','),
@@ -275,10 +313,11 @@ export function sessionExercises() {
           replied: turn.history.some((entry) => entry.role === 'assistant' && entry.content.length > 0),
         };
       },
-      expect: (r) => r.mode === 'offline-demo' && r.recalled === true && r.carriesTheLesson === true
+      expect: (r) => r.mode === 'live' && r.reachedTheModel === true
+        && r.groundedCount === 0 && r.unverifiedHereCount === 1 && r.truncated === false
         && r.noPendingApproval === true && r.replied === true
         && r.statuses === 'failed,completed,completed',
-      lesson: 'A lesson this harness earned in an earlier round is recalled by a later turn and spliced into the plan that turn proposes, before any model is asked anything. That is the whole of what makes this harness adaptive without touching a weight: memory.recall scores the stored lessons against the incoming message, the best match travels into the turn as a quoted past memory, and it runs as its own read-effect plan that never produces a pending approval — so experience changes the next turn without ever becoming an authority to act. One turn is three plans, and their statuses here are failed, completed, completed: the skill enrichment fails because this scratch workspace holds no skill corpus, and the turn is entirely unaffected — the memory enrichment completes, the recalled lesson still reaches the proposed plan, and the primary run still replies. The enrichment attempts are independent and soft-failing by design, which is why a missing corpus degrades a turn rather than breaking it. Predicting that every run completed was the first version of this exercise, and the round reported it as a finding rather than promoting it, which is the discipline working: the three statuses above were measured and only then written down.',
+      lesson: 'A lesson this harness earned in an earlier round is recalled by a later turn and reaches the model as reference data, before the model is asked anything. That is the whole of what makes this harness adaptive without touching a weight: memory.recall scores the stored lessons against the incoming message and the best match travels into the turn under references.memory, as its own read-effect plan that never produces a pending approval - so experience changes the next turn without ever becoming an authority to act. It arrives carrying its evidence standing rather than as a bare sentence: groundedCount 0 and unverifiedHereCount 1 state plainly that nothing in this workspace can verify the lesson, so the model is told what the claim is worth instead of being handed it as established. The turn runs in live mode with a pure proposal stand-in, because this harness has no demonstration mode: send() refuses CHAT_NO_MODEL without a model, so the earlier form of this exercise - which asserted an offline-demo mode and read the recalled text back out of the proposed plan - was asserting a mode that had been removed. Observing the prompt instead is also the stronger claim: a recalled lesson found in the proposed plan only proves the stand-in copied it forward, whereas finding it in the prompt proves it reached whatever is deciding. One turn is three plans, and their statuses here are failed, completed, completed: the skill enrichment fails because this scratch workspace holds no skill corpus, and the turn is entirely unaffected - the memory enrichment completes, the lesson still reaches the model, and the primary run still replies. Predicting that every run completed was the first version of this exercise, and the round reported it as a finding rather than promoting it, which is the discipline working: every number above was measured and only then written down.',
     },
     // ---- the channel itself ------------------------------------------------------------
     {

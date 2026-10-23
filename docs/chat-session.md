@@ -8,10 +8,12 @@ far. It returns five methods: `send`, `approve`, `executePlan`, `replay`, `snaps
 ## The turn cycle
 
 1. **`send(message)`** appends the message to history, calls `buildContext({message, history, observations, proposedPlan, policy})` (see
-   [source-derived instructions](chat-instructions.md)), and proposes exactly one plan: a deterministic
-   pure-tool demonstration plan when no `model.propose` tool is registered, or a single-task plan that calls
-   `model.propose` when one is. The proposed plan is validated structurally (`inspectPlan`) before it is
-   accepted, then attempted immediately.
+   [source-derived instructions](chat-instructions.md)), and proposes exactly one plan: a single-task plan
+   that calls `model.propose`. With no `model.propose` registered there is no plan to propose and the turn
+   refuses `CHAT_NO_MODEL` before it mutates anything - there is no demonstration branch to fall back to,
+   because a harness that looks like it is working when nothing is configured is the confusion this project
+   exists to refuse. The proposed plan is validated structurally (`inspectPlan`) before it is accepted, then
+   attempted immediately.
 2. **Attempting a plan** means calling the kernel's `runPlan` with the currently granted approvals. Tasks whose
    tool has a `pure` or `read` effect always run; `write`, `network`, and `process` tasks run only if their
    exact request hash has already been approved. A plan built entirely from `pure`/`read` tools therefore
