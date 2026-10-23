@@ -1,0 +1,28 @@
+# This repository hashes its own files.
+#
+# instructions/manifest.json pins every instruction module by SHA-256 of its exact bytes, and
+# src/app.mjs hashes src/*.mjs plus the app/ assets into sourceLock.runtime.files, which is bound
+# into every approval request hash and checked on replay. A line ending is a byte.
+#
+# With core.autocrlf=true and no attributes file, git normalises to LF in the index and writes
+# CRLF into the working tree on checkout. The result is a tree git reports as clean -- because it
+# compares after normalising -- whose raw bytes no longer match the digests recorded against
+# them. That is not a theoretical hazard: committing three instruction modules was enough to make
+# every chat turn fail CHAT_CONTEXT with "Instruction module does not match its recorded digest",
+# on a working tree with no uncommitted changes.
+#
+# So the working tree is LF on every platform. Nothing here is cosmetic.
+* text=auto eol=lf
+
+# Binary files git must never touch, listed rather than left to detection.
+*.ico binary
+*.png binary
+*.jpg binary
+*.gz binary
+*.zip binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.sla binary
+*.pdf binary
