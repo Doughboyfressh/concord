@@ -100,7 +100,12 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
   // Deliberately not defaulted: --build and the process entries under --integrations. Those name
   // an exact argv to execute, and inventing one on an operator's behalf is the single thing this
   // kernel's design is most careful to refuse. They stay explicit, per workspace.
-  for (const [flag, file] of [['browser', 'browser.json'], ['decompiler', 'decompiler.json'], ['workers', 'workers.json'], ['web', 'web.json']]) {
+  // `build` is here on a narrower basis than the rest. A build target names an exact argv, and a
+  // plan must never choose one -- that is the rule. config/build.json is the other side of that
+  // rule: argv chosen once, in a file an operator can read, and still unable to run without an
+  // exact grant per invocation. It is picked up only because the file exists, so deleting the
+  // file removes the capability.
+  for (const [flag, file] of [['browser', 'browser.json'], ['decompiler', 'decompiler.json'], ['workers', 'workers.json'], ['web', 'web.json'], ['build', 'build.json']]) {
     if (flags[flag] !== undefined) continue;
     const candidate = path.join(root, 'config', file);
     if (fs.existsSync(candidate)) flags = { ...flags, [flag]: candidate };

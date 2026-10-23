@@ -1,0 +1,40 @@
+{
+  "timeoutMs": 600000,
+  "maxOutputBytes": 1048576,
+  "targets": [
+    {
+      "name": "check",
+      "system": "npm",
+      "executable": "C:/Program Files/nodejs/node.exe",
+      "executableSha256": "5c976096e04e5c2c1f091938926234cc9fbebfe9787ddd149351b3b0ecc707b5",
+      "args": [
+        "scripts/check.mjs"
+      ],
+      "diagnostics": "node-uncaught-v1",
+      "inputs": [
+        "src"
+      ],
+      "artifacts": [],
+      "timeoutMs": 120000
+    },
+    {
+      "name": "validate",
+      "system": "npm",
+      "executable": "C:/Program Files/nodejs/node.exe",
+      "executableSha256": "5c976096e04e5c2c1f091938926234cc9fbebfe9787ddd149351b3b0ecc707b5",
+      "args": [
+        "scripts/validate.mjs"
+      ],
+      "diagnostics": "node-uncaught-v1",
+      "inputs": [
+        "src",
+        "scripts",
+        "test",
+        "app",
+        "instructions"
+      ],
+      "artifacts": [],
+      "timeoutMs": 600000
+    }
+  ]
+}
