@@ -3,48 +3,127 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <title>Concord — Chat workspace</title>
+  <!-- Both, deliberately. The page follows the system theme and an explicit override is stored
+       per machine. The strict CSP forbids an inline bootstrap script, so an override that differs
+       from the system theme can flash once before client.mjs runs; the alternative is relaxing
+       script-src, which is not worth a frame. -->
+  <meta name="color-scheme" content="light dark">
+  <title>Concord</title>
   <link rel="stylesheet" href="/style.css">
   <script type="module" src="/client.mjs"></script>
 </head>
 <body>
-  <div class="app-shell">
-    <header class="topbar">
-      <a class="brand" href="/" aria-label="Concord home"><span class="brand-mark" aria-hidden="true">c<span></span></span><span>concord<span class="brand-dot">.</span></span></a>
-      <div class="workspace-label"><span class="workspace-dot"></span> Local workspace <span class="separator">/</span> <strong>Chat</strong></div>
-      <div class="top-actions"><span id="mode-badge" class="mode-badge">Connecting</span><button id="sources-toggle" class="icon-button sources-toggle" type="button" aria-controls="source-sidebar" aria-expanded="false">Sources</button><span class="local-badge"><span></span> LOCAL</span></div>
+  <!-- Icon definitions. Inline SVG rather than glyph characters: a glyph renders differently on
+       every machine and carries no accessible name. Not an <img>, so no img-src involvement. -->
+  <svg class="sprite" aria-hidden="true" focusable="false">
+    <symbol id="i-rail" viewBox="0 0 16 16"><path d="M2 3h12M2 8h12M2 13h12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+    <symbol id="i-send" viewBox="0 0 16 16"><path d="M8 13V3m0 0L4 7m4-4 4 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-gate" viewBox="0 0 16 16"><path d="M8 1.5 14 4v4.5c0 3.2-2.4 5.4-6 6.5-3.6-1.1-6-3.3-6-6.5V4z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M5.5 8l1.8 1.8L10.8 6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-receipt" viewBox="0 0 16 16"><path d="M3.5 1.5h9v13l-2-1.2-2 1.2-2-1.2-2 1.2z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M6 5h4M6 7.5h4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+    <symbol id="i-replay" viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.9-4.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M13.5 1.5v3h-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 16 16"><rect x="5.5" y="5.5" width="9" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 3.5v-1a1 1 0 0 0-1-1h-7a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></symbol>
+    <symbol id="i-plan" viewBox="0 0 16 16"><circle cx="4" cy="4" r="2" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="4" cy="12" r="2" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="12" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M5.7 5.2 10.3 7M5.7 10.8 10.3 9" fill="none" stroke="currentColor" stroke-width="1.3"/></symbol>
+    <symbol id="i-lesson" viewBox="0 0 16 16"><path d="M8 1.5a4.5 4.5 0 0 0-2.6 8.2v1.8h5.2V9.7A4.5 4.5 0 0 0 8 1.5z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M6.4 14h3.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></symbol>
+    <symbol id="i-theme" viewBox="0 0 16 16"><path d="M8 1.5a6.5 6.5 0 1 0 6.5 6.5A5 5 0 0 1 8 1.5z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></symbol>
+    <symbol id="i-quote" viewBox="0 0 16 16"><path d="M3 11V8.5C3 6 4.4 4.6 6.5 4.5v1.8C5.4 6.4 4.8 7 4.8 8H6.4V11zm6.6 0V8.5c0-2.5 1.4-3.9 3.5-4v1.8c-1.1.1-1.7.7-1.7 1.7H13V11z" fill="currentColor"/></symbol>
+  </svg>
+
+  <div class="shell" id="shell">
+    <header class="titlebar">
+      <button id="rail-toggle" class="icon-btn" type="button" aria-controls="rail" aria-expanded="true" aria-label="Toggle the session panel">
+        <svg class="icon" aria-hidden="true"><use href="#i-rail"/></svg>
+      </button>
+      <span class="wordmark">Concord</span>
+      <span id="mode-chip" class="chip" data-mode="unknown">Connecting</span>
+      <span class="titlebar-spacer"></span>
+      <span id="authority-chip" class="chip chip-quiet" title="The authority in force for the latest turn">authority pending</span>
+      <button id="theme-toggle" class="icon-btn" type="button" aria-label="Switch colour theme">
+        <svg class="icon" aria-hidden="true"><use href="#i-theme"/></svg>
+      </button>
     </header>
 
-    <aside id="source-sidebar" class="source-sidebar" aria-label="Source knowledge and capabilities">
-      <div class="sidebar-top"><span class="eyebrow">WORKSPACE</span><button id="sources-close" type="button" class="icon-button sources-close" aria-label="Close sources">×</button></div>
-      <button id="chat-nav" class="nav-item active" type="button"><span aria-hidden="true">◈</span> Conversation <span class="nav-count" id="message-count">0</span></button>
-      <button id="evidence-nav" class="nav-item" type="button"><span aria-hidden="true">▤</span> Run evidence <span class="nav-count" id="run-count">0</span></button>
-      <div class="source-heading"><span class="eyebrow">SOURCE KNOWLEDGE</span><span id="source-count" class="count-badge">0</span></div>
-      <p class="sidebar-description">Instructions, skills, and tools brought into one conversation.</p>
-      <div id="source-list" class="source-list"><p class="muted small">Loading source coverage…</p></div>
-      <div class="sidebar-footer"><span class="mini-shield" aria-hidden="true">◇</span><div><strong>Explicit effects. Recorded evidence.</strong><p>Protected actions require your approval.</p></div></div>
-    </aside>
+    <div id="progress" class="progress" hidden><span></span></div>
 
-    <main class="chat-main">
-      <div class="chat-heading"><div><span class="eyebrow">CONCORD CHAT</span><h1>Your tools, in one conversation.</h1><p id="mode-description">Connecting to your local harness…</p></div><span id="activity" class="activity" role="status"><span></span>Connecting</span></div>
-      <div id="conversation" class="conversation" aria-label="Conversation" aria-live="polite" aria-relevant="additions text">
-        <div id="empty-state" class="empty-state"><div class="welcome-symbol" aria-hidden="true">✳</div><h2>Start with what you want to do.</h2><p>Concord assembles relevant source instructions, proposes a plan, and records the tools it uses.</p><div class="suggestions"><button type="button" data-prompt="Show me the capabilities available in this harness.">Explore capabilities <span>↗</span></button><button type="button" data-prompt="Inspect the source knowledge and explain what is connected.">Inspect source knowledge <span>↗</span></button><button type="button" data-prompt="Propose a safe plan to review this workspace.">Plan a workspace review <span>↗</span></button></div></div>
+    <nav id="rail" class="rail" aria-label="Session">
+      <section class="rail-block">
+        <label class="sr-only" for="thread-search">Search this conversation</label>
+        <input id="thread-search" class="rail-search" type="search" autocomplete="off" placeholder="Search this conversation">
+      </section>
+      <section class="rail-block">
+        <h2 class="rail-title">Sessions <span id="session-count" class="pill">0</span></h2>
+        <ol id="session-list" class="turn-index"></ol>
+      </section>
+      <section class="rail-block">
+        <h2 class="rail-title">Turns <span id="turn-count" class="pill">0</span></h2>
+        <ol id="turn-index" class="turn-index"></ol>
+      </section>
+      <section class="rail-block">
+        <h2 class="rail-title">Authority in force</h2>
+        <dl id="authority" class="facts"></dl>
+        <details class="disclose">
+          <summary>Registered tools <span id="tool-count" class="pill">0</span></summary>
+          <ul id="tool-list" class="tool-list"></ul>
+        </details>
+      </section>
+      <section class="rail-block">
+        <h2 class="rail-title">Workspace</h2>
+        <dl id="inventory" class="facts"></dl>
+        <details class="disclose">
+          <summary>Source coverage <span id="source-count" class="pill">0</span></summary>
+          <ul id="source-list" class="source-list"></ul>
+        </details>
+      </section>
+      <section class="rail-block">
+        <h2 class="rail-title">Peer exchange <span id="exchange-count" class="pill">0</span></h2>
+        <div id="exchange-list" class="exchange-list"></div>
+      </section>
+    </nav>
+
+    <main class="main">
+      <!-- Deliberately NOT a live region. Marking the whole transcript aria-live made every
+           repaint re-announce the entire conversation, and it competed with the two real status
+           regions (#activity and #toast). #activity is the single announcer for turn progress. -->
+      <div id="thread" class="thread" aria-busy="false">
+        <section id="empty" class="empty">
+          <h1>What do you want to do?</h1>
+          <p>Concord assembles the relevant instructions, proposes one plan, and records every effect it runs. Anything that writes, fetches, or spawns stops for your approval first.</p>
+          <div class="suggestions">
+            <button type="button" data-prompt="Show me the capabilities available in this harness.">What can you do?</button>
+            <button type="button" data-prompt="Inspect the source knowledge and explain what is connected.">What is connected?</button>
+            <button type="button" data-prompt="Propose a safe plan to review this workspace.">Review this workspace</button>
+          </div>
+        </section>
       </div>
-      <div class="composer-zone"><p id="request-error" class="request-error" role="alert" hidden></p><form id="composer" class="composer"><label class="sr-only" for="message">Message Concord</label><textarea id="message" name="message" rows="2" maxlength="32768" placeholder="Ask Concord to research, build, inspect, or use a capability…" required></textarea><div class="composer-bottom"><span><span class="composer-plus" aria-hidden="true">✧</span> Source-aware context <span class="composer-shortcut">Enter to send · Shift + Enter for a new line</span></span><button id="send-button" class="send-button" type="submit" aria-label="Send message">↑</button></div></form><p class="composer-caption"><span id="composer-mode">Local harness</span><span>Review exact inputs before approving protected effects.</span></p></div>
-    </main>
 
-    <aside class="control-sidebar" aria-label="Plan, approvals, and evidence">
-      <div class="control-title"><span class="eyebrow">RUN CONTROL</span><span class="control-dot"></span></div>
-      <section id="approval-panel" class="control-card approval-card" aria-labelledby="approval-title"><div class="card-heading"><span class="card-icon" aria-hidden="true">◇</span><h2 id="approval-title">Effect approval</h2></div><div id="approval-content"><p class="muted small">No effect awaiting approval.</p></div></section>
-      <section class="control-card" aria-labelledby="plan-title"><div class="card-heading"><span class="card-icon" aria-hidden="true">⌘</span><h2 id="plan-title">Proposed plan</h2><span id="plan-count" class="count-badge">0</span></div><div id="plan-content"><p class="muted small">Your next plan will appear here.</p></div></section>
-      <section class="control-card context-card" aria-labelledby="context-title"><div class="card-heading"><span class="card-icon" aria-hidden="true">✧</span><h2 id="context-title">Active context</h2><span id="context-count" class="count-badge">0</span></div><div id="context-content"><p class="muted small">Source instructions are selected with each turn.</p></div></section>
-      <section id="runs-panel" class="control-card runs-card" aria-labelledby="runs-title"><div class="card-heading"><span class="card-icon" aria-hidden="true">▤</span><h2 id="runs-title">Run evidence</h2></div><div id="run-list"><p class="muted small">Completed and blocked runs appear here.</p></div></section>
-      <section id="exchange-panel" class="control-card" aria-labelledby="exchange-title"><div class="card-heading"><span class="card-icon" aria-hidden="true">⇄</span><h2 id="exchange-title">Connected provider</h2><span id="exchange-count" class="count-badge">0</span></div><div id="exchange-content"><p class="muted small">Every prompt you send here is also filed for the provider connected over MCP. Its answers appear here when it collects them.</p></div></section>
-      <div class="runtime-summary"><span class="eyebrow">LOCAL INVENTORY</span><div id="inventory" class="inventory"><span>Waiting for inventory</span></div><details class="tools-details"><summary>Registered tools</summary><pre id="tool-list">Loading…</pre></details></div>
-    </aside>
+      <div class="dock">
+        <p id="progress-note" class="progress-note" hidden></p>
+        <p id="error" class="error" role="alert" hidden></p>
+        <!-- While an effect is awaiting approval the dock shows this instead of the composer.
+             Not decoration: the harness has no guard against it, so a new message silently
+             replaces the pending approval with a fresh proposal. Abandoning a gate has to be a
+             thing you chose, not a thing that happened while you were typing. -->
+        <div id="gate-bar" class="gate-bar" hidden></div>
+        <form id="composer" class="composer">
+          <label class="sr-only" for="message">Message Concord</label>
+          <textarea id="message" name="message" rows="1" maxlength="32768" placeholder="Ask Concord to inspect, build, or use a capability…" required></textarea>
+          <button id="send" class="send" type="submit" aria-label="Send">
+            <svg class="icon" aria-hidden="true"><use href="#i-send"/></svg>
+          </button>
+        </form>
+        <p class="dock-hint">
+          <span id="activity" class="activity" role="status">Connecting</span>
+          <button id="cancel" class="ghost cancel" type="button" hidden>Stop</button>
+          <span class="dock-keys"><kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> newline · <kbd>Ctrl</kbd>+<kbd>K</kbd> focus · <kbd>Ctrl</kbd>+<kbd>B</kbd> panel</span>
+        </p>
+      </div>
+    </main>
   </div>
-  <button id="sources-backdrop" class="sources-backdrop" type="button" aria-label="Close source panel" hidden></button>
-  <div id="toast" class="toast" role="status" hidden></div>
+
+  <!-- The one place a reply is announced. The transcript itself is not a live region (that
+       re-announced the whole conversation on every repaint), so without this a screen reader
+       would hear only "Ready" when an answer arrives. -->
+  <p id="announce" class="sr-only" role="status" aria-live="polite"></p>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 </body>
 </html>

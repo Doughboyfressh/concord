@@ -10,7 +10,7 @@ A plan is a frozen DAG. Nodes name a tool, JSON input, direct dependencies and o
 
 Operation identity binds the plan, normalized policy, source catalog, tool configuration, function declarations and explicit workspace. The CLI also binds exact Concord source bytes and Node runtime identity. Corpus selection binds the capability inventory digest. External binaries and model weights need their own content/version pins.
 
-The model proposes; the structured judge advises; the kernel authorizes and schedules. Verification and postconditions determine whether dependents proceed. Experience produces an inert memory candidate. Promotion is a separate write under an exact grant, keeping learned text from becoming authority. An offline demonstration exercises the same context and tool broker while explicitly identifying that it is not live inference.
+The model proposes; the structured judge advises; the kernel authorizes and schedules. Verification and postconditions determine whether dependents proceed. Experience produces an inert memory candidate. Promotion is a separate write under an exact grant, keeping learned text from becoming authority. There is no demonstration mode: with no model registered a turn refuses with CHAT_NO_MODEL rather than answering from pure tools, because a harness that looks like it is working when it is not is the confusion this project exists to refuse.
 
 ```mermaid
 flowchart LR

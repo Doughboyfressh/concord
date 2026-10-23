@@ -15,8 +15,7 @@ far. It returns five methods: `send`, `approve`, `executePlan`, `replay`, `snaps
 2. **Attempting a plan** means calling the kernel's `runPlan` with the currently granted approvals. Tasks whose
    tool has a `pure` or `read` effect always run; `write`, `network`, and `process` tasks run only if their
    exact request hash has already been approved. A plan built entirely from `pure`/`read` tools therefore
-   completes in the same call that proposed it — that is the offline demonstration's "executable pure tool
-   plan." A plan with an ungranted effect stops there; its `requestHash`, `tool`, `effect`, and resolved `input`
+   completes in the same call that proposed it. A plan with an ungranted effect stops there; its `requestHash`, `tool`, `effect`, and resolved `input`
    surface as `pending` on the returned state, and nothing beyond that point in the plan has executed.
 3. **`approve(requestHash)`** accepts only the hash currently in `pending`; anything else throws. On match, the
    hash joins the harness's accumulated approval set and the current proposed plan is attempted again. If that

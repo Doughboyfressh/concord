@@ -57,36 +57,7 @@ const PRINCIPLES = {
 
 // The harness's own infrastructure plans. Excluded from success lessons because they run every
 // turn and teach nothing about the work the operator asked for.
-const INFRASTRUCTURE_PLANS = new Set(['live-proposal', 'memory-enrichment', 'skill-enrichment', 'offline-demo']);
-
-function excerptNote(skillExcerpt) {
-  if (!skillExcerpt) return '';
-  return ` Untrusted reference skill (${skillExcerpt.sourceId}): ${skillExcerpt.title} — "${skillExcerpt.text}"`;
-}
-
-function memoryNote(memoryExcerpt) {
-  if (!memoryExcerpt) return '';
-  return ` Relevant past memory: "${memoryExcerpt.lesson}"`;
-}
-
-function offlineDemoPlan(context, message, skillExcerpt, memoryExcerpt) {
-  return {
-    version: 1,
-    name: 'offline-demo',
-    tasks: [
-      { id: 'coverage', tool: 'sources.catalog', input: {} },
-      { id: 'capabilities', tool: 'capabilities.search', input: { query: message, limit: 5 } },
-      {
-        id: 'memory', tool: 'memory.candidate', dependsOn: ['coverage', 'capabilities'],
-        input: {
-          lesson: `Offline deterministic demonstration selected all ${context.sourceCoverage.length} reviewed ` +
-            'source modules and executed a pure-tool evidence plan.' + excerptNote(skillExcerpt) + memoryNote(memoryExcerpt),
-          evidence: [{ $task: 'coverage' }, { $task: 'capabilities' }],
-        },
-      },
-    ],
-  };
-}
+const INFRASTRUCTURE_PLANS = new Set(['live-proposal', 'memory-enrichment', 'skill-enrichment']);
 
 function livePlan(message, context, skillExcerpt, memoryExcerpt) {
   const input = { prompt: canonical({
@@ -119,7 +90,7 @@ function blockedDetail(result) {
  * proposal is structurally validated before it can become the next proposed plan —
  * it is data, never an instruction the supervisor obeys automatically.
  */
-export function createChatHarness({ registry, policy, sourceLock, workspaceRoot, buildContext, persistRun }) {
+export function createChatHarness({ registry, policy, sourceLock, workspaceRoot, buildContext, persistRun, onProgress }) {
   if (!(registry instanceof Map)) throw new HarnessError('CHAT_CONFIG', 'A tool registry Map is required');
   if (typeof buildContext !== 'function') throw new HarnessError('CHAT_CONFIG', 'A context builder is required');
 
@@ -132,6 +103,9 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
   let proposedPlan = null;
   let lastAttemptedPlan = null;
   let pending = null;
+  // The AbortController of the attempt currently executing, or null. A turn can run for the whole
+  // policy deadline, so there has to be a way to stop one without killing the process.
+  let inflight = null;
   let mode = null;
   let sourceCoverage = [];
   let selected = [];
@@ -310,7 +284,17 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
   }
 
   async function attempt(plan) {
-    const result = await runPlan({ plan, policy: turnPolicy, registry, sourceLock, approvals: [...approvals], workspaceRoot });
+    // One controller per attempt, so cancel() can reach whatever is actually in flight. Cleared
+    // in the finally below rather than on success, because a failed attempt must not leave a
+    // stale controller that a later cancel would abort to no effect.
+    const controller = new AbortController();
+    inflight = controller;
+    let result;
+    try {
+      result = await runPlan({ plan, policy: turnPolicy, registry, sourceLock, approvals: [...approvals], workspaceRoot, signal: controller.signal, onProgress });
+    } finally {
+      if (inflight === controller) inflight = null;
+    }
     const id = digest(result).slice(0, 24);
     // planHash makes `runs` a durable, content-addressed execution ledger. Unlike the bounded
     // observation window fed to the model, `runs` is never truncated, so "did this proposed plan
@@ -530,6 +514,12 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
 
   async function send(message, options = {}) {
     if (typeof message !== 'string' || !message.trim()) throw new HarnessError('CHAT_INPUT', 'A nonempty chat message is required');
+    // A model is required to propose. There is no demonstration path: a harness that answers from
+    // its own pure tools when nothing is configured looks like it is working and is not, which is
+    // precisely the confusion this project exists to refuse. Checked before anything is mutated,
+    // so a refused turn leaves no orphaned user message in the history, and raised per-turn rather
+    // than at startup so an operator with no model can still read state, runs and receipts.
+    if (!isLive()) throw new HarnessError('CHAT_NO_MODEL', 'No model adapter is registered, so no plan can be proposed; start with --integrations naming a model.propose configuration');
     // Least authority derived per request, after hermes's webhook-safe toolset: a caller that knows
     // this turn's input is untrusted narrows the turn before the model is asked to plan. Computed
     // first so the context the model receives describes the authority it will actually get.
@@ -541,15 +531,8 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
     selected = Array.isArray(context.selected) ? [...context.selected] : [];
     const skillExcerpt = await fetchSkillExcerpt();
     const memoryExcerpt = await fetchMemoryExcerpt(message);
-    mode = isLive() ? 'live' : 'offline-demo';
-    if (mode === 'offline-demo') {
-      adoptPlan(offlineDemoPlan(context, message, skillExcerpt, memoryExcerpt));
-      if (typeof context.reply === 'string' && context.reply.trim()) {
-        history.push({ role: 'assistant', content: context.reply, execution: { kind: 'plan-proposed', planHash: digest(proposedPlan) } });
-      }
-    } else {
-      adoptPlan(livePlan(message, context, skillExcerpt, memoryExcerpt));
-    }
+    mode = 'live';
+    adoptPlan(livePlan(message, context, skillExcerpt, memoryExcerpt));
     applyOutcome(await attempt(proposedPlan));
     return snapshot();
   }
@@ -600,5 +583,18 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
     };
   }
 
-  return { send, approve, executePlan, replay, snapshot };
+  /**
+   * Stop whatever is executing. The in-flight tool raises its own abort code, so the run is
+   * recorded as failed with a real diagnostic rather than vanishing: a cancelled turn is still a
+   * turn that happened, and for a gated effect the receipt says EFFECT_INDETERMINATE, which is
+   * the truth. Returns the snapshot as of now; the caller whose send() was cancelled receives
+   * the settled failure on its own response.
+   */
+  function cancel() {
+    if (!inflight) throw new HarnessError('CHAT_NOTHING_RUNNING', 'No turn is currently running');
+    inflight.abort();
+    return snapshot();
+  }
+
+  return { send, approve, executePlan, replay, cancel, snapshot };
 }

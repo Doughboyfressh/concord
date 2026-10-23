@@ -18,6 +18,7 @@ import { makeReaderTools } from './readers.mjs';
 import { makeForeignTools } from './foreign.mjs';
 import { makeMailboxTools, fileMessage, readMailbox } from './peer.mjs';
 import { makeSkillStoreTools } from './skillstore.mjs';
+import { modelCredentialPlan } from './desktop.mjs';
 import { makeInstructionTools } from './instructions.mjs';
 import { makeGovernanceTools } from './governance.mjs';
 import { buildChatContext } from './chat-context.mjs';
@@ -81,7 +82,26 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
   fs.mkdirSync(store, { recursive: true });
   const catalog = await loadSourceLock(path.join(root, 'sources.lock.json'));
   const inventory = readJson(path.join(root, 'capabilities.lock.json'));
+  // Live by default, for every entrypoint rather than only the windowed one. There is no
+  // demonstration mode to fall back to any more, so a launcher that ignored an already-configured
+  // model would refuse every turn until the operator remembered a flag. scripts/desktop.mjs has
+  // defaulted this for a while and scripts/chat.mjs did not, which is the entire reason a machine
+  // with a working model could still report itself as a demo. An explicit --integrations wins.
+  if (flags.integrations === undefined) {
+    const live = path.join(root, 'config', 'concord-live.json');
+    if (fs.existsSync(live)) flags = { ...flags, integrations: live };
+  }
   const integrations = flags.integrations ? readJson(flags.integrations) : {};
+  // The same credential decision the windowed launcher has always made, moved here so both
+  // launchers make it. A loopback model server ignores the key, but the adapter still refuses
+  // without one, so a configured local model worked from the desktop app and failed from the
+  // terminal with INTEGRATION_CREDENTIAL -- the same split that let a live machine report itself
+  // as a demo. Decided from configuration and the environment only; nothing is probed, and an
+  // already-set variable is never overwritten.
+  const credential = modelCredentialPlan(integrations.model);
+  if (credential.setEnv && !process.env[credential.setEnv.name]) {
+    process.env[credential.setEnv.name] = credential.setEnv.value;
+  }
   const workers = flags.workers ? readJson(flags.workers) : {};
   const browser = flags.browser ? readJson(flags.browser) : undefined;
   const decompiler = flags.decompiler ? readJson(flags.decompiler) : undefined;
@@ -126,8 +146,16 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
       .filter((value) => Number.isInteger(value) && value > 0)))
   };
   const visibleRegistry = new Map([...registry].filter(([name, tool]) => policy.allowedTools.includes(name) && policy.allowedEffects.includes(tool.effect)));
+  // Live progress listeners. Deliberately fire-and-forget: a turn's correctness never depends on
+  // anyone watching, and a listener that throws is dropped rather than allowed to affect the run.
+  const progressListeners = new Set();
   const harness = createChatHarness({
     registry, policy, sourceLock, workspaceRoot,
+    onProgress: (update) => {
+      for (const listener of progressListeners) {
+        try { listener(update); } catch { progressListeners.delete(listener); }
+      }
+    },
     buildContext: ({ message, history, observations, proposedPlan }) => buildChatContext({ message, history, observations, proposedPlan, sourceLock: catalog, inventory, registry: visibleRegistry, policy, instructionRoot: path.join(root, 'instructions') }),
     persistRun: async record => {
       const id = record.id ?? digest(record).slice(0, 24);
@@ -142,7 +170,69 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
       }
     }
   });
-  const wrapped = { snapshot: () => harness.snapshot(), exchange: () => readMailbox(mailboxDir) };
+  // Past sessions. Every turn already appends a snapshot to session.jsonl, so the transcripts
+  // exist on disk and nothing could read them back. Read-only by construction: a past session is
+  // a recorded transcript, not a conversation to resume. Resuming would mean adopting another
+  // session's approvals and proposed plan as if they were this one's, and an approval is bound to
+  // the run that requested it.
+  const SESSION_ID = /^chat-[0-9A-Za-z-]{1,64}$/;
+  const sessionsRoot = path.dirname(store);
+  const lastLine = (file) => {
+    const text = fs.readFileSync(file, 'utf8');
+    const lines = text.split('\n').filter((line) => line.trim());
+    return lines.length ? parseJson(lines[lines.length - 1]) : null;
+  };
+  const listSessions = () => {
+    let names = [];
+    try { names = fs.readdirSync(sessionsRoot).filter((name) => SESSION_ID.test(name)); } catch { return []; }
+    const rows = [];
+    for (const id of names.sort().reverse().slice(0, 50)) {
+      const file = path.join(sessionsRoot, id, 'session.jsonl');
+      try {
+        const snapshot = lastLine(file);
+        if (!snapshot) continue;
+        const first = (snapshot.history ?? []).find((entry) => entry.role === 'user');
+        rows.push({
+          id,
+          current: path.resolve(sessionsRoot, id) === path.resolve(store),
+          turns: (snapshot.history ?? []).length,
+          runs: (snapshot.runs ?? []).length,
+          opening: first ? String(first.content).slice(0, 160) : '',
+        });
+      } catch { /* a half-written or unreadable session is skipped, not fatal */ }
+    }
+    return rows;
+  };
+
+  const wrapped = {
+    // Progress subscribers. A Set so a reconnecting window replaces its own listener rather than
+    // accumulating them, and so a slow client cannot be delivered to twice.
+    subscribe: (listener) => { progressListeners.add(listener); return () => progressListeners.delete(listener); },
+    snapshot: () => harness.snapshot(),
+    exchange: () => readMailbox(mailboxDir),
+    sessions: () => listSessions(),
+    // Returns a past transcript under its own key, never as `state`: the live state must not be
+    // replaceable by a recording, or the interface would show a session that cannot be acted on
+    // while looking exactly like one that can.
+    openSession: ({ id }) => {
+      if (!SESSION_ID.test(id)) throw new HarnessError('CHAT_SESSION', 'That is not a session id');
+      const file = path.join(sessionsRoot, id, 'session.jsonl');
+      let snapshot = null;
+      try { snapshot = lastLine(file); } catch { snapshot = null; }
+      if (!snapshot) throw new HarnessError('CHAT_SESSION', 'That session has no recorded transcript');
+      return { id, transcript: { history: snapshot.history ?? [], runs: snapshot.runs ?? [], observations: snapshot.observations ?? null } };
+    },
+    // Cancel is not wrapped like the four below: it writes no session snapshot, because it does
+    // not advance the conversation. The turn it aborts records its own failure on its own path.
+    cancel: () => harness.cancel(),
+    // Answering a filed question is Concord writing to its own outbox, the same class of
+    // internal evidence as the run journal, so it goes through fileMessage directly. The
+    // returned snapshot is unchanged state: the exchange is polled separately by the client.
+    replyToPeer: ({ replyTo, message }) => {
+      fileMessage(mailboxDir, { message, audience: 'client', subject: 'answered in Concord', replyTo });
+      return harness.snapshot();
+    },
+  };
   for (const method of ['send', 'approve', 'executePlan', 'replay']) wrapped[method] = async (...args) => {
     // A prompt typed here goes three places: Concord's own model, Concord's pipeline, and the
     // provider connected over MCP. The third is a file rather than a call because no MCP client
@@ -169,7 +259,7 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
   const url = await listenServer(server);
   const mode = registry.has('model.propose')
     ? 'live model configured; each network call requires its exact grant'
-    : 'offline deterministic demonstration';
+    : 'NO MODEL CONFIGURED - turns will refuse; pass --integrations naming a model.propose configuration';
   return {
     url, server, store, status, mode, policy, workspaceRoot,
     toolCount: visibleRegistry.size,

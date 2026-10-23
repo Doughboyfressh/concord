@@ -273,6 +273,18 @@ export async function runPlan(options) {
       // Durable intent precedes invocation. No automatic resume of incomplete effects.
       emit('intent', { taskId: id, tool: tool.name, inputHash: digest(input), requestHash });
       const controller = new AbortController();
+      // An optional caller signal, relayed into the per-task controller the timeout already uses.
+      // Deliberately no new event type and no new failure code: an aborted tool raises its own
+      // abort code, which flows through the failure path below as EFFECT_INDETERMINATE for a
+      // gated effect and TOOL_FAILED otherwise. That is the honest result -- a cancelled write
+      // may or may not have landed -- and it keeps replayPlan's legal-code check unchanged.
+      // Tasks after the aborted one never start, because a failure breaks the loop.
+      const external = options.signal;
+      const relay = () => controller.abort();
+      if (external) {
+        if (external.aborted) controller.abort();
+        else external.addEventListener('abort', relay, { once: true });
+      }
       let timer;
       // Two stages, deliberately separated. A throw out of tool.execute is genuinely
       // indeterminate for a non-pure tool: the effect may have landed before the throw and the
@@ -285,7 +297,14 @@ export async function runPlan(options) {
         const timeout = new Promise((_, reject) => {
           timer = setTimeout(() => { controller.abort(); reject(new HarnessError('TIMEOUT', 'Tool deadline exceeded')); }, c.policy.timeoutMs);
         });
-        const output = await Promise.race([Promise.resolve().then(() => tool.execute(input, { workspaceRoot: c.identity.workspaceRoot, policy: c.policy, signal: controller.signal, requestHash })), timeout]);
+        // onProgress is a DISPLAY SINK and nothing else: never recorded, never journalled, never
+        // read back, and absent on replay, which is why passing it cannot affect determinism. A
+        // tool may report liveness through it; the only thing that becomes evidence is what the
+        // tool returns. Wrapped so a throwing sink cannot take the run down with it.
+        const onProgress = typeof options.onProgress === 'function'
+          ? (update) => { try { options.onProgress({ taskId: id, tool: tool.name, ...update }); } catch { /* a display sink never breaks a run */ } }
+          : undefined;
+        const output = await Promise.race([Promise.resolve().then(() => tool.execute(input, { workspaceRoot: c.identity.workspaceRoot, policy: c.policy, signal: controller.signal, requestHash, onProgress })), timeout]);
         // Past this point the tool has returned; a failure below concerns the output, not the effect.
         try {
           const frozenOutput = deepFreeze(clone(output));
@@ -312,7 +331,10 @@ export async function runPlan(options) {
           // exception, and that absence is itself diagnostic: it distinguishes a tool reporting a
           // condition it anticipated from one that crashed.
           ...(error instanceof HarnessError && typeof error.code === 'string' ? { toolCode: error.code } : {}) };
-      } finally { clearTimeout(timer); }
+      } finally {
+        clearTimeout(timer);
+        if (external) external.removeEventListener('abort', relay);
+      }
       if (failure) {
         emit('failed', { taskId: id, code: failure.code,
           ...(failure.toolCode ? { toolCode: failure.toolCode } : {}),

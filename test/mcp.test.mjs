@@ -283,23 +283,30 @@ test('resources expose all reviewed instruction modules with digests matching th
   });
 });
 
-test('the chat-wrapper tools drive an offline-demo turn, read its state, and verify its replay', async () => {
+test('a chat turn with no model configured refuses, and the state wrapper still answers', async () => {
+  // There is no demonstration mode: this session is spawned without --integrations, so nothing
+  // registers model.propose and a turn has nothing to propose with. Refusing is the whole point
+  // -- answering from pure tools would look like the harness was working when it was not.
   await withSession('concord-mcp-chat-', async (session) => {
     await handshake(session);
     const chat = await session.request('tools/call', { name: 'concord_chat', arguments: { message: 'Explain what Concord combines.' } });
-    const chatBody = JSON.parse(chat.result.content[0].text);
-    assert.equal(chatBody.state.mode, 'offline-demo');
-    assert.ok(chatBody.state.runs.some((r) => r.status === 'completed'));
+    assert.equal(chat.result.isError, true);
+    assert.equal(JSON.parse(chat.result.content[0].text).code, 'CHAT_NO_MODEL');
 
+    // The read-only wrapper is unaffected: state, runs and receipts stay inspectable with no
+    // model registered, which is why the refusal is raised per turn rather than at startup.
     const state = await session.request('tools/call', { name: 'concord_chat_state', arguments: {} });
+    assert.equal(state.result.isError, undefined);
     const stateBody = JSON.parse(state.result.content[0].text);
-    assert.deepEqual(stateBody.state.history, chatBody.state.history);
+    assert.deepEqual(stateBody.state.history, []);
+    assert.deepEqual(stateBody.state.runs, []);
 
-    const runId = chatBody.state.runs.at(-1).id;
-    const replay = await session.request('tools/call', { name: 'concord_replay', arguments: { runId } });
-    const replayBody = JSON.parse(replay.result.content[0].text);
-    assert.equal(replayBody.replay.verified, true);
-    assert.equal(replayBody.replay.runId, runId);
+    // And the replay wrapper refuses an id it has never recorded rather than inventing a verdict.
+    // Replay of a real run over the wire is covered in test/server.test.mjs, which can register
+    // an in-process model fixture; this session is a real subprocess and cannot.
+    const replay = await session.request('tools/call', { name: 'concord_replay', arguments: { runId: 'never-recorded' } });
+    assert.equal(replay.result.isError, true);
+    assert.equal(JSON.parse(replay.result.content[0].text).code, 'CHAT_REPLAY');
   });
 });
 

@@ -26,9 +26,9 @@ for the person who ran it, not a committed artifact. A nonzero exit from any ste
 | `sources.test.mjs` | The source lock loader and skill-snapshot tool. |
 | `integrations.test.mjs` | The TypeSafe and model HTTP adapters against local fixture endpoints. |
 | `workers.test.mjs` | The DeepSeek Harness SDK process adapter against a local protocol fixture, including every listed protocol-violation and resource-bound case. |
-| `chat-flow.test.mjs` | The chat session broker (`src/chat.mjs`) in-process: the offline demonstration end to end, and a live-model fixture's propose/approve/execute/approve/replay cycle. |
+| `chat-flow.test.mjs` | The chat session broker (`src/chat.mjs`) in-process: context assembly, skill and memory enrichment reaching the model prompt, and a live-model fixture's propose/approve/execute/approve/replay cycle. |
 | `training.test.mjs` | Bounded history, actual tool contracts, pure-only preview, tool receipt continuity, proposal provenance/rejection, deep output bounds and iterative plan edits. |
-| `server.test.mjs` | The local HTTP server (`src/server.mjs`) over real sockets: host/origin/token enforcement, security headers, the offline and live-model flows through the actual `/api/*` routes, and a child-process run of the real `scripts/chat.mjs` entrypoint sending the same message twice. |
+| `server.test.mjs` | The local HTTP server (`src/server.mjs`) over real sockets: host/origin/token enforcement, security headers, a completed turn and the live-model grant flow through the actual `/api/*` routes, and a child-process run of the real `scripts/chat.mjs` entrypoint sending the same message twice. |
 | `artifacts.test.mjs` | Native static format inspection, malformed/truncated records, ZIP/Mach-O/WASM bounds, and inspection through strict-JSON capture/replay. |
 | `browser.test.mjs` | CDP browser contracts, multi-step automation, snapshots and structured form extraction. |
 | `memory.test.mjs` | Reviewed memory promotion, recall and workspace containment. |

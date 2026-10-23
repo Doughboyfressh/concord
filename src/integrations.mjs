@@ -100,7 +100,15 @@ function settings(value, defaultName) {
   return result;
 }
 
-async function postJson(config, input, context) {
+/**
+ * `onChunk` turns this into a streaming read without forking the transport. Every guarantee below
+ * is unchanged and still applies, because they all sit outside the data path: the origin
+ * allowlist, the input bound, the credential, the deadline, the abort relay, the status check and
+ * the output byte bound. The only difference is that chunks are handed to the caller as they
+ * arrive and the body resolves as text rather than decoded JSON, because a streamed body is a
+ * sequence of events rather than one document.
+ */
+async function postJson(config, input, context, onChunk) {
   const bound = limits(config, context, config.name, 'network');
   if (!Array.isArray(context?.policy?.allowedOrigins) ||
       !context.policy.allowedOrigins.includes(config.origin)) {
@@ -139,12 +147,19 @@ async function postJson(config, input, context) {
           finish(error('INTEGRATION_OUTPUT_LIMIT', 'Integration output exceeds the byte limit'));
           response.destroy();
           request.destroy();
-        } else chunks.push(chunk);
+        } else {
+          chunks.push(chunk);
+          // After the bound, never before: a sink must not see bytes the budget has already
+          // refused. A throwing sink is contained here for the same reason it is in the engine.
+          if (onChunk) { try { onChunk(chunk); } catch { /* a display sink never breaks a call */ } }
+        }
       });
       response.on('end', () => {
         if (done) return;
-        try { finish(null, rejectSecrets(decodeJson(chunks), [token])); }
-        catch (caught) { finish(caught); }
+        try {
+          if (onChunk) { finish(null, { text: Buffer.concat(chunks).toString('utf8') }); return; }
+          finish(null, rejectSecrets(decodeJson(chunks), [token]));
+        } catch (caught) { finish(caught); }
       });
       response.on('error', () => finish(error('INTEGRATION_HTTP', 'Integration response failed')));
       response.on('aborted', () => finish(error('INTEGRATION_HTTP', 'Integration response was interrupted')));
@@ -246,6 +261,89 @@ function typeSafe(value) {
   };
 }
 
+/**
+ * One streamed proposal, reported as progress and returned as a single value.
+ *
+ * Measured against the configured model before this was written: of a ten-second call, the first
+ * 9.6 seconds produced `reasoning_content` and the last 0.4 seconds produced the actual
+ * `content` in one burst. So the useful live signal here is how far the model has got, not the
+ * text -- and the two channels must never be conflated. `reasoning_content` is the model's
+ * private working: it is counted and never forwarded, because displaying it would put text that
+ * is neither the answer nor evidence in front of an operator as though it were one of them.
+ * Only `content` is previewed, and even that is explicitly a preview: nothing here is recorded.
+ * What becomes evidence is the single value this returns, exactly as in the non-streaming path.
+ */
+async function streamProposal(config, body, context) {
+  let pending = '';
+  let content = '';
+  let identity;
+  let reasoningChars = 0;
+  const report = (update) => context.onProgress({ phase: update.phase, ...update });
+
+  const consume = (chunk) => {
+    pending += chunk.toString('utf8');
+    const lines = pending.split('\n');
+    pending = lines.pop() ?? '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      const payload = trimmed.slice(5).trim();
+      if (!payload || payload === '[DONE]') continue;
+      let frame;
+      try { frame = JSON.parse(payload); } catch { continue; }
+      if (typeof frame?.model === 'string' && frame.model) identity = frame.model;
+      const delta = frame?.choices?.[0]?.delta ?? {};
+      if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
+        reasoningChars += delta.reasoning_content.length;
+        report({ phase: 'reasoning', reasoningChars });
+      }
+      if (typeof delta.content === 'string' && delta.content) {
+        content += delta.content;
+        report({ phase: 'drafting', reasoningChars, preview: previewOfReply(content) });
+      }
+    }
+  };
+
+  await postJson(config, { ...body, stream: true }, context, consume);
+  return { content, model: identity };
+}
+
+/**
+ * The reply as it is being written, pulled out of a JSON object that is still arriving.
+ *
+ * The model is constrained to `response_format: json_object`, so what streams is the characters
+ * of `{"reply": "...` and not prose. Showing those raw would be worse than showing nothing. This
+ * reads the `reply` string out of the partial document, honouring escapes so a half-arrived `\u`
+ * or `\"` never renders as garbage, and returns nothing at all until the field has started.
+ */
+function previewOfReply(partial) {
+  const start = partial.search(/"reply"\s*:\s*"/);
+  if (start < 0) return '';
+  let index = partial.indexOf('"', partial.indexOf(':', start) + 1) + 1;
+  let out = '';
+  while (index < partial.length) {
+    const character = partial[index];
+    if (character === '\\') {
+      const next = partial[index + 1];
+      if (next === undefined) break; // escape still arriving; stop rather than guess
+      if (next === 'u') {
+        const hex = partial.slice(index + 2, index + 6);
+        if (hex.length < 4) break;
+        out += String.fromCharCode(parseInt(hex, 16));
+        index += 6;
+        continue;
+      }
+      out += { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f' }[next] ?? next;
+      index += 2;
+      continue;
+    }
+    if (character === '"') break; // the field is complete
+    out += character;
+    index += 1;
+  }
+  return out;
+}
+
 function model(value) {
   const config = networkSettings(value, 'model.propose', '/v1/chat/completions');
   const inputSchema = {
@@ -277,13 +375,25 @@ function model(value) {
        */
       const bound = limits(config, context, config.name, 'network');
       const maxTokens = Math.max(MIN_MODEL_TOKENS, Math.floor(bound.maxOutputBytes / 4));
-      const response = await postJson(config, { model: config.model, messages, response_format: { type: 'json_object' }, temperature: 0, max_tokens: maxTokens }, context);
-      if (response?.model !== undefined && (typeof response.model !== 'string' || !response.model)) fail('INTEGRATION_OUTPUT', 'Model response has an invalid model identity');
-      const content = response?.choices?.[0]?.message?.content;
-      if (typeof content !== 'string') fail('INTEGRATION_OUTPUT', 'Model response is missing JSON message content');
+      const body = { model: config.model, messages, response_format: { type: 'json_object' }, temperature: 0, max_tokens: maxTokens };
+      let response;
+      let content;
+      let identity;
+      if (typeof context?.onProgress === 'function') {
+        const streamed = await streamProposal(config, body, context);
+        content = streamed.content;
+        identity = streamed.model;
+        if (typeof content !== 'string' || !content) fail('INTEGRATION_OUTPUT', 'Model stream produced no message content');
+      } else {
+        response = await postJson(config, body, context);
+        if (response?.model !== undefined && (typeof response.model !== 'string' || !response.model)) fail('INTEGRATION_OUTPUT', 'Model response has an invalid model identity');
+        content = response?.choices?.[0]?.message?.content;
+        identity = response.model;
+        if (typeof content !== 'string') fail('INTEGRATION_OUTPUT', 'Model response is missing JSON message content');
+      }
       const proposal = parseJson(content);
       if (!proposal || typeof proposal !== 'object' || Array.isArray(proposal)) fail('INTEGRATION_OUTPUT', 'Model proposal must be a JSON object');
-      return { proposal, model: response.model ?? config.model, usage: response.usage ?? null };
+      return { proposal, model: identity ?? config.model, usage: response?.usage ?? null };
     },
   };
 }

@@ -55,9 +55,9 @@
       "sourceId": "orca"
     },
     {
-      "bytes": 16491,
+      "bytes": 17373,
       "file": "rea.md",
-      "sha256": "dbd6f74df2535e73c396530d54ba5aa5195da56027233da4ab775bde8960722d",
+      "sha256": "7b3a7ca5285456cc2a2651bc2032e8dfb1c5012cb079df97298b144083997b70",
       "sourceId": "rea"
     },
     {
@@ -79,9 +79,9 @@
       "sourceId": "typesafe-docs"
     },
     {
-      "bytes": 4170,
+      "bytes": 4917,
       "file": "vercel-skills.md",
-      "sha256": "0f9bd3db8f9342a8064a26f86fa43cd279eecd74f715d9bc5072d8f90f44b1b3",
+      "sha256": "f6f9963d7ca9617f407d15d54e247f2b108e452d634deefd30a968d7407d104c",
       "sourceId": "vercel-skills"
     }
   ],

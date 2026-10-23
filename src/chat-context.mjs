@@ -154,10 +154,6 @@ export function buildChatContext({ message, history, observations = [], proposed
     } catch { selected = []; }
   }
 
-  const reply = `Offline deterministic demonstration: combined all ${instructions.length} reviewed source ` +
-    `instruction modules (${sourceIds.join(', ')}) for this turn and proposed a pure-tool evidence plan ` +
-    '(sources.catalog, capabilities.search, memory.candidate). No live model was called.';
-
   const toolContracts = [...visibleRegistry].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([name, tool]) => ({
     name, version: tool.version, effect: tool.effect, inputSchema: clone(tool.inputSchema),
     requiresApproval: ['write', 'network', 'process'].includes(tool.effect),
@@ -291,7 +287,31 @@ export function buildChatContext({ message, history, observations = [], proposed
     'OUTPUT_REJECTED effect as not having happened, and never retry it; report that it happened ' +
     'and that its result was not recorded, quoting the failure reason. Deterministic ' +
     'replay validates recorded events and state transitions; it NEVER invokes tools or makes model calls. ' +
-    'Live model inference is not guaranteed deterministic. Coaching and promoted memories do not change model weights.';
+    'Live model inference is not guaranteed deterministic. Coaching and promoted memories do not change model weights. ' +
+    // The contracts below this prompt are the whole registry, which makes it tempting to answer
+    // an inventory question by reading them. That produced a confident miscount -- ninety for
+    // ninety-three -- under a receipt that correctly said nothing had run and there was nothing
+    // to verify. The list is in context, so the model can always *attempt* the answer; the rule
+    // is that it must not, because a counted answer carries a receipt and a remembered one cannot.
+    'When asked what tools, capabilities or effects this harness has, or how many of them there ' +
+    'are, you MUST answer by proposing a plan whose task calls tools.catalog, and state the ' +
+    'numbers from its recorded output. Do NOT count or summarise the registered tool contracts ' +
+    'below from memory: counting a long list is exactly what you are unreliable at, and an answer ' +
+    'assembled that way carries no receipt and cannot be checked against one. ' +
+    // Asked what it was good and bad at, Concord answered with the disclaimers a general
+    // assistant gives -- "bad at long-term memory", "bad at stateful sessions" -- while this
+    // harness held 550 promoted memories on disk and 102 recorded sessions. Denying a capability
+    // is a factual claim about this system, and it is the kind that sounds appropriately modest
+    // while being false, which is why it needs the same grounding as a count.
+    'The same rule governs any claim about what this harness can or cannot do, including what you ' +
+    'are good or bad at. You are a supervisor over THIS registry, not a general assistant: do not ' +
+    'describe yourself with the usual model disclaimers. In particular you MUST NOT assert that ' +
+    'this harness lacks a capability without checking. memory.recall reports totalEntries, ' +
+    'skills.installed reports count, sources.catalog reports the pinned sources, and tools.catalog ' +
+    'reports the registry; propose a plan that reads whichever of these the question touches and ' +
+    'answer from the result. Real limits are specific and worth stating -- an effect the policy ' +
+    'does not permit, a format no reader handles, a tool whose own limitations say what it does ' +
+    'not establish -- and each tool returns those limitations for you to quote.';
 
   const systemPrompt = 'You are Concord, a deterministic chat harness supervisor. Ground every reply in the ' +
     `following ${instructions.length} reviewed source instruction modules. You may propose at most one tool ` +
@@ -301,5 +321,8 @@ export function buildChatContext({ message, history, observations = [], proposed
     '\n\n' + instructionText;
 
   void inventory;
-  return { sourceCoverage: sourceIds, instructions, selected, reply, systemPrompt, toolContracts, conversation, observations: evidence, proposal, trained };
+  // No `reply`: the harness has no demonstration mode, so a reply only ever comes from the model
+  // via proposal.reply. Assembling one here produced a sentence that read like an answer and was
+  // written by the context builder, which is exactly the confusion removing the demo was for.
+  return { sourceCoverage: sourceIds, instructions, selected, systemPrompt, toolContracts, conversation, observations: evidence, proposal, trained };
 }

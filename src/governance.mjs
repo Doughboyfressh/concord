@@ -230,6 +230,77 @@ export function makeGovernanceTools({ registry, sourceLock } = {}) {
     },
   ];
 
+  // The registry, counted rather than remembered.
+  //
+  // Asked what it could do, Concord answered from the tool contracts in its context and said
+  // ninety when the registry held ninety-three. The receipt under that reply correctly read
+  // "nothing ran, so there is nothing to verify" -- the harness was honest that the answer was
+  // unverified, but nothing could make it verifiable, because counting the registry was something
+  // only the model could do, by reading a list. Counting a long list is what a model is worst at
+  // and a tool is best at, so this is a tool.
+  //
+  // It reports `allowed` against the policy in force rather than hiding what the policy forbids:
+  // "the registry holds 93 and this turn's authority permits 93" is a different and more useful
+  // statement than either number alone. Only name, version and effect are read from a descriptor,
+  // never `config`, which can hold executable paths and environment variable names.
+  if (registry instanceof Map) {
+    const GATED = ['write', 'network', 'process'];
+    tools.push({
+      name: 'tools.catalog', version: '1.0.0', effect: 'pure',
+      outputKeys: ['count', 'allowedCount', 'gatedCount', 'names', 'tools', 'byEffect', 'byPrefix', 'limitations'],
+      // `tools` is opt-in because a chat observation bounds one task output at 8 KiB and the full
+      // detail for this registry is about 9.6 KiB: returned by default it was replaced by its own
+      // digest, so the model got a commitment it could not read and still could not state the
+      // number. Names and counts are the answer to the question actually being asked, and they
+      // fit. Two keys rather than one whose element type changes with the input.
+      inputSchema: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          prefix: { type: 'string', maxLength: 64 },
+          effect: { enum: ['pure', 'read', 'write', 'network', 'process'] },
+          detail: { type: 'boolean' },
+        },
+      },
+      execute(input, context) {
+        const permitted = Array.isArray(context?.policy?.allowedTools)
+          ? new Set(context.policy.allowedTools) : null;
+        let entries = [...registry.entries()]
+          .map(([name, tool]) => ({
+            name,
+            version: typeof tool.version === 'string' ? tool.version : '',
+            effect: typeof tool.effect === 'string' ? tool.effect : 'pure',
+            gated: GATED.includes(tool.effect),
+            allowed: permitted ? permitted.has(name) : true,
+          }))
+          .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+        if (input?.prefix) entries = entries.filter((entry) => entry.name.split('.')[0] === input.prefix);
+        if (input?.effect) entries = entries.filter((entry) => entry.effect === input.effect);
+        const byEffect = {};
+        const byPrefix = {};
+        for (const entry of entries) {
+          byEffect[entry.effect] = (byEffect[entry.effect] ?? 0) + 1;
+          const prefix = entry.name.split('.')[0];
+          byPrefix[prefix] = (byPrefix[prefix] ?? 0) + 1;
+        }
+        return {
+          count: entries.length,
+          allowedCount: entries.filter((entry) => entry.allowed).length,
+          gatedCount: entries.filter((entry) => entry.gated).length,
+          names: entries.map((entry) => entry.name),
+          tools: input?.detail === true ? entries : [],
+          byEffect,
+          byPrefix,
+          limitations: [
+            'The registry as assembled in this process. A different configuration registers a different set, so this describes this session and not the project.',
+            'Effects are what each tool declares, not an analysis of what it does.',
+            'A tool the policy in force does not permit is listed with allowed:false rather than omitted, so the difference between existing and being permitted stays visible.',
+            'tools is empty unless detail:true was asked for. With detail:true the result can exceed the 8 KiB a chat observation keeps per task output, in which case the observation carries its digest instead of its content; the run record still holds the whole thing.',
+          ],
+        };
+      },
+    });
+  }
+
   // Delegation needs the registry it will run against. Without one the tool is not registered at
   // all, rather than registered and always failing.
   if (registry instanceof Map && sourceLock) {

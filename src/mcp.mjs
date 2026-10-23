@@ -565,7 +565,7 @@ export async function main(argv = process.argv.slice(2)) {
   });
   process.stdin.on('end', () => process.exit(0));
 
-  console.error(`Concord MCP server ready (stdio). Mode: ${registry.has('model.propose') ? 'live model configured; each network call requires its exact grant' : 'offline deterministic demonstration'}. Tools: ${visibleRegistry.size + CHAT_TOOL_NAMES.length}. Resources: ${resourceContext.instructions.length}.`);
+  console.error(`Concord MCP server ready (stdio). Mode: ${registry.has('model.propose') ? 'live model configured; each network call requires its exact grant' : 'no model configured; turns refuse until one is'}. Tools: ${visibleRegistry.size + CHAT_TOOL_NAMES.length}. Resources: ${resourceContext.instructions.length}.`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

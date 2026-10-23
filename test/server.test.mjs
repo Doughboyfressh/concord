@@ -19,8 +19,24 @@ const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const catalog = await loadSourceLock(path.join(root, 'sources.lock.json'));
 const inventory = parseJson(fs.readFileSync(path.join(root, 'capabilities.lock.json'), 'utf8'));
 
+// A turn needs a model: the harness has no demonstration path. This stand-in supplies one where
+// the test is about the HTTP surface rather than the model call. `pure` because it reaches no
+// network, so these turns do not stop at a grant; the grant test at line 128 supplies its own
+// `network` fixture, which wins by name.
+const defaultModel = {
+  name: 'model.propose', version: 'fixture-1', effect: 'pure',
+  inputSchema: { type: 'object' }, config: { fixture: true },
+  execute() {
+    return { model: 'fixture-1', proposal: {
+      reply: 'Proposed a pure-tool evidence plan over the reviewed sources.',
+      plan: { version: 1, tasks: [{ id: 'coverage', tool: 'sources.catalog', input: {} }] } } };
+  },
+};
+
 function harnessFixture(workspaceRoot, additional = []) {
-  const descriptors = [...makeBuiltinTools(), ...makeCapabilityTools(inventory), ...makeSourceTools(catalog), ...additional];
+  const supplied = additional.some((tool) => tool.name === 'model.propose');
+  const descriptors = [...makeBuiltinTools(), ...makeCapabilityTools(inventory), ...makeSourceTools(catalog),
+    ...(supplied ? [] : [defaultModel]), ...additional];
   const registry = new Map(descriptors.map((t) => [t.name, t]));
   const buildContext = ({ message, history }) => buildChatContext({
     message, history, sourceLock: catalog, inventory, registry, instructionRoot: path.join(root, 'instructions'),
@@ -89,15 +105,15 @@ test('the local server enforces loopback host, origin, and token checks and send
   }
 });
 
-test('the offline demonstration completes and replays over real HTTP', async () => {
-  const temp = tempDir('concord-server-offline-');
+test('a turn completes and replays over real HTTP', async () => {
+  const temp = tempDir('concord-server-turn-');
   const { url, close } = await startServer(harnessFixture(temp), { sourceCount: catalog.sources.length, files: 0, capabilities: 0, skillFiles: 0, tools: [] });
   try {
     const { token } = await readState(url);
     const chat = await postJson(url, '/api/chat', token, { message: 'Inspect the source knowledge and explain what is connected.' });
     assert.equal(chat.status, 200);
     const chatBody = await chat.json();
-    assert.equal(chatBody.state.mode, 'offline-demo');
+    assert.equal(chatBody.state.mode, 'live');
     // Every pinned source is covered. Asserted against the lock rather than a literal, which went
     // stale the moment a thirteenth source was pinned.
     assert.equal(chatBody.state.sourceCoverage.length, catalog.sources.length);

@@ -30,9 +30,8 @@ async function start() {
   const windowSize = flags['window-size'] ?? '1180,860';
   delete flags['window-size'];
   if (flags.port === undefined) flags.port = '0';
-  // Live by default. Typing in Concord's own chat box and getting the offline demonstration is
-  // the wrong answer when a model is configured and running: the operator has to remember a flag
-  // to get the behaviour they already set up. An explicit --integrations still wins.
+  // Live by default. src/app.mjs now defaults this too; kept here because modelCredentialPlan
+  // needs the resolved path before the harness is built. An explicit --integrations still wins.
   if (flags.integrations === undefined) {
     const live = path.join(root, 'config', 'concord-live.json');
     if (fs.existsSync(live)) flags.integrations = live;
@@ -41,7 +40,7 @@ async function start() {
   // Decide the model credential before the harness is built, because the adapter reads the
   // environment at call time and a placeholder decided afterwards would arrive too late. No
   // network call is made here: what is reported is the configuration, never a probe of it.
-  let modelPlan = { configured: false, summary: 'none configured; offline deterministic demonstration' };
+  let modelPlan = { configured: false, summary: 'none configured; turns will refuse' };
   if (flags.integrations) {
     const configured = JSON.parse(fs.readFileSync(path.resolve(flags.integrations), 'utf8'));
     modelPlan = modelCredentialPlan(configured?.model);

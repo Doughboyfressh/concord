@@ -298,7 +298,7 @@ directory.
   independently computed digest, the full write-effect blocked→confirm→stale-confirm round trip (including
   that the file genuinely doesn't exist until confirmed), the plan-shape hash-stability regression, unknown
   tool names, the `$task`-collision edge case, malformed/truncated/duplicate-key/invalid-UTF-8 input, all 12
-  resources with independently recomputed digests, an unknown resource URI, an offline-demo
+  resources with independently recomputed digests, an unknown resource URI, a no-model refusal and
   chat→state→replay round trip, and the tool-name collision guard at server construction.
 - **Not covered / deliberately out of scope:** JSON-RPC batch requests (real MCP clients over stdio don't
   send them in practice), request cancellation (`notifications/cancelled` is accepted and silently ignored,

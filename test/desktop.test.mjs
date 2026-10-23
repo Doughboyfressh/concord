@@ -153,10 +153,11 @@ test('a model credential is supplied only for a loopback server, and never over 
   assert.equal(refused.setEnv, undefined);
   assert.match(refused.summary, /INTEGRATION_CREDENTIAL/);
 
-  // A model with no apiKeyEnv cannot be called at all, and a missing model is simply offline.
+  // A model with no apiKeyEnv cannot be called at all, and with no model at all a turn refuses:
+  // there is no demonstration mode left to fall back to.
   assert.equal(modelCredentialPlan({ model: 'm', origin: 'http://127.0.0.1:1' }, {}).setEnv, undefined);
   assert.equal(modelCredentialPlan(undefined).configured, false);
-  assert.match(modelCredentialPlan(undefined).summary, /offline/);
+  assert.match(modelCredentialPlan(undefined).summary, /refuse/);
 
   // A malformed origin is not loopback by accident.
   assert.equal(modelCredentialPlan({ model: 'm', origin: 'not a url', apiKeyEnv: 'KEY' }, {}).setEnv, undefined);

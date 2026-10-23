@@ -91,9 +91,14 @@ truncation flags and source/candidate identity. Only the thirteen reviewed, dige
 instructions. Delimiting references helps the model follow their intended role; the kernel remains the
 enforced authorization boundary.
 
-## The offline deterministic reply
+## No model, no turn
 
-When no `model.propose` tool is registered, `src/chat.mjs` uses this module's deterministic demonstration
-reply derived from the thirteen source ids, and the message itself only
-feeds the `capabilities.search` query inside the demonstration plan it proposes. See
-[chat sessions](chat-session.md) for how that plan is built and run.
+A model is required. When no `model.propose` tool is registered, `src/chat.mjs` refuses the turn with
+`CHAT_NO_MODEL` before anything is mutated, rather than falling back to a deterministic reply assembled from
+the source ids. A harness that answers from its own pure tools when nothing is configured looks like it is
+working and is not, and that confusion is the thing this project exists to refuse. The refusal is raised per
+turn rather than at startup, so state, runs and receipts stay readable over `/api/*` with no model present.
+
+Both launchers default `--integrations` to `config/concord-live.json` when that file exists, so a machine with
+a configured model is live without passing a flag. See [chat sessions](chat-session.md) for how a proposed
+plan is built and run.

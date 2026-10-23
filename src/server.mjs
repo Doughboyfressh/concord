@@ -17,6 +17,20 @@ const routes = new Map([
   ['/api/approve', { method: 'approve', schema: objectSchema({ requestHash: { type: 'string', minLength: 64, maxLength: 64 } }, ['requestHash']) }],
   ['/api/execute', { method: 'executePlan', schema: objectSchema({ plan: { type: 'object' } }) }],
   ['/api/replay', { method: 'replay', schema: objectSchema({ runId: { type: 'string', minLength: 1, maxLength: 128 } }, ['runId']) }],
+  // Stops whatever is executing. Takes no fields: there is only ever one turn in flight, and
+  // naming it would invite cancelling something that had already finished.
+  ['/api/cancel', { method: 'cancel', schema: objectSchema({}) }],
+  // Opens a past transcript for reading. Returned under its own key, never as `state`: a
+  // recording must not be able to masquerade as the session you can act on.
+  ['/api/session', { method: 'openSession', whole: true, schema: objectSchema({
+    id: { type: 'string', minLength: 1, maxLength: 128 },
+  }, ['id']) }],
+  // Answers a message the connected provider filed. The mailbox validates that replyTo names a
+  // sequence that exists, so an answer cannot be attached to a question nobody asked.
+  ['/api/exchange/reply', { method: 'replyToPeer', whole: true, schema: objectSchema({
+    replyTo: { type: 'integer', minimum: 1 },
+    message: { type: 'string', minLength: 1, maxLength: 4096 },
+  }, ['replyTo', 'message']) }],
 ]);
 const securityHeaders = {
   'Cache-Control': 'no-store',
@@ -109,6 +123,36 @@ export function createServer({ harness, status = {}, host = '127.0.0.1', port = 
         if (request.method !== 'GET') throw new HttpError(405, 'METHOD', 'Use GET for chat state.');
         return json(response, 200, { state: publicState(await harness.snapshot()), status: publicStatus, token });
       }
+      if (request.url === '/api/stream') {
+        // Live progress for the turn in flight. A display channel and nothing more: it carries no
+        // output, no evidence and no approval, and a client that never connects loses nothing.
+        // EventSource cannot set headers, so there is no token here -- the loopback, Host, Origin
+        // and sec-fetch-site checks above are what gate it, exactly as for GET /api/state.
+        if (request.method !== 'GET') throw new HttpError(405, 'METHOD', 'Use GET for the progress stream.');
+        if (typeof harness.subscribe !== 'function') throw new HttpError(404, 'NOT_FOUND', 'This resource is not available.');
+        response.writeHead(200, {
+          ...securityHeaders,
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          Connection: 'keep-alive',
+        });
+        response.write(': open\n\n');
+        const send = (update) => {
+          if (response.writableEnded) return;
+          // One line, bounded: a progress frame is a status, never a payload.
+          response.write(`data: ${canonical(update).slice(0, 8192)}\n\n`);
+        };
+        const unsubscribe = harness.subscribe(send);
+        request.on('close', unsubscribe);
+        request.on('error', unsubscribe);
+        return undefined;
+      }
+      if (request.url === '/api/sessions') {
+        // Past transcripts, newest first. Read-only like the exchange, and absent rather than
+        // fatal when no store is wired: a harness with nowhere to persist is a normal state.
+        if (request.method !== 'GET') throw new HttpError(405, 'METHOD', 'Use GET for the session list.');
+        const sessions = typeof harness.sessions === 'function' ? await harness.sessions() : [];
+        return json(response, 200, { sessions, token });
+      }
       if (request.url === '/api/exchange') {
         // What Concord asked the connected provider, and what came back. Read-only, and inside
         // the same host/origin checks as everything else. A harness with no mailbox wired reports
@@ -142,7 +186,15 @@ export function createServer({ harness, status = {}, host = '127.0.0.1', port = 
         if (Array.isArray(replay?.events)) summary.eventCount = replay.events.length;
         return json(response, 200, { state: publicState(await harness.snapshot()), replay: summary });
       }
-      const argument = route.method === 'send' ? input.message : route.method === 'approve' ? input.requestHash : input.plan;
+      if (typeof harness[route.method] !== 'function') throw new HttpError(404, 'NOT_FOUND', 'This resource is not available.');
+      if (route.method === 'openSession') {
+        return json(response, 200, { session: await harness.openSession(input), token });
+      }
+      // `whole: true` routes take the validated body; the rest take one positional field, which
+      // is how every route before them was written.
+      const argument = route.whole ? input
+        : route.method === 'send' ? input.message
+          : route.method === 'approve' ? input.requestHash : input.plan;
       return json(response, 200, { state: publicState(await harness[route.method](argument)) });
     } catch (error) {
       if (response.headersSent || response.destroyed) { response.destroy(); return; }

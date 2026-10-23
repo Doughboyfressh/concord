@@ -19,7 +19,7 @@ node scripts/chat.mjs      # or just the server, and open the URL yourself
 
 `scripts/desktop.mjs` opens Concord in its own window with no tab strip or address bar, using a Chromium you already have — there is no Electron here, because there are no dependencies here. Double-click `Concord.lnk` (committed, and wired to the live model in `config/concord-live.json`) or `Concord.cmd`, or run `pwsh scripts/install-shortcut.ps1` once to launch it from the Start Menu. Without a Chromium installed it still runs and opens a browser tab instead, and says so. See [the desktop application](docs/desktop.md).
 
-Open the printed localhost URL. The interface provides chat, selected source instructions/skills, available tools, proposed plans, exact effect approvals and run replay. It starts in a clearly labeled **offline deterministic demonstration** with actual source context and executable pure tool plans.
+Open the printed localhost URL. The interface provides chat, selected source instructions/skills, available tools, proposed plans, exact effect approvals and run replay. A model is required: Concord proposes with `model.propose` or refuses the turn. Both launchers default `--integrations` to `config/concord-live.json` when it exists, so a configured machine is live without a flag.
 
 To use a live model, configure a compatible endpoint and immutable model revision in a reviewed integration file, set its named credential environment variable, and start:
 

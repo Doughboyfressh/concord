@@ -175,7 +175,7 @@ export function launchAppWindow({ executable, url, profileDir, windowSize, env =
  * nothing itself, so the decision can be tested without touching the environment.
  */
 export function modelCredentialPlan(model, env = process.env) {
-  if (!model || typeof model !== 'object') return { configured: false, summary: 'none configured; offline deterministic demonstration' };
+  if (!model || typeof model !== 'object') return { configured: false, summary: 'none configured; turns will refuse' };
   const origin = typeof model.origin === 'string' ? model.origin : '';
   const name = typeof model.apiKeyEnv === 'string' ? model.apiKeyEnv : '';
   const where = `${model.model ?? 'unnamed model'} at ${origin || 'no origin'}`;
