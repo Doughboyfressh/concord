@@ -23,6 +23,45 @@ export function workspaceFile(root, relative) {
 }
 
 /**
+ * The same path, resolved for a directory rather than a regular file.
+ *
+ * workspaceFile insists the final component be a regular file, which is right for every caller
+ * it has and leaves a directory with no validated form at all: memory.promote reaches its own
+ * folder by joining a module constant, which works precisely because no caller chose that name.
+ * A tool that makes, moves or copies on an operator's path cannot do that.
+ *
+ * Every check above is kept and only the last one differs, so a link anywhere along the path, a
+ * traversal, an absolute path, a reserved device name or anything resolving outside the root is
+ * refused here exactly as it is there. Duplicating those rules into a tool would be the obvious
+ * way to get one of them subtly wrong later.
+ */
+export function workspaceDir(root, relative) {
+  if (typeof relative !== 'string' || !relative || relative.includes('\\') || relative.includes(':') || relative.includes('\0') || relative.split('/').some(p => !p || p === '.' || p === '..' || /[. ]$/.test(p) || /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(p)) || path.isAbsolute(relative)) throw new HarnessError('PATH_DENIED', 'Expected an unambiguous relative workspace path');
+  const base = realpathSync(root);
+  const target = path.resolve(base, relative);
+  if (!target.startsWith(base + path.sep)) throw new HarnessError('PATH_DENIED', 'Path escapes workspace');
+  let current = base;
+  const parts = relative.split('/');
+  for (let i = 0; i < parts.length; i++) {
+    current = path.join(current, parts[i]);
+    try {
+      const stat = lstatSync(current);
+      if (stat.isSymbolicLink()) throw new HarnessError('PATH_DENIED', 'Links are not accepted');
+      // Unlike workspaceFile, the last component is a directory when it is there at all. A file
+      // already sitting at the name is refused rather than treated as somewhere to put things.
+      if (!stat.isDirectory()) throw new HarnessError('PATH_DENIED', i < parts.length - 1 ? 'Parent is not a directory' : 'Expected a directory');
+    } catch (e) {
+      // A component that does not exist yet is acceptable from the first missing one onwards,
+      // which is what makes a recursive create legal and a path through a missing parent to an
+      // existing child impossible.
+      if (e.code !== 'ENOENT') throw e;
+      break;
+    }
+  }
+  return target;
+}
+
+/**
  * Read a bounded, TOCTOU-safe snapshot of a workspace file's raw bytes: stat before
  * opening, pin identity on the open descriptor, read loop bounded by limit, then
  * re-check identity and metadata after the read. Throws if the file is linked,

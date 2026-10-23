@@ -252,7 +252,7 @@ test('every declared outputKeys set is really present in that tool\'s actual res
   writeFileSync(path.join(temp, 'f.txt'), 'hello');
   // One carrier each for the three write tools that change an existing file, so none of them
   // edits or removes a file another tool in this sweep is reading.
-  for (const name of ['edit.txt', 'append.txt', 'delete.txt']) writeFileSync(path.join(temp, name), 'hello');
+  for (const name of ['edit.txt', 'append.txt', 'delete.txt', 'move.txt', 'copy.txt']) writeFileSync(path.join(temp, name), 'hello');
   const helloSha = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824';
   // Real carriers, so the tools below are exercised on their main path rather than their
   // not-this-format fallback: an empty but valid WASM module, and legacy EVM bytecode.
@@ -283,6 +283,12 @@ test('every declared outputKeys set is really present in that tool\'s actual res
     'files.edit': { path: 'edit.txt', expectedSha256: helloSha, find: 'hello', replace: 'goodbye' },
     'files.append': { path: 'append.txt', expectedSha256: helloSha, content: { k: 1 } },
     'files.delete': { path: 'delete.txt', expectedSha256: helloSha },
+    'files.writeText': { path: 'written.mjs', text: 'export const answer = 42;\n' },
+    'files.mkdir': { path: 'made' },
+    // Separate carriers again: a move leaves nothing behind, so sharing one with the copy would
+    // make the pair order-dependent.
+    'files.move': { from: 'move.txt', to: 'moved.txt', expectedSha256: helloSha },
+    'files.copy': { from: 'copy.txt', to: 'copied.txt', expectedSha256: helloSha },
     'artifact.inspect': { path: 'f.txt' },
     'artifact.wasmInterface': { path: 'm.wasm' },
     'artifact.sqlite': { path: 'f.txt' },

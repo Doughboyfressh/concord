@@ -1,8 +1,8 @@
-import { mkdirSync, readFileSync, readdirSync, writeFileSync, lstatSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, writeFileSync, lstatSync, realpathSync, rmSync, renameSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { canonical, digest, validateSchema, HarnessError } from './value.mjs';
-import { workspaceFile, readWorkspaceFile } from './workspace-fs.mjs';
+import { workspaceFile, workspaceDir, readWorkspaceFile } from './workspace-fs.mjs';
 
 const object = (properties, required = Object.keys(properties)) => ({ type: 'object', properties, required, additionalProperties: false });
 const string = { type: 'string', maxLength: 65536 };
@@ -262,6 +262,76 @@ export function makeBuiltinTools() {
         // what it removed can be told apart from one of something nobody can now describe.
         rmSync(filename);
         return { path: relative, removed: true, reason: null, sha256, bytes: before.length };
+      } },
+    /**
+     * Writing something that is not JSON.
+     *
+     * files.write canonicalises its content, so everything a plan could create was a JSON
+     * document. That is a fine guarantee for a record and a hard floor on everything else: no
+     * plan could produce a .mjs, a .md, an .html or a stylesheet. Building a website with this
+     * harness meant authoring the site as one JSON manifest and having a reviewed build step turn
+     * it into files, because the kernel could describe a program and not write one.
+     *
+     * Kept apart from files.write rather than folded into it, so that tool's promise - what it
+     * writes can be read back as the structure it was given - stays exactly as strong as it was.
+     * Text has no such promise and should not borrow one. Exclusive creation for the same reason
+     * files.write has it, and the parent directory must already exist: files.mkdir is a separate
+     * grant because making a tree somewhere is a different act from putting a file in one.
+     */
+    { name: 'files.writeText', version: '1.0.0', outputKeys: ['path', 'created', 'sha256', 'bytes'], effect: 'write',
+      inputSchema: object({ path: string, text: { type: 'string', maxLength: 4194304 } }),
+      execute({ path: relative, text }, context) {
+        const filename = workspaceFile(context.workspaceRoot, relative);
+        const encoded = Buffer.from(text, 'utf8');
+        if (encoded.length > context.policy.maxOutputBytes) throw new HarnessError('OUTPUT_LIMIT', 'Write exceeds byte budget');
+        writeFileSync(filename, encoded, { flag: 'wx' });
+        return { path: relative, created: true, sha256: createHash('sha256').update(encoded).digest('hex'), bytes: encoded.length };
+      } },
+    { name: 'files.mkdir', version: '1.0.0', outputKeys: ['path', 'created'], effect: 'write',
+      inputSchema: object({ path: string }),
+      execute({ path: relative }, context) {
+        const target = workspaceDir(context.workspaceRoot, relative);
+        // recursive, so a tree arrives in one grant rather than one per level; and `created`
+        // distinguishes making it from finding it, because "the directory is there now" and
+        // "this call put it there" are different claims and only one of them is this tool's.
+        const existed = existsSync(target);
+        mkdirSync(target, { recursive: true });
+        return { path: relative, created: !existed };
+      } },
+    /**
+     * Moving and copying, bound to the bytes at the source and refusing to land on anything.
+     *
+     * expectedSha256 for the same reason files.edit takes one: the approval covers which file
+     * the operator believed they were moving. The destination must not exist, which keeps the
+     * rule files.write established - an approval never silently replaces existing data - true of
+     * the one operation most likely to break it by accident.
+     */
+    { name: 'files.move', version: '1.0.0', outputKeys: ['from', 'to', 'moved', 'reason', 'sha256', 'bytes'], effect: 'write',
+      inputSchema: object({ from: string, to: string, expectedSha256: { type: 'string', minLength: 64, maxLength: 64 } }),
+      execute({ from, to, expectedSha256 }, context) {
+        const source = workspaceFile(context.workspaceRoot, from);
+        const bytes = readWorkspaceFile(context.workspaceRoot, from, Math.floor(context.policy.maxOutputBytes / 8));
+        const sha256 = createHash('sha256').update(bytes).digest('hex');
+        const unchanged = { from, to, moved: false, sha256, bytes: bytes.length };
+        if (sha256 !== expectedSha256) return { ...unchanged, reason: 'The source does not currently hash to expectedSha256, so this move was written against different content' };
+        const destination = workspaceFile(context.workspaceRoot, to);
+        if (existsSync(destination)) return { ...unchanged, reason: 'The destination already exists, and a move never replaces what is there' };
+        renameSync(source, destination);
+        return { from, to, moved: true, reason: null, sha256, bytes: bytes.length };
+      } },
+    { name: 'files.copy', version: '1.0.0', outputKeys: ['from', 'to', 'copied', 'reason', 'sha256', 'bytes'], effect: 'write',
+      inputSchema: object({ from: string, to: string, expectedSha256: { type: 'string', minLength: 64, maxLength: 64 } }),
+      execute({ from, to, expectedSha256 }, context) {
+        const bytes = readWorkspaceFile(context.workspaceRoot, from, Math.floor(context.policy.maxOutputBytes / 8));
+        const sha256 = createHash('sha256').update(bytes).digest('hex');
+        const unchanged = { from, to, copied: false, sha256, bytes: bytes.length };
+        if (sha256 !== expectedSha256) return { ...unchanged, reason: 'The source does not currently hash to expectedSha256, so this copy was written against different content' };
+        const destination = workspaceFile(context.workspaceRoot, to);
+        if (existsSync(destination)) return { ...unchanged, reason: 'The destination already exists, and a copy never replaces what is there' };
+        // Written from the bytes already read and digested rather than copyFileSync, so what
+        // lands is provably what was measured instead of whatever the file says a moment later.
+        writeFileSync(destination, bytes, { flag: 'wx' });
+        return { from, to, copied: true, reason: null, sha256, bytes: bytes.length };
       } },
     { name: 'memory.promote', version: '1.0.0', outputKeys: ['candidateHash', 'path', 'promoted'], effect: 'write', inputSchema: candidateSchema,
       // Promotion is a separate write under an exact grant, keeping learned text from becoming authority.
