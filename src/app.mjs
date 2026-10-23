@@ -91,6 +91,20 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
     const live = path.join(root, 'config', 'concord-live.json');
     if (fs.existsSync(live)) flags = { ...flags, integrations: live };
   }
+  // The same defaulting for the adapters whose configuration is a property of the machine rather
+  // than of a workspace. Every one of these factories returns an empty array without a config, so
+  // a reviewed browser and a reviewed decompiler sitting on disk still produced a registry with
+  // no process effect in it at all -- which is how Concord came to report, accurately about its
+  // launch and misleadingly about itself, that it could not run an external program.
+  //
+  // Deliberately not defaulted: --build and the process entries under --integrations. Those name
+  // an exact argv to execute, and inventing one on an operator's behalf is the single thing this
+  // kernel's design is most careful to refuse. They stay explicit, per workspace.
+  for (const [flag, file] of [['browser', 'browser.json'], ['decompiler', 'decompiler.json'], ['workers', 'workers.json'], ['web', 'web.json']]) {
+    if (flags[flag] !== undefined) continue;
+    const candidate = path.join(root, 'config', file);
+    if (fs.existsSync(candidate)) flags = { ...flags, [flag]: candidate };
+  }
   const integrations = flags.integrations ? readJson(flags.integrations) : {};
   // The same credential decision the windowed launcher has always made, moved here so both
   // launchers make it. A loopback model server ignores the key, but the adapter still refuses

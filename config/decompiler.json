@@ -1,0 +1,6 @@
+{
+  "executable": "C:/Users/Dough/Downloads/ghidra_12.1.4_PUBLIC_20260921/ghidra_12.1.4_PUBLIC/Ghidra/Features/Decompiler/os/win_x86_64/decompile.exe",
+  "executableSha256": "ea42e06df2a64f95188a12422a35a36cd48fd4a6f621e62b001e82f1bbbe923b",
+  "timeoutMs": 120000,
+  "maxOutputBytes": 33554432
+}

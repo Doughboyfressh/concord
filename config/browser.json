@@ -1,0 +1,6 @@
+{
+  "executable": "C:/Program Files/Google/Chrome/Application/chrome.exe",
+  "executableSha256": "de999bce6a1c954df71a8f15bf751b336172f55ac1a0325bb0580cbc2121268c",
+  "timeoutMs": 60000,
+  "maxOutputBytes": 1048576
+}
