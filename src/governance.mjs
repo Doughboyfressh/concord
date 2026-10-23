@@ -245,9 +245,18 @@ export function makeGovernanceTools({ registry, sourceLock } = {}) {
   // never `config`, which can hold executable paths and environment variable names.
   if (registry instanceof Map) {
     const GATED = ['write', 'network', 'process'];
+    // Under the 8192 a chat observation keeps per task output, with room for the counts, the
+    // names and the limitations that are returned alongside it.
+    const DETAIL_BUDGET = 7600;
+    const LIMITATIONS = [
+      'The registry as assembled in this process. A different configuration registers a different set, so this describes this session and not the project.',
+      'Effects are what each tool declares, not an analysis of what it does.',
+      'A tool the policy in force does not permit is listed with allowed:false rather than omitted, so the difference between existing and being permitted stays visible.',
+      'tools is empty unless detail:true was asked for, and is fitted to the byte budget a chat observation keeps: detailOmitted counts the rows that did not fit, and names still lists every tool.',
+    ];
     tools.push({
       name: 'tools.catalog', version: '1.0.0', effect: 'pure',
-      outputKeys: ['count', 'allowedCount', 'gatedCount', 'names', 'tools', 'byEffect', 'byPrefix', 'limitations'],
+      outputKeys: ['count', 'allowedCount', 'gatedCount', 'names', 'tools', 'detailOmitted', 'byEffect', 'byPrefix', 'limitations'],
       // `tools` is opt-in because a chat observation bounds one task output at 8 KiB and the full
       // detail for this registry is about 9.6 KiB: returned by default it was replaced by its own
       // digest, so the model got a commitment it could not read and still could not state the
@@ -282,20 +291,36 @@ export function makeGovernanceTools({ registry, sourceLock } = {}) {
           const prefix = entry.name.split('.')[0];
           byPrefix[prefix] = (byPrefix[prefix] ?? 0) + 1;
         }
-        return {
+        // Detail is fitted to the budget rather than offered whole and then thrown away. Asked
+        // for a breakdown, the model requested detail:true, the result came to 12302 bytes
+        // against the 8192 a chat observation keeps per task output, and the whole thing was
+        // replaced by its digest -- so the tool answered with something its only caller could
+        // not read. Rows are added while they fit and the remainder is counted, which is the
+        // same bargain boundedRecords already makes everywhere else here: bounded, and saying so.
+        const base = {
           count: entries.length,
           allowedCount: entries.filter((entry) => entry.allowed).length,
           gatedCount: entries.filter((entry) => entry.gated).length,
           names: entries.map((entry) => entry.name),
-          tools: input?.detail === true ? entries : [],
           byEffect,
           byPrefix,
-          limitations: [
-            'The registry as assembled in this process. A different configuration registers a different set, so this describes this session and not the project.',
-            'Effects are what each tool declares, not an analysis of what it does.',
-            'A tool the policy in force does not permit is listed with allowed:false rather than omitted, so the difference between existing and being permitted stays visible.',
-            'tools is empty unless detail:true was asked for. With detail:true the result can exceed the 8 KiB a chat observation keeps per task output, in which case the observation carries its digest instead of its content; the run record still holds the whole thing.',
-          ],
+        };
+        const detail = [];
+        let detailOmitted = 0;
+        if (input?.detail === true) {
+          let used = JSON.stringify({ ...base, tools: [], detailOmitted: 0, limitations: LIMITATIONS }).length;
+          for (const entry of entries) {
+            const size = JSON.stringify(entry).length + 1;
+            if (used + size > DETAIL_BUDGET) { detailOmitted = entries.length - detail.length; break; }
+            used += size;
+            detail.push(entry);
+          }
+        }
+        return {
+          ...base,
+          tools: detail,
+          detailOmitted,
+          limitations: LIMITATIONS,
         };
       },
     });
