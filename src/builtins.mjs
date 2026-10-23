@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, readdirSync, writeFileSync, lstatSync, realpathSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, writeFileSync, lstatSync, realpathSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { canonical, digest, validateSchema, HarnessError } from './value.mjs';
@@ -164,6 +164,104 @@ export function makeBuiltinTools() {
         // Exclusive creation: an approval cannot silently replace existing user data.
         writeFileSync(filename, text, { flag: 'wx', encoding: 'utf8' });
         return { path: relative, contentHash: digest(content), created: true };
+      } },
+    /**
+     * Changing a file that already exists, bound to the bytes it expected to find.
+     *
+     * files.write creates exclusively, on the stated grounds that an approval must not silently
+     * replace existing user data. That is right, and it left this harness able to create a file
+     * and never able to change one: of six write tools exactly one touched the filesystem, and it
+     * could only ever add. These three close that without giving up the reason for it.
+     *
+     * The binding is expectedSha256. A plan states which bytes it believes are there, the
+     * approval hash covers that claim along with the rest of the resolved input, and the edit
+     * lands only if the file still hashes to it. So an operator approves a change to content they
+     * reviewed, and a file that moved underneath them refuses instead of being overwritten from a
+     * stale reading. It is the bargain the approval gate already makes about effects, applied to
+     * the thing the effect is about.
+     *
+     * A precondition that does not hold is DATA, not a refusal: it returns applied:false with a
+     * reason. Throwing would be worse than useless, because the engine records any throw from a
+     * gated tool as EFFECT_INDETERMINATE - "this may have happened" - when nothing has happened
+     * at all. build.run already draws this line, treating a non-zero exit as data and reserving
+     * refusal for transport, timeout and abort. The same line is drawn here.
+     */
+    { name: 'files.edit', version: '1.0.0',
+      outputKeys: ['path', 'applied', 'reason', 'replacements', 'sha256Before', 'sha256After', 'bytesBefore', 'bytesAfter'],
+      effect: 'write',
+      inputSchema: object({
+        path: string,
+        expectedSha256: { type: 'string', minLength: 64, maxLength: 64 },
+        find: { type: 'string', minLength: 1, maxLength: 65536 },
+        replace: { type: 'string', maxLength: 65536 },
+        expectedOccurrences: { type: 'integer', minimum: 1, maximum: 10000 },
+      }, ['path', 'expectedSha256', 'find', 'replace']),
+      execute({ path: relative, expectedSha256, find, replace, expectedOccurrences }, context) {
+        const filename = workspaceFile(context.workspaceRoot, relative);
+        const before = readWorkspaceFile(context.workspaceRoot, relative, Math.floor(context.policy.maxOutputBytes / 8));
+        const sha256Before = createHash('sha256').update(before).digest('hex');
+        const unchanged = { path: relative, applied: false, replacements: 0, sha256Before, sha256After: sha256Before, bytesBefore: before.length, bytesAfter: before.length };
+        if (sha256Before !== expectedSha256) {
+          return { ...unchanged, reason: 'The file does not currently hash to expectedSha256, so this edit was written against different content' };
+        }
+        let text;
+        try { text = new TextDecoder('utf-8', { fatal: true }).decode(before); }
+        catch { return { ...unchanged, reason: 'The file is not valid UTF-8 text, so a textual edit cannot be applied to it' }; }
+        const parts = text.split(find);
+        const found = parts.length - 1;
+        if (found === 0) return { ...unchanged, reason: 'The text to replace does not appear in the file' };
+        // One match unless the caller said how many to expect. An edit that silently changed
+        // three places where its author pictured one is the failure this guard exists for.
+        const wanted = expectedOccurrences ?? 1;
+        if (found !== wanted) {
+          return { ...unchanged, reason: `The text to replace appears ${found} times and expectedOccurrences is ${wanted}; name the real count to change them all, or give more context to match one` };
+        }
+        const after = parts.join(replace);
+        const encoded = Buffer.from(after, 'utf8');
+        if (encoded.length > context.policy.maxOutputBytes) throw new HarnessError('OUTPUT_LIMIT', 'Write exceeds byte budget');
+        // No 'wx': this write may replace, and what makes that safe is the digest above rather
+        // than the flag.
+        writeFileSync(filename, encoded);
+        return { path: relative, applied: true, reason: null, replacements: found, sha256Before,
+          sha256After: createHash('sha256').update(encoded).digest('hex'), bytesBefore: before.length, bytesAfter: encoded.length };
+      } },
+    { name: 'files.append', version: '1.0.0',
+      outputKeys: ['path', 'appended', 'reason', 'sha256Before', 'sha256After', 'bytesBefore', 'bytesAfter'],
+      effect: 'write',
+      // Canonical JSON and a newline, matching files.write: a file this harness appends to stays
+      // a record it can read back, rather than becoming prose with a shape nobody declared.
+      inputSchema: object({ path: string, expectedSha256: { type: 'string', minLength: 64, maxLength: 64 }, content: {} },
+        ['path', 'expectedSha256', 'content']),
+      execute({ path: relative, expectedSha256, content }, context) {
+        const filename = workspaceFile(context.workspaceRoot, relative);
+        const before = readWorkspaceFile(context.workspaceRoot, relative, Math.floor(context.policy.maxOutputBytes / 8));
+        const sha256Before = createHash('sha256').update(before).digest('hex');
+        if (sha256Before !== expectedSha256) {
+          return { path: relative, appended: false, sha256Before, sha256After: sha256Before, bytesBefore: before.length, bytesAfter: before.length,
+            reason: 'The file does not currently hash to expectedSha256, so this append was written against different content' };
+        }
+        const encoded = Buffer.concat([before, Buffer.from(canonical(content) + '\n', 'utf8')]);
+        if (encoded.length > context.policy.maxOutputBytes) throw new HarnessError('OUTPUT_LIMIT', 'Write exceeds byte budget');
+        writeFileSync(filename, encoded);
+        return { path: relative, appended: true, reason: null, sha256Before,
+          sha256After: createHash('sha256').update(encoded).digest('hex'), bytesBefore: before.length, bytesAfter: encoded.length };
+      } },
+    { name: 'files.delete', version: '1.0.0',
+      outputKeys: ['path', 'removed', 'reason', 'sha256', 'bytes'],
+      effect: 'write',
+      inputSchema: object({ path: string, expectedSha256: { type: 'string', minLength: 64, maxLength: 64 } }),
+      execute({ path: relative, expectedSha256 }, context) {
+        const filename = workspaceFile(context.workspaceRoot, relative);
+        const before = readWorkspaceFile(context.workspaceRoot, relative, Math.floor(context.policy.maxOutputBytes / 8));
+        const sha256 = createHash('sha256').update(before).digest('hex');
+        if (sha256 !== expectedSha256) {
+          return { path: relative, removed: false, sha256, bytes: before.length,
+            reason: 'The file does not currently hash to expectedSha256, so this deletion was written against different content' };
+        }
+        // Reading the whole file first is not incidental: a deletion that records the digest of
+        // what it removed can be told apart from one of something nobody can now describe.
+        rmSync(filename);
+        return { path: relative, removed: true, reason: null, sha256, bytes: before.length };
       } },
     { name: 'memory.promote', version: '1.0.0', outputKeys: ['candidateHash', 'path', 'promoted'], effect: 'write', inputSchema: candidateSchema,
       // Promotion is a separate write under an exact grant, keeping learned text from becoming authority.

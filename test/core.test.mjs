@@ -250,6 +250,10 @@ test('every declared outputKeys set is really present in that tool\'s actual res
   // is checked as a subset and never over-promises.
   const temp = tempDir('concord-outputkeys-');
   writeFileSync(path.join(temp, 'f.txt'), 'hello');
+  // One carrier each for the three write tools that change an existing file, so none of them
+  // edits or removes a file another tool in this sweep is reading.
+  for (const name of ['edit.txt', 'append.txt', 'delete.txt']) writeFileSync(path.join(temp, name), 'hello');
+  const helloSha = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824';
   // Real carriers, so the tools below are exercised on their main path rather than their
   // not-this-format fallback: an empty but valid WASM module, and legacy EVM bytecode.
   writeFileSync(path.join(temp, 'm.wasm'), Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]));
@@ -274,6 +278,11 @@ test('every declared outputKeys set is really present in that tool\'s actual res
     'json.mergeShallow': { values: [{ a: 1 }, { b: 2 }] },
     'files.read': { path: 'f.txt' },
     'files.write': { path: 'out.txt', content: { k: 1 } },
+    // Each on its applied path, not its precondition path: a digest that did not match would
+    // return every declared key too, and check nothing about the branch that does the work.
+    'files.edit': { path: 'edit.txt', expectedSha256: helloSha, find: 'hello', replace: 'goodbye' },
+    'files.append': { path: 'append.txt', expectedSha256: helloSha, content: { k: 1 } },
+    'files.delete': { path: 'delete.txt', expectedSha256: helloSha },
     'artifact.inspect': { path: 'f.txt' },
     'artifact.wasmInterface': { path: 'm.wasm' },
     'artifact.sqlite': { path: 'f.txt' },
