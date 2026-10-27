@@ -587,3 +587,68 @@ test('a non-streamed reply is still bounded by the raw body exactly as before', 
       checkCode('INTEGRATION_OUTPUT_LIMIT'));
   });
 });
+
+/**
+ * Stopping because the room ran out, not because the work was done.
+ *
+ * Measured by replaying a failed turn against the local model: finish_reason "length",
+ * completion_tokens exactly max_tokens, 116,017 characters of reasoning and zero content. It
+ * surfaced as INTEGRATION_OUTPUT, "no message content" - true, and useless, because it reads as a
+ * broken provider when the provider did exactly what it was told.
+ */
+function sseWithFinish(reasoning, content, finishReason) {
+  const frames = [];
+  for (let i = 0; i < reasoning.length; i += 8) {
+    frames.push(`data: ${JSON.stringify({ model: 'fixture-1', choices: [{ index: 0, delta: { reasoning_content: reasoning.slice(i, i + 8) } }] })}\n\n`);
+  }
+  for (let i = 0; i < content.length; i += 8) {
+    frames.push(`data: ${JSON.stringify({ model: 'fixture-1', choices: [{ index: 0, delta: { content: content.slice(i, i + 8) } }] })}\n\n`);
+  }
+  frames.push(`data: ${JSON.stringify({ model: 'fixture-1', choices: [{ index: 0, finish_reason: finishReason, delta: {} }] })}\n\n`);
+  return frames.join('') + 'data: [DONE]\n\n';
+}
+
+test('a model that reasons until its budget is gone says so, rather than looking broken', async () => {
+  const body = sseWithFinish('t'.repeat(2000), '', 'length');
+  await httpFixture((request, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(body);
+  }, async (origin) => {
+    const tool = modelTool(origin, { maxOutputBytes: 65536 });
+    await assert.rejects(
+      tool.execute({ prompt: 'something hard' }, { ...networkContext(origin), onProgress: () => {} }),
+      (error) => {
+        assert.equal(error.code, 'INTEGRATION_TRUNCATED');
+        // The number is the diagnosis: it says where the budget went.
+        assert.match(error.message, /2000 characters of reasoning/);
+        assert.doesNotMatch(error.message, /retry/i, 'repeating it unchanged is exactly the wrong response');
+        return true;
+      });
+  });
+});
+
+test('a truncated reply that did answer is kept, because the answer is judgeable', async () => {
+  // finish_reason length only matters when nothing came of it. A model cut off after producing a
+  // usable proposal has still produced one, and the caller validates it like any other.
+  const body = sseWithFinish('t'.repeat(100), JSON.stringify({ reply: 'partial but present' }), 'length');
+  await httpFixture((request, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(body);
+  }, async (origin) => {
+    const tool = modelTool(origin, { maxOutputBytes: 65536 });
+    const result = await tool.execute({ prompt: 'x' }, { ...networkContext(origin), onProgress: () => {} });
+    assert.equal(result.proposal.reply, 'partial but present');
+  });
+});
+
+test('a normal stop is untouched by the truncation check', async () => {
+  const body = sseWithFinish('t'.repeat(50), JSON.stringify({ reply: 'done properly' }), 'stop');
+  await httpFixture((request, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(body);
+  }, async (origin) => {
+    const tool = modelTool(origin, { maxOutputBytes: 65536 });
+    const result = await tool.execute({ prompt: 'x' }, { ...networkContext(origin), onProgress: () => {} });
+    assert.equal(result.proposal.reply, 'done properly');
+  });
+});

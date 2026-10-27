@@ -305,10 +305,33 @@ function typeSafe(value) {
  * Only `content` is previewed, and even that is explicitly a preview: nothing here is recorded.
  * What becomes evidence is the single value this returns, exactly as in the non-streaming path.
  */
+/**
+ * A model that stopped because it ran out of room, rather than because it had finished.
+ *
+ * Measured by replaying a failed turn against the local model: finish_reason "length",
+ * completion_tokens exactly equal to max_tokens, 116,017 characters of reasoning, and content of
+ * length zero. It thought until the budget was gone and never began the answer.
+ *
+ * That arrived as INTEGRATION_OUTPUT, "no message content", which is true and useless — it reads
+ * as a broken provider when the provider did exactly as told. The cause was this harness's own
+ * token brake, added the same day to stop runaway generation: the brake bounds reasoning and
+ * answer together, so a prompt hard enough to reason about at length leaves nothing to answer
+ * with. Naming the case is what makes it actionable, because the response is specific and is not
+ * "retry": ask for something smaller, or give the model more room.
+ */
+function truncated(finishReason, content, reasoningChars) {
+  if (finishReason !== 'length') return;
+  if (typeof content === 'string' && content) return; // Truncated after answering: the caller can judge the answer.
+  fail('INTEGRATION_TRUNCATED',
+    `The model reached its token limit having produced ${reasoningChars} characters of reasoning and no answer; `
+    + 'ask for a smaller step, or raise the model maxOutputBytes so the budget covers thinking and answering');
+}
+
 async function streamProposal(config, body, context) {
   let pending = '';
   let content = '';
   let identity;
+  let finishReason = null;
   let reasoningChars = 0;
   const report = (update) => context.onProgress({ phase: update.phase, ...update });
   // The text bound, enforced here because here is where the text exists. postJson sees frames.
@@ -331,6 +354,10 @@ async function streamProposal(config, body, context) {
       let frame;
       try { frame = JSON.parse(payload); } catch { continue; }
       if (typeof frame?.model === 'string' && frame.model) identity = frame.model;
+      // Why generation stopped, which the last frame carries. Without it a model that spent its
+      // whole budget thinking and never answered is indistinguishable from one that answered with
+      // nothing, and those need different responses from whoever reads the failure.
+      if (typeof frame?.choices?.[0]?.finish_reason === 'string') finishReason = frame.choices[0].finish_reason;
       const delta = frame?.choices?.[0]?.delta ?? {};
       if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
         reasoningChars += delta.reasoning_content.length;
@@ -346,7 +373,7 @@ async function streamProposal(config, body, context) {
 
   await postJson(config, { ...body, stream: true }, context, consume);
   if (overflowed) fail('INTEGRATION_OUTPUT_LIMIT', 'Integration output exceeds the byte limit');
-  return { content, model: identity };
+  return { content, model: identity, finishReason, reasoningChars };
 }
 
 /**
@@ -424,12 +451,15 @@ function model(value) {
         const streamed = await streamProposal(config, body, context);
         content = streamed.content;
         identity = streamed.model;
+        truncated(streamed.finishReason, content, streamed.reasoningChars);
         if (typeof content !== 'string' || !content) fail('INTEGRATION_OUTPUT', 'Model stream produced no message content');
       } else {
         response = await postJson(config, body, context);
         if (response?.model !== undefined && (typeof response.model !== 'string' || !response.model)) fail('INTEGRATION_OUTPUT', 'Model response has an invalid model identity');
         content = response?.choices?.[0]?.message?.content;
         identity = response.model;
+        truncated(response?.choices?.[0]?.finish_reason, content,
+          (response?.choices?.[0]?.message?.reasoning_content ?? '').length);
         if (typeof content !== 'string') fail('INTEGRATION_OUTPUT', 'Model response is missing JSON message content');
       }
       const proposal = parseJson(content);

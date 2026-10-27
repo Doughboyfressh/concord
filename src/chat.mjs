@@ -67,6 +67,7 @@ const PRINCIPLES = {
   BROWSER_ABORTED: 'The browser session was torn down before the action list completed, so later actions did not run.',
   INTEGRATION_EXIT: 'The configured process exited non-zero, so its effect is indeterminate; read its own code rather than assuming failure.',
   INTEGRATION_OUTPUT: 'The configured process produced output the adapter could not parse, so nothing was recorded from it.',
+  INTEGRATION_TRUNCATED: 'The model used its whole token budget reasoning and never began an answer, so nothing was proposed; the step being asked for is too large to think through in one call, so ask for a smaller one rather than repeating it.',
 };
 
 // Codes a model's proposal cannot cause — operator configuration, CLI usage, registry validity,
