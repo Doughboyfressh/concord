@@ -508,3 +508,82 @@ test('the registry client enforces the exact-origin allowlist and rejects creden
     await assert.rejects(registry(origin).execute({ query: 'x' }, networkContext(origin)), checkCode('INTEGRATION_SECRET'));
   });
 });
+
+/**
+ * A streamed reply is not the reply.
+ *
+ * Every token arrives inside its own `data: {...}` frame, so counting wire bytes against
+ * maxOutputBytes charged the text budget for framing it never produced. Only the streaming path
+ * was affected, which meant the chat UI -- it always streams, because it passes onProgress -- had
+ * a far smaller real ceiling than the CLI running the identical adapter. Measured live against a
+ * local qwen3: three turns failed INTEGRATION_OUTPUT_LIMIT for replies nowhere near the limit.
+ */
+const modelTool = (origin, extra = {}) =>
+  makeIntegrationTools({ model: { origin, model: 'fixture-1', apiKeyEnv: credentialName, path: '/v1/chat/completions', ...extra } })[0];
+
+/**
+ * One frame per eight characters, which is roughly how a server batches tokens and already
+ * enough for the envelope to cost several times the text it carries.
+ */
+function sseFor(text) {
+  const frames = [];
+  for (let i = 0; i < text.length; i += 8) {
+    frames.push(`data: ${JSON.stringify({ model: 'fixture-1', choices: [{ index: 0, finish_reason: null, delta: { content: text.slice(i, i + 8) } }] })}\n\n`);
+  }
+  return frames.join('') + 'data: [DONE]\n\n';
+}
+
+test('a streamed reply is bounded by its text, not by the framing around it', async () => {
+  const reply = JSON.stringify({ reply: 'x'.repeat(2000) });
+  const body = sseFor(reply);
+  // The framing really does dominate: this is the whole point of the fix.
+  assert.ok(body.length > reply.length * 5, 'the framing really does cost several times the text');
+
+  await httpFixture((request, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(body);
+  }, async (origin) => {
+    // A budget comfortably above the text and well below the wire bytes. Before the fix this
+    // combination was exactly what failed.
+    const tool = modelTool(origin, { maxOutputBytes: 8192 });
+    const progress = [];
+    const result = await tool.execute({ prompt: 'hello' }, {
+      ...networkContext(origin),
+      onProgress: (update) => progress.push(update.phase),
+    });
+    assert.equal(result.proposal.reply, 'x'.repeat(2000));
+    assert.ok(progress.includes('drafting'), 'it really did take the streaming path');
+  });
+});
+
+test('a streamed reply whose text exceeds the budget is still refused', async () => {
+  // The bound did not go away, it moved to where the text is. Reasoning counts toward it: that is
+  // generation the model spent, and the budget is about what it produced rather than about which
+  // half survives into the reply.
+  const body = sseFor(JSON.stringify({ reply: 'y'.repeat(20000) }));
+  await httpFixture((request, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(body);
+  }, async (origin) => {
+    // Chosen so the TEXT bound is what fires: the wire body stays under the raw ceiling.
+    const tool = modelTool(origin, { maxOutputBytes: 8192 });
+    assert.ok(body.length < 8192 * 64, 'the raw ceiling must not be what refuses this');
+    await assert.rejects(
+      tool.execute({ prompt: 'hello' }, { ...networkContext(origin), onProgress: () => {} }),
+      checkCode('INTEGRATION_OUTPUT_LIMIT'));
+  });
+});
+
+test('a non-streamed reply is still bounded by the raw body exactly as before', async () => {
+  // The two bounds coincide when the body IS the text, so nothing changed for this path.
+  const payload = JSON.stringify({ model: 'fixture-1', choices: [{ message: { content: JSON.stringify({ reply: 'z'.repeat(20000) }) } }] });
+  await httpFixture((request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(payload);
+  }, async (origin) => {
+    const tool = modelTool(origin, { maxOutputBytes: 4096 });
+    await assert.rejects(
+      tool.execute({ prompt: 'hello' }, networkContext(origin)),
+      checkCode('INTEGRATION_OUTPUT_LIMIT'));
+  });
+});

@@ -12,6 +12,33 @@ const MAX_INPUT = 32 * 1_048_576;
 // A floor for the derived token ceiling, so a tightly attenuated policy cannot shrink a reply to
 // the point where every answer is cut off mid-sentence. Low enough to stay a brake and not a budget.
 const MIN_MODEL_TOKENS = 256;
+/**
+ * How much bigger a streamed body is than the text it carries.
+ *
+ * A streamed reply is not the reply: every token arrives inside its own `data: {...}` frame
+ * carrying the model id, choice index and finish reason, so a few characters of content cost well
+ * over a hundred bytes on the wire. Counting those framing bytes against maxOutputBytes made the
+ * real output budget several times smaller than the number configured — and only on the streaming
+ * path, so the chat UI, which always streams because it passes onProgress, silently had a far
+ * tighter ceiling than the CLI or the tests running the identical adapter.
+ *
+ * Measured against a local qwen3 emitting a plan with a small file in it: the stream tripped a
+ * 1 MiB bound after roughly 25 KB of actual text, and three turns failed INTEGRATION_OUTPUT_LIMIT
+ * for replies that were never near the configured limit.
+ *
+ * So the two bounds are separated. maxOutputBytes keeps the meaning it has everywhere else — the
+ * decoded text the model produced — and the raw stream gets its own ceiling whose only job is to
+ * stop a peer streaming forever.
+ *
+ * Sixty-four is an allowance, not a measurement, and the first attempt at it was eight, which a
+ * test immediately disproved. A frame's envelope — model id, object, created, choice index,
+ * finish reason — runs to a couple of hundred bytes around a delta of one token, so the ratio is
+ * tens to one and depends on how a server batches tokens into frames. The number is therefore set
+ * above any plausible framing cost rather than tuned to an observed one, because being generous
+ * here costs nothing: it is the text bound below that does the real work, and a peer that streams
+ * past even this is misbehaving rather than verbose.
+ */
+const STREAM_FRAMING_ALLOWANCE = 64;
 const objectSchema = { type: 'object' };
 const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const toolName = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
@@ -141,9 +168,14 @@ async function postJson(config, input, context, onChunk) {
       }
       let bytes = 0;
       const chunks = [];
+      // A streamed body carries framing the caller never sees, so it is allowed more wire bytes
+      // than the text budget. The text itself is bounded by whoever decodes it; this ceiling
+      // exists only so a peer cannot stream without end. A non-streamed body IS the text, so the
+      // two coincide and nothing changes for it.
+      const rawBound = onChunk ? bound.maxOutputBytes * STREAM_FRAMING_ALLOWANCE : bound.maxOutputBytes;
       response.on('data', chunk => {
         bytes += chunk.length;
-        if (bytes > bound.maxOutputBytes) {
+        if (bytes > rawBound) {
           finish(error('INTEGRATION_OUTPUT_LIMIT', 'Integration output exceeds the byte limit'));
           response.destroy();
           request.destroy();
@@ -279,6 +311,13 @@ async function streamProposal(config, body, context) {
   let identity;
   let reasoningChars = 0;
   const report = (update) => context.onProgress({ phase: update.phase, ...update });
+  // The text bound, enforced here because here is where the text exists. postJson sees frames.
+  // Reasoning counts: it is generation the model spent and the budget is about what it produced,
+  // not about which half of it survives into the reply. Checked after the stream rather than
+  // thrown from the sink, because postJson contains a throwing sink by design -- a display sink
+  // must never break a call -- so an exception raised in there would be swallowed.
+  const textBound = limits(config, context, config.name, 'network').maxOutputBytes;
+  let overflowed = false;
 
   const consume = (chunk) => {
     pending += chunk.toString('utf8');
@@ -301,10 +340,12 @@ async function streamProposal(config, body, context) {
         content += delta.content;
         report({ phase: 'drafting', reasoningChars, preview: previewOfReply(content) });
       }
+      if (!overflowed && Buffer.byteLength(content) + reasoningChars > textBound) overflowed = true;
     }
   };
 
   await postJson(config, { ...body, stream: true }, context, consume);
+  if (overflowed) fail('INTEGRATION_OUTPUT_LIMIT', 'Integration output exceeds the byte limit');
   return { content, model: identity };
 }
 

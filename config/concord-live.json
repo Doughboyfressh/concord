@@ -6,6 +6,6 @@
     "model": "qwen3.8-27b",
     "apiKeyEnv": "CONCORD_MODEL_API_KEY",
     "timeoutMs": 300000,
-    "maxOutputBytes": 1048576
+    "maxOutputBytes": 131072
   }
 }
