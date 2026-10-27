@@ -326,12 +326,13 @@ test('a malformed JSON pointer and a missing dependency are distinguishable in t
   } finally { f.close(); }
 });
 
-test('a plan needing two approvals is refused before anything executes', async () => {
-  // Round 009 measured the failure this prevents: a two-write plan granted both effects, landed
-  // the first file, then failed EFFECT_INDETERMINATE on the write that had certainly succeeded,
-  // because each approval re-attempts the plan from its first task and files.write is
-  // exclusive-create. Such a plan can never complete through this harness, so it is refused
-  // before it can half-execute and leave a real effect behind.
+test('a plan writing several files is accepted, with every grant computed before any of them runs', async () => {
+  // Round 009 measured why this plan used to be refused: each approval re-attempts the plan from
+  // its first task, so granting the second write re-ran the first, and files.write is
+  // exclusive-create. That refusal was right for a surface that can only discover a gate by
+  // running into it. It is not needed for one that computes them: both request hashes bind
+  // literal inputs, so they exist before the plan starts and can be granted together, and a run
+  // holding both never blocks. The cost of the old rule was a model call per file.
   const twoWrites = { version: 1, tasks: [
     { id: 'a', tool: 'files.write', input: { path: 'a.txt', content: 'A' } },
     { id: 'b', tool: 'files.write', input: { path: 'b.txt', content: 'B' } },
@@ -339,9 +340,54 @@ test('a plan needing two approvals is refused before anything executes', async (
   const f = fixture(() => ({ reply: 'Writing both files.', plan: twoWrites }));
   try {
     const state = await send(f.harness, 'Write both files.');
+    assert.equal(state.lastError, null);
+    assert.equal(state.proposedPlan.tasks.length, 2);
+
+    assert.equal(state.plannedGrants.gatedCount, 2);
+    assert.equal(state.plannedGrants.singlePass, true);
+    assert.deepEqual(state.plannedGrants.grants.map(g => g.taskId), ['a', 'b']);
+    assert.deepEqual(state.plannedGrants.deferred, []);
+    // Computed, never granted: an operator still has to approve each one, and until then the
+    // effects are exactly as unapproved as they were before this plan was proposed.
+    assert.equal(state.plannedGrants.grants.some(g => g.granted), false);
+    for (const grant of state.plannedGrants.grants) assert.match(grant.requestHash, /^[a-f0-9]{64}$/);
+  } finally { f.close(); }
+});
+
+test('granting the whole set lets a multi-write plan complete in one pass', async () => {
+  const twoWrites = { version: 1, tasks: [
+    { id: 'a', tool: 'files.write', input: { path: 'a.txt', content: 'A' } },
+    { id: 'b', tool: 'files.write', input: { path: 'b.txt', content: 'B' } },
+  ] };
+  const f = fixture(() => ({ reply: 'Writing both files.', plan: twoWrites }));
+  try {
+    const proposed = await send(f.harness, 'Write both files.');
+    for (const grant of proposed.plannedGrants.grants) await f.harness.approve(grant.requestHash);
+
+    const done = await f.harness.executePlan();
+    assert.equal(done.pending, null, 'holding every grant, it never stopped');
+    assert.equal(done.runs.at(-1).status, 'completed');
+    // files.write is exclusive-create, so a repeated write fails outright. Completing proves each
+    // effect ran exactly once -- the round 009 failure cannot occur on this path.
+    assert.equal(done.plannedGrants.grants.every(g => g.granted), true);
+  } finally { f.close(); }
+});
+
+test('several gated effects are still refused when one is fed by an earlier result', async () => {
+  // The case the mechanism genuinely cannot handle, and so the one that stays refused: `derived`
+  // has no resolved input until `join` has run, so its request cannot exist in advance. Approving
+  // it would re-attempt the plan over the write that already landed.
+  const mixed = { version: 1, tasks: [
+    { id: 'literal', tool: 'files.write', input: { path: 'a.txt', content: 'A' } },
+    { id: 'join', tool: 'text.concat', input: { values: ['b', 'txt'], separator: '.' } },
+    { id: 'derived', tool: 'files.write', input: { path: { $task: 'join', path: '/value' }, content: 'B' }, dependsOn: ['join'] },
+  ] };
+  const f = fixture(() => ({ reply: 'Writing both.', plan: mixed }));
+  try {
+    const state = await send(f.harness, 'Write both files.');
     assert.equal(state.lastError.code, 'MODEL_PROPOSAL_INVALID');
     assert.equal(state.lastError.reasonCode, 'PLAN_UNEXECUTABLE');
-    assert.match(state.lastError.reason, /at most one task requiring approval/);
+    assert.match(state.lastError.reason, /derived/);
     assert.equal(state.proposedPlan, null);
     // The reply is rejected atomically too, so no narrative about writing survives.
     assert.equal(state.history.at(-1).role, 'user');

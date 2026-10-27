@@ -19,9 +19,9 @@
       "sourceId": "deepseek-harness"
     },
     {
-      "bytes": 2408,
+      "bytes": 3368,
       "file": "ecc.md",
-      "sha256": "b710d5744a74adf219a7ca817314c258c3570d3db7880a0bf6deba221c496769",
+      "sha256": "ec32279ab170b4fc8b34fd2d8e170dac74f1d5b2c082385606c3dcebb3d2c212",
       "sourceId": "ecc"
     },
     {

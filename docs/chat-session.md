@@ -55,17 +55,38 @@ process restarts, and does not clear or rotate the approval set — approvals ac
 harness instance, which is safe only because a request hash is specific to one exact plan/task/input/identity
 combination.
 
-It therefore cannot execute a plan containing **more than one ungranted approval-requiring effect**. This is
-a consequence of two deliberate decisions rather than a separate rule: a run blocks at the first ungranted
-effect, and approving it re-attempts the plan from its first task, because there is no resume. The
-already-completed effect runs a second time, and anything not idempotent fails — `files.write` creates
-exclusively (`flag: 'wx'`) specifically so an approval cannot overwrite existing data, so its retry fails
-`EEXIST`. Measured in `docs/training-round-009.md`: a two-write plan grants both effects, lands the first
-file, and then reports `files.write:failed`, leaving the plan permanently unable to finish. Note that the
-re-attempt is reported as `EFFECT_INDETERMINATE`, which reads as "may have occurred" when in fact the effect
-certainly did occur on the previous attempt.
+There is still no resume, so a plan that **fails** partway has the same standing it always had: completed
+effects stand, and re-running repeats them. Durable retries still need the idempotency keys and
+reconciliation `docs/architecture.md` names.
 
-Sequence such effects as separate plans, one approval each. The chat contract instructs the model to propose
-at most one per plan for this reason. Lifting the limit needs the idempotency keys and reconciliation that
-`docs/architecture.md` already names as the prerequisite for durable retries; it is not a prompt or adapter
-fix.
+## Granting a plan's effects before it runs
+
+A plan may contain as many approval-requiring effects as it needs, provided each of their inputs is literal.
+`planGrants` in `src/preflight.mjs` computes every one of their request hashes from the plan alone, before
+anything executes, and `snapshot()` returns them as `plannedGrants`. Granting the set and then executing
+means the run never blocks, so no task is ever attempted twice.
+
+This used to be impossible, for a reason worth keeping on the record. A run blocks at the first ungranted
+effect, and approving it re-attempts the plan from its first task. The already-completed effect runs a second
+time, and anything not idempotent fails — `files.write` creates exclusively (`flag: 'wx'`) specifically so an
+approval cannot overwrite existing data, so its retry fails `EEXIST`. Measured in
+`docs/training-round-009.md`: a two-write plan grants both effects, lands the first file, and then reports
+`files.write:failed`, leaving the plan permanently unable to finish. The re-attempt is reported as
+`EFFECT_INDETERMINATE`, which reads as "may have occurred" when the effect certainly did occur on the
+previous attempt. `test/preflight.test.mjs` still demonstrates that sequence live, because it is the whole
+argument for computing grants in advance.
+
+The premise that failed is that a gate can only be discovered by running into it. A request hash binds the
+plan, the policy, the registry, the source lock, the workspace and the task's **resolved** input — and for a
+task whose input holds no reference, every one of those is known before the plan starts. So the gate can be
+computed instead of encountered, and the re-attempt that caused round 009 never happens.
+
+What stays refused is the case the mechanism genuinely cannot handle: **several** gated effects where one
+resolves its input from another task's output. Its hash cannot exist until that task has run, so it would
+block, and that approval would re-run the effects already granted. Such a task is reported in `deferred`
+rather than guessed at, and `assertSinglePass` rejects the plan with `PLAN_UNEXECUTABLE` naming it. A single
+gated effect is always fine however it is written, since nothing completed earlier can be repeated.
+
+Approving a planned grant deliberately does **not** execute. Running after each approval would stop at the
+next ungranted effect, which is the block-and-re-attempt this removes; the operator grants the set, then runs
+once. Approving a gate the run has already stopped at still re-attempts, unchanged.

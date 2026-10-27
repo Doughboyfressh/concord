@@ -569,3 +569,16 @@ kbd {
   *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
   .thread { scroll-behavior: auto; }
 }
+
+/* Every effect a plan will perform, listed before any of it runs. Mirrors .plan-tasks so the
+   two cards read as one sequence: the plan, then exactly what it will be allowed to do. */
+.grant-list { list-style: none; margin: 0 0 var(--s3); padding: 0; display: flex; flex-direction: column; }
+.grant-list li { display: flex; align-items: baseline; gap: var(--s2); flex-wrap: wrap; padding: var(--s2) 0; border-top: 1px solid var(--line); font-size: var(--t-sm); }
+.grant-list li:first-child { border-top: 0; }
+.grant-list .tool { font-family: var(--mono); }
+.grant-list .task { color: var(--ink-3); font-size: var(--t-xs); }
+.grant-list .disclose { flex-basis: 100%; }
+/* A granted effect stays listed rather than disappearing: what was approved is part of the
+   record of this plan, and a list that shrank as you approved would hide what you had agreed to. */
+.grant-list li.granted { opacity: .62; }
+.grant-list li.granted .effect-tag { background: var(--ink-3); }

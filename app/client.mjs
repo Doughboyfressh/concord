@@ -43,7 +43,7 @@ let viewing = null;
 
 function emptyState() {
   return { mode: null, history: [], sourceCoverage: [], selected: [], pending: null,
-    proposedPlan: null, runs: [], observations: [], lessonCandidates: [], authority: null, lastError: null };
+    proposedPlan: null, plannedGrants: null, runs: [], observations: [], lessonCandidates: [], authority: null, lastError: null };
 }
 
 const el = (id) => document.getElementById(id);
@@ -751,6 +751,10 @@ function renderThread() {
 
   const plan = state.proposedPlan;
   if (plan && Array.isArray(plan.tasks) && plan.tasks.length) thread.append(planCard(plan));
+  // Before the run, not after a block: these are every effect the plan will ask for, each bound
+  // by its own exact request. Hidden once a gate is actually pending, because then the plan is
+  // mid-flight and the gate card below is the thing to act on.
+  if (!state.pending && ungrantedPlanned().length) thread.append(plannedGrantsCard(state.plannedGrants));
   (state.lessonCandidates ?? []).forEach((candidate, index) => {
     if (!dismissedLessons.has(candidate.key ?? String(index))) thread.append(lessonCard(candidate, index));
   });
@@ -796,6 +800,51 @@ function renderDock() {
     }));
 }
 
+/** Effects this plan will ask for that the session does not already hold a grant for. */
+function ungrantedPlanned() {
+  return (state.plannedGrants?.grants ?? []).filter((grant) => !grant.granted);
+}
+
+/**
+ * Every effect a plan will perform, shown before any of it runs.
+ *
+ * The harness used to refuse a plan with more than one gated effect, so this view could not exist:
+ * an operator met effects one at a time, each after the previous had already happened. Each of
+ * these carries its own exact request hash, computed from the plan rather than discovered by
+ * running into it, so the whole set can be granted and then executed in a single pass.
+ */
+function plannedGrantsCard(planned) {
+  const ungranted = ungrantedPlanned();
+  const total = planned.grants.length;
+  const held = total - ungranted.length;
+  return h('section', { class: 'card card-gate' },
+    h('div', { class: 'card-head' }, icon('i-gate'),
+      h('h2', { text: total === 1 ? 'This plan performs 1 effect' : `This plan performs ${total} effects` }),
+      h('span', { class: 'spacer' }),
+      h('span', { class: 'pill', text: held ? `${held}/${total} granted` : String(total) })),
+    h('div', { class: 'card-body' },
+      h('p', { class: 'note', text: 'Each is bound to its own exact request, computed before the plan runs. Granting them all lets it complete in one pass, so no effect is ever repeated. Granting none is a valid outcome; nothing has run.' }),
+      h('ul', { class: 'grant-list' }, planned.grants.map((grant) => h('li', { class: grant.granted ? 'granted' : '' },
+        h('span', { class: 'effect-tag', text: grant.effect }),
+        h('span', { class: 'tool', text: grant.tool }),
+        h('span', { class: 'task', text: `task ${grant.taskId}` }),
+        grant.granted ? h('span', { class: 'gated', text: 'granted' }) : null,
+        h('details', { class: 'disclose' },
+          h('summary', { text: 'Exact request' }),
+          h('code', { text: grant.requestHash }),
+          h('pre', { class: 'payload', text: JSON.stringify(grant.input?.value ?? grant.input ?? null, null, 2) }))))),
+      (planned.deferred ?? []).length
+        ? h('p', { class: 'note', text: `${plural(planned.deferred.length, 'effect')} cannot be granted yet because its input comes from an earlier task's result: ${planned.deferred.map((d) => d.taskId).join(', ')}.` })
+        : null,
+      h('div', { class: 'actions' },
+        h('button', {
+          type: 'button', class: 'btn-gate',
+          onClick: () => approveAllPlanned(),
+          text: ungranted.length === 1 ? 'Approve this exact request' : `Approve all ${ungranted.length} exact requests`,
+        }),
+        h('span', { class: 'note', text: 'Approving runs nothing on its own — press Run this plan afterwards.' }))));
+}
+
 function planCard(plan) {
   const pendingTask = state.pending?.taskId;
   return h('section', { class: 'card' },
@@ -837,9 +886,14 @@ function planActions() {
   const attempts = proposer?.execution?.attempts ?? [];
   const tools = proposer?.execution?.toolsCompleted ?? [];
   if (!attempts.length) {
+    const ungranted = ungrantedPlanned();
     return h('div', { class: 'actions' },
       h('button', { type: 'button', class: 'btn-primary', onClick: () => executePlan(), text: 'Run this plan' }),
-      h('span', { class: 'note', text: 'Pure and read effects run without a gate; anything else stops here.' }));
+      // Says what will actually happen on press. Running with effects still ungranted is allowed
+      // and stops at the first one; saying so beats letting the button imply it will complete.
+      h('span', { class: 'note', text: ungranted.length
+        ? `${plural(ungranted.length, 'effect')} still ungranted, so this stops at the first one. Grant them above to run straight through.`
+        : 'Pure and read effects run without a gate; anything else stops here.' }));
   }
   const last = attempts[attempts.length - 1];
   return h('div', { class: 'actions' },
@@ -996,6 +1050,32 @@ async function sendMessage(message) {
     if (!messageInput.value) { messageInput.value = message; autoGrow(); }
     showError(error.message, { retry: true });
     announce('The turn failed: ' + error.message);
+    setActivity('Failed', 'error');
+  } finally {
+    setBusy(false);
+  }
+}
+
+/**
+ * Grant every effect this plan will perform, as a set.
+ *
+ * Sequential rather than concurrent, and it stops at the first refusal: each grant is a separate
+ * authorization, so a failure halfway must leave the remaining effects ungranted rather than
+ * racing them through. Nothing executes here — the harness adds these to the session and waits.
+ */
+async function approveAllPlanned() {
+  const ungranted = ungrantedPlanned();
+  if (busy || !ungranted.length) return;
+  showError(null);
+  setBusy(true, `Granting ${plural(ungranted.length, 'effect')}`);
+  try {
+    for (const grant of ungranted) {
+      const payload = await call('/api/approve', { requestHash: grant.requestHash });
+      applyState(payload.state);
+    }
+    setActivity('Granted', 'ok');
+  } catch (error) {
+    showError(error.message);
     setActivity('Failed', 'error');
   } finally {
     setBusy(false);

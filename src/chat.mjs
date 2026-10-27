@@ -1,5 +1,6 @@
 import { canonical, digest, clone, validateSchema, HarnessError } from './value.mjs';
 import { runPlan, replayPlan, inspectPlan, attenuatePolicy } from './engine.mjs';
+import { planGrants, assertSinglePass } from './preflight.mjs';
 import { boundedRecords, boundedValue } from './chat-data.mjs';
 
 const MODEL_TOOL = 'model.propose';
@@ -19,7 +20,7 @@ const MAX_LESSON_CANDIDATES = 16;
 const PRINCIPLES = {
   INVALID_REFERENCE: 'A reference must be an unquoted {"$task":...} object placed where the value belongs, with a direct declared dependsOn, and any path built only from the declared outputKeys of that tool.',
   SCHEMA_MISMATCH: 'Check each input against the declared schema of the tool, including bounds like minItems and required fields, before proposing; a refusal that names the constraint beats a rejected plan.',
-  PLAN_UNEXECUTABLE: 'Include at most one approval-requiring effect per plan, because each approval re-attempts the plan from its first task and a completed effect would run again.',
+  PLAN_UNEXECUTABLE: 'A plan may contain as many approval-requiring effects as it needs, provided each of their inputs is literal: those are all granted before the first one runs, so nothing is ever re-attempted. What is refused is several gated effects where one takes its input from another task\'s output, since that one cannot be granted until the earlier effects have already run. Give the gated tasks literal inputs, or split off the dependent effect as its own plan.',
   OUTPUT_REJECTED: 'The tool completed, so for a write, network or process tool the effect DID occur and only its output was unusable; never describe it as not having happened and never retry it.',
   EFFECT_INDETERMINATE: 'The tool threw, so the effect may or may not have occurred; do not claim it failed safely and do not retry it automatically.',
   INPUT_INVALID: 'Input validation precedes execution, so no effect occurred; correct the named field and propose again.',
@@ -111,19 +112,6 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
   let selected = [];
 
   const isLive = () => registry.has(MODEL_TOOL);
-
-  // A plan with two ungranted approval-requiring effects cannot complete through this harness:
-  // a run blocks at the first, and approving it re-attempts the plan from its first task because
-  // there is no resume, so the already-completed effect runs again and anything not idempotent
-  // fails. Round 009 measured exactly that — a two-write plan granted both effects, landed the
-  // first file, then failed with EFFECT_INDETERMINATE on the write that had certainly succeeded.
-  // Refusing it here keeps a provably unexecutable plan from half-executing and leaving a real
-  // effect behind. The kernel itself stays permissive: runPlan still accepts such a plan for a
-  // caller that can supply every grant up front, which this session-driven surface cannot.
-  const GRANTED_EFFECTS = ['write', 'network', 'process'];
-  function approvalRequiringTasks(plan) {
-    return (plan.tasks ?? []).filter(t => GRANTED_EFFECTS.includes((registry.get(t.tool) ?? {}).effect));
-  }
 
   // Verified citations. The harness already makes effects verifiable — an approval hash binds the
   // resolved input, replay re-checks a recorded run, provenance records what executed. Narration
@@ -263,12 +251,34 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
       runId: record.id, ...groundIn(record.result.root) });
   }
 
-  function assertSingleApproval(plan) {
-    const gated = approvalRequiringTasks(plan);
-    if (gated.length > 1) {
-      throw new HarnessError('PLAN_UNEXECUTABLE',
-        `A plan may contain at most one task requiring approval, because each approval re-attempts the plan from its first task; propose ${gated.map(t => t.tool).join(' and ')} as separate plans`);
-    }
+  // Every grant this plan needs, computed once and reused. Memoised on the plan AND the turn's
+  // policy, because a request hash binds both: an attenuated turn produces different hashes for
+  // the same plan, and serving a cached one would offer an approval that could never match.
+  let grantCache = null;
+  function grantsFor(plan) {
+    const key = digest({ plan, policy: turnPolicy });
+    if (grantCache && grantCache.key === key) return grantCache.preflight;
+    const preflight = planGrants({ plan, policy: turnPolicy, registry, sourceLock, workspaceRoot });
+    grantCache = { key, preflight };
+    return preflight;
+  }
+
+  /**
+   * A plan is executable here when every effect it needs can be granted before the first one runs.
+   *
+   * This used to refuse any plan with more than one gated task, and that refusal was correct for
+   * the mechanism it was defending: approving a blocked gate re-attempts the plan from its first
+   * task, so a second write would repeat the first. Round 009 measured exactly that. But the
+   * premise -- that a gate can only be discovered by running into it -- is false for a task whose
+   * input holds no reference, because its request hash is computable from the plan alone. Granting
+   * all of them up front means the run never blocks, so nothing is ever re-attempted.
+   *
+   * What remains refused is the case the mechanism actually cannot handle: several gated tasks
+   * where one of them resolves its input from an earlier result. Its hash cannot exist yet, so it
+   * would block, and that approval would re-run the effects already granted.
+   */
+  function assertExecutable(plan) {
+    assertSinglePass(grantsFor(plan), plan);
   }
 
   // The authority in force for the turn being processed. It equals `policy` unless the caller
@@ -279,7 +289,7 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
 
   function adoptPlan(plan) {
     inspectPlan({ plan, policy: turnPolicy, registry, sourceLock, workspaceRoot });
-    assertSingleApproval(plan);
+    assertExecutable(plan);
     proposedPlan = plan;
   }
 
@@ -379,7 +389,7 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
       // single-approval rule has to be applied here too or a model-proposed plan bypasses it.
       if (proposal.plan) {
         inspectPlan({ plan: proposal.plan, policy: turnPolicy, registry, sourceLock, workspaceRoot });
-        assertSingleApproval(proposal.plan);
+        assertExecutable(proposal.plan);
       }
       // Verified before the reply is committed: an unverifiable anchor rejects the whole response,
       // matching how an invalid plan already rejects the narrative that accompanied it.
@@ -539,9 +549,27 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
 
   async function approve(requestHash) {
     if (typeof requestHash !== 'string' || !/^[a-f0-9]{64}$/.test(requestHash)) throw new HarnessError('CHAT_INPUT', 'A SHA-256 request hash is required');
-    if (!pending || pending.requestHash !== requestHash) throw new HarnessError('CHAT_APPROVAL', 'No matching pending approval');
+
+    // Granting a gate the run has already stopped at. Unchanged: the plan is mid-flight, so the
+    // grant is immediately useful and re-attempting is what the operator is asking for.
+    if (pending && pending.requestHash === requestHash) {
+      approvals.add(requestHash);
+      applyOutcome(await attempt(proposedPlan));
+      return snapshot();
+    }
+
+    // Granting ahead of the run. The hash must be one this very plan computed, so an operator can
+    // approve no effect that the proposed plan does not already contain, and a hash left over
+    // from a plan that has since changed matches nothing.
+    const planned = proposedPlan ? grantsFor(proposedPlan).grants : [];
+    if (!planned.some(grant => grant.requestHash === requestHash)) {
+      throw new HarnessError('CHAT_APPROVAL', 'No pending or planned approval matches that request');
+    }
     approvals.add(requestHash);
-    applyOutcome(await attempt(proposedPlan));
+    // Deliberately does NOT execute. Attempting here would start a run that stops at the next
+    // ungranted effect, which is precisely the block-and-re-attempt this mechanism exists to
+    // remove: approving five effects one at a time would re-run the first four. The operator
+    // grants the set, then executes once.
     return snapshot();
   }
 
@@ -574,6 +602,25 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
       lastError: lastError ? { ...lastError } : null,
       observations: boundedRecords(observations, { maxItems: 8, maxBytes: 16384 }),
       proposedPlan: proposedPlan ? clone(proposedPlan) : null,
+      // Every effect this plan will ask for, with the exact request binding each one, before any
+      // of them runs. An operator can grant the set and the run then completes in a single pass;
+      // granting none is still a valid outcome and nothing here has executed. `granted` reflects
+      // what this session already holds, so re-proposing an identical plan does not ask twice.
+      plannedGrants: proposedPlan ? (() => {
+        const preflight = grantsFor(proposedPlan);
+        return {
+          singlePass: preflight.singlePass,
+          gatedCount: preflight.gatedCount,
+          grants: preflight.grants.map(g => ({
+            taskId: g.taskId, tool: g.tool, effect: g.effect, requestHash: g.requestHash,
+            granted: approvals.has(g.requestHash),
+            // Bounded like every other value a surface renders: an operator approving an effect
+            // must see what it will do, and a large input must not break the view that shows it.
+            input: boundedValue(g.input),
+          })),
+          deferred: preflight.deferred.map(d => ({ ...d })),
+        };
+      })() : null,
       runs: runs.map(r => ({ id: r.id, status: r.status })),
       // Suggestions, never authority: an operator may promote one, ignore it, or edit it first.
       lessonCandidates: lessonCandidates.map(c => clone(c)),
