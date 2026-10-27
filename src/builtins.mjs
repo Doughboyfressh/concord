@@ -4,7 +4,13 @@ import { createHash } from 'node:crypto';
 import { canonical, digest, validateSchema, HarnessError } from './value.mjs';
 import { workspaceFile, workspaceDir, readWorkspaceFile } from './workspace-fs.mjs';
 
-const object = (properties, required = Object.keys(properties)) => ({ type: 'object', properties, required, additionalProperties: false });
+// The optional third argument is a schema `description`: an allowed keyword that validation
+// ignores and that the system prompt carries verbatim, so it is how a tool tells a model what it
+// is for. Omitted by default, so every existing schema hashes exactly as it did.
+const object = (properties, required = Object.keys(properties), description) => ({
+  type: 'object', properties, required, additionalProperties: false,
+  ...(description === undefined ? {} : { description }),
+});
 const string = { type: 'string', maxLength: 65536 };
 const hash64 = { type: 'string', minLength: 64, maxLength: 64 };
 const MAX_MEMORY_ENTRIES = 1000;
@@ -181,7 +187,24 @@ export function makeBuiltinTools() {
         const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
         return { path: relative, text, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), untrusted: true };
       } },
-    { name: 'files.write', version: '1.0.0', outputKeys: ['contentHash', 'created', 'path'], effect: 'write', inputSchema: object({ path: string, content: {} }),
+    /**
+     * Two write tools, and the only thing distinguishing them was their names.
+     *
+     * A model is given each tool's name, version, effect and inputSchema and nothing else, so
+     * `files.write` reads as the general one and `files.writeText` as a variant for a special
+     * case — when the truth is the other way round for anything a browser or compiler has to
+     * read. Measured live: asked for a static site, Concord chose files.write four times and
+     * produced four JSON documents, each one a quoted string where HTML and CSS should have been.
+     * The plan completed, every receipt was honest, and the site did not exist.
+     *
+     * `description` is already an allowed schema keyword and is inert during validation, so the
+     * fix belongs in the contract the model actually reads rather than in prose somewhere else.
+     */
+    { name: 'files.write', version: '1.1.0', outputKeys: ['contentHash', 'created', 'path'], effect: 'write',
+      inputSchema: object({
+        path: string,
+        content: { description: 'Any JSON value. It is written as canonical JSON, so a string arrives on disk quoted and escaped rather than as its own bytes.' },
+      }, ['path', 'content'], 'Create a JSON document. Use this for structured records this harness will read back. For a file whose bytes must be exactly the text given — HTML, CSS, JavaScript, Markdown, anything another program parses — use files.writeText instead.'),
       execute({ path: relative, content }, context) {
         const filename = workspaceFile(context.workspaceRoot, relative);
         const text = canonical(content) + '\n';
@@ -309,8 +332,11 @@ export function makeBuiltinTools() {
      * files.write has it, and the parent directory must already exist: files.mkdir is a separate
      * grant because making a tree somewhere is a different act from putting a file in one.
      */
-    { name: 'files.writeText', version: '1.0.0', outputKeys: ['path', 'created', 'sha256', 'bytes'], effect: 'write',
-      inputSchema: object({ path: string, text: { type: 'string', maxLength: 4194304 } }),
+    { name: 'files.writeText', version: '1.1.0', outputKeys: ['path', 'created', 'sha256', 'bytes'], effect: 'write',
+      inputSchema: object({
+        path: string,
+        text: { type: 'string', maxLength: 4194304, description: 'The exact bytes of the file. Written as UTF-8 with nothing added, so what you supply is what another program will read.' },
+      }, ['path', 'text'], 'Create a text file whose bytes are exactly the text given. This is the one to use for source files, markup, stylesheets, scripts and documents. For a structured record this harness will read back as JSON, use files.write instead.'),
       execute({ path: relative, text }, context) {
         const filename = workspaceFile(context.workspaceRoot, relative);
         const encoded = Buffer.from(text, 'utf8');

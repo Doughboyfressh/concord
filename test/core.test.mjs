@@ -692,3 +692,26 @@ test('policy attenuation only ever narrows authority, and the narrowed set is wh
   // Attenuating nothing is the identity, so an unrestricted turn is not quietly altered.
   assert.deepEqual(attenuatePolicy(policy, {}), attenuatePolicy(policy));
 });
+
+test('the two write tools are distinguishable from their contracts alone', () => {
+  // A model is handed each tool's name, version, effect and inputSchema and nothing else. On that
+  // surface files.write reads as the general one and files.writeText as a variant for a special
+  // case, when it is the other way round for anything another program parses. Measured live:
+  // asked for a static site, Concord chose files.write four times and wrote four JSON documents
+  // -- the plan completed, every receipt was honest, and the site did not exist. The schema
+  // `description` keyword is how a tool says what it is for, so it is asserted rather than hoped.
+  const tools = new Map(makeBuiltinTools().map((t) => [t.name, t]));
+  const write = tools.get('files.write').inputSchema;
+  const writeText = tools.get('files.writeText').inputSchema;
+
+  assert.match(write.description, /JSON/, 'files.write must say it produces JSON');
+  assert.match(write.description, /files\.writeText/, 'and must name the alternative');
+  assert.match(writeText.description, /exactly/, 'files.writeText must say the bytes are exact');
+  assert.match(write.properties.content.description, /quoted/, 'the trap is that a string arrives quoted');
+
+  // Inert: a description must not change what either schema accepts or rejects.
+  validateSchema({ path: 'a.json', content: { a: 1 } }, write);
+  validateSchema({ path: 'a.txt', text: 'hello' }, writeText);
+  assert.throws(() => validateSchema({ path: 'a.txt', text: 5 }, writeText), (e) => e.code === 'SCHEMA_MISMATCH');
+  assert.throws(() => validateSchema({ path: 'a.txt' }, writeText), (e) => e.code === 'SCHEMA_MISMATCH');
+});
