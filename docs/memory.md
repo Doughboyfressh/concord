@@ -44,6 +44,40 @@ user payload, with its candidate hash and truncation flag. Promotion makes it du
 it a system instruction or grants tool authority. See the [first supervised training round](training-round-001.md)
 for a real evidence-linked promotion and replay.
 
+## Retraction
+
+A lesson that later evidence falsifies cannot be edited or deleted. Editing it breaks the digest
+that names its own file, so recall would count it as a `corruptedEntry`; deleting it destroys the
+record that it was ever believed, and that record is often the useful part. Append-only and
+content-addressed is what makes this store tamper-evident, and that is not worth trading away.
+
+So a retraction is an ordinary promoted lesson that **names the one it replaces**. `memory.candidate`
+takes an optional `supersedes` array of candidate hashes and always returns the field, empty when
+nothing is retracted — `outputKeys` names the keys a result always has, and a model builds task
+references from exactly that list. `memory.promote` is unchanged: a retraction is a `write` effect
+needing its own exact grant, like any other promotion.
+
+`memory.recall` then withholds any stored lesson some record supersedes, and says so rather than
+quietly dropping it:
+
+- `retractedCount` — how many stored lessons were withheld (exact).
+- `retracted` — their hashes, bounded to 32.
+- `danglingSupersedes` — hashes a retraction named that this store does not hold, bounded to 32.
+  Reported because a mistyped hash retracts nothing and would otherwise look exactly like a
+  retraction that worked.
+
+**Retraction is monotone and permanent.** A lesson is withheld if *any* valid stored record
+supersedes it, including a record that something else has since superseded. Letting a retracted
+retraction resurrect what it replaced would make what a turn is told depend on a chain nobody can
+see, and a falsified lesson coming back to life is the one outcome this must never produce. To
+restore a lesson, promote it again with its own evidence — a new record and a new grant, which is
+the point.
+
+A record naming its own hash withholds nothing (and is infeasible to construct anyway, since the
+hash covers `supersedes`). Records promoted before retraction existed carry no `supersedes`; the
+field is optional in the schema precisely so they keep validating and keep hashing to their own
+filenames, and they read as retracting nothing.
+
 ## What is and isn't covered
 
 - **Covered, tested:** digest verification on promote, idempotent resubmission, a planted symlink

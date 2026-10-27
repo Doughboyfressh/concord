@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { makeBuiltinTools } from '../src/builtins.mjs';
 import { runPlan } from '../src/engine.mjs';
-import { HarnessError } from '../src/value.mjs';
+import { HarnessError, digest } from '../src/value.mjs';
 import { tempDir, realTempDir } from './temp-workspace.mjs';
 
 const tools = new Map(makeBuiltinTools().map((t) => [t.name, t]));
@@ -68,7 +68,10 @@ test('memory.recall against an absent memory directory returns an empty result, 
   // matchedCount is reported alongside results because `results` is a ranked list that includes
   // zero-scoring entries, so its length is not a match count. Round 012 measured a reader calling
   // a zero-scoring entry "matched" with nothing in the output able to contradict it.
-  assert.deepEqual(result, { strategy: 'lexical-overlap-v1', totalEntries: 0, corruptedEntries: 0, matchedCount: 0, results: [] });
+  // Deep-equal rather than key-by-key: an empty store must report nothing withheld as firmly as
+  // it reports nothing found, so a new field appearing here should fail until it is accounted for.
+  assert.deepEqual(result, { strategy: 'lexical-overlap-v1', totalEntries: 0, corruptedEntries: 0,
+    retractedCount: 0, retracted: [], danglingSupersedes: [], matchedCount: 0, results: [] });
 });
 
 test('memory.recall ranks by lexical overlap with a deterministic tie-break, and is byte-identical across repeated calls', () => {
@@ -159,4 +162,122 @@ test('recall reports matchedCount separately from the ranked results length', ()
   const overlapping = tools.get('memory.recall').execute({ query: 'geometry of shapes' }, { workspaceRoot: temp, policy });
   assert.ok(overlapping.results[0].score > 0);
   assert.equal(overlapping.matchedCount, 1, 'a real term overlap counts as a match');
+});
+
+/**
+ * Retraction.
+ *
+ * The store is content-addressed and append-only, so a lesson later evidence falsifies cannot be
+ * edited or deleted — editing it breaks the digest that names its own file, and deleting it
+ * destroys the record that it was ever believed. A retraction is therefore an ordinary promoted
+ * lesson that NAMES the one it replaces, and recall stops serving what a retraction supersedes.
+ */
+
+function retractionFor(lesson, evidence, supersedes) {
+  return tools.get('memory.candidate').execute({ lesson, evidence, supersedes });
+}
+
+function promoteInto(temp, candidate) {
+  fs.mkdirSync(path.join(temp, 'memory'), { recursive: true });
+  fs.writeFileSync(path.join(temp, 'memory', candidate.candidateHash + '.json'), JSON.stringify(candidate) + '\n', { flag: 'wx' });
+  return candidate;
+}
+
+const recall = (temp, query, limit) =>
+  tools.get('memory.recall').execute({ query, ...(limit ? { limit } : {}) }, { workspaceRoot: temp, policy });
+
+test('a lesson a retraction supersedes stops being recalled, and the withholding is declared', () => {
+  const temp = tempWorkspace();
+  const stale = promoteInto(temp, candidateFor('approval rule: at most one write per plan', ['run-009']));
+  const correction = promoteInto(temp, retractionFor(
+    'approval rule: a plan may hold many writes when their inputs are literal', ['run-preflight'], [stale.candidateHash]));
+
+  const result = recall(temp, 'approval rule write plan');
+  assert.deepEqual(result.results.map((r) => r.candidateHash), [correction.candidateHash]);
+  assert.equal(result.results.some((r) => /at most one/.test(r.lesson)), false, 'the falsified lesson is gone from what a turn is told');
+
+  // Declared, not silent: both files are still on disk and the retraction is reported.
+  assert.equal(result.totalEntries, 2);
+  assert.equal(result.corruptedEntries, 0);
+  assert.equal(result.retractedCount, 1);
+  assert.deepEqual(result.retracted, [stale.candidateHash]);
+  assert.deepEqual(fs.readdirSync(path.join(temp, 'memory')).sort(),
+    [correction.candidateHash + '.json', stale.candidateHash + '.json'].sort(),
+    'nothing was deleted; the record that it was once believed survives');
+});
+
+test('retraction is permanent: retracting the retraction does not resurrect the lesson', () => {
+  // The rule that keeps what a turn is told from depending on a chain nobody can see. A falsified
+  // lesson coming back to life is the one outcome this must never produce.
+  const temp = tempWorkspace();
+  const stale = promoteInto(temp, candidateFor('stale claim about widgets', ['e1']));
+  const first = promoteInto(temp, retractionFor('widgets correction one', ['e2'], [stale.candidateHash]));
+  promoteInto(temp, retractionFor('widgets correction two', ['e3'], [first.candidateHash]));
+
+  const result = recall(temp, 'widgets');
+  const served = result.results.map((r) => r.lesson);
+  assert.deepEqual(served, ['widgets correction two']);
+  assert.equal(result.retractedCount, 2);
+});
+
+test('a retraction naming a hash this store never held is reported rather than ignored', () => {
+  // A mistyped hash retracts nothing and would otherwise look exactly like one that worked.
+  const temp = tempWorkspace();
+  const kept = promoteInto(temp, candidateFor('a lesson that stays', ['e1']));
+  const absent = 'f'.repeat(64);
+  promoteInto(temp, retractionFor('a correction aimed at nothing', ['e2'], [absent]));
+
+  const result = recall(temp, 'lesson stays correction');
+  assert.deepEqual(result.danglingSupersedes, [absent]);
+  assert.equal(result.retractedCount, 0);
+  assert.ok(result.results.some((r) => r.candidateHash === kept.candidateHash), 'nothing real was withheld');
+});
+
+test('records promoted before retraction existed still validate and still recall', () => {
+  // The compatibility that matters: the store is content-addressed, so a schema that rejected
+  // entries without `supersedes` would turn every lesson earned so far into a corrupted entry.
+  const temp = tempWorkspace();
+  const legacy = { version: 1, lesson: 'an older lesson with no supersedes field', evidenceHashes: ['a'.repeat(64)], status: 'proposed', executable: false };
+  const stored = { ...legacy, candidateHash: digest(legacy) };
+  promoteInto(temp, stored);
+
+  const result = recall(temp, 'older lesson');
+  assert.equal(result.corruptedEntries, 0, 'a record written before this feature is not corrupt');
+  assert.deepEqual(result.results.map((r) => r.candidateHash), [stored.candidateHash]);
+  assert.deepEqual(result.results[0].supersedes, [], 'absent reads as retracting nothing');
+});
+
+test('a candidate cannot retract itself, and duplicate targets collapse', () => {
+  const temp = tempWorkspace();
+  const target = 'b'.repeat(64);
+  const twice = retractionFor('a correction', ['e1'], [target, target]);
+  assert.deepEqual(twice.supersedes, [target], 'the same retraction expressed twice is one record');
+
+  // Self-reference is infeasible to construct (the hash covers supersedes), so the guard is
+  // asserted directly: a record naming its own hash withholds nothing.
+  const self = promoteInto(temp, candidateFor('self referential', ['e2']));
+  const forged = { ...self, supersedes: [self.candidateHash] };
+  fs.writeFileSync(path.join(temp, 'memory', self.candidateHash + '.json'), JSON.stringify(forged) + '\n', { flag: 'w' });
+  const result = recall(temp, 'self referential');
+  // The forged file no longer matches its own digest, so it is corrupt rather than authoritative.
+  assert.equal(result.corruptedEntries, 1);
+  assert.deepEqual(result.results, []);
+});
+
+test('the kernel gates a retraction exactly like any other promotion', async () => {
+  const temp = realTempDir('concord-memory-');
+  const stale = promoteInto(temp, candidateFor('a lesson to retract', ['e1']));
+  const correction = retractionFor('the correction', ['e2'], [stale.candidateHash]);
+  const registry = new Map([['memory.promote', tools.get('memory.promote')]]);
+  const options = {
+    plan: { version: 1, tasks: [{ id: 'retract', tool: 'memory.promote', input: correction }] },
+    policy: { version: 1, allowedTools: ['memory.promote'], allowedEffects: ['write'], maxOutputBytes: 65536, maxJournalBytes: 1048576 },
+    registry, sourceLock: { version: 1 }, workspaceRoot: temp,
+  };
+  const blocked = await runPlan(options);
+  assert.equal(blocked.outcome.status, 'blocked', 'a retraction is a write and needs its exact grant');
+
+  const done = await runPlan({ ...options, approvals: [blocked.outcome.requestHash] });
+  assert.equal(done.outcome.status, 'completed');
+  assert.equal(recall(temp, 'lesson retract correction').retractedCount, 1);
 });

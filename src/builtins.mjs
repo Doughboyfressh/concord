@@ -9,11 +9,23 @@ const string = { type: 'string', maxLength: 65536 };
 const hash64 = { type: 'string', minLength: 64, maxLength: 64 };
 const MAX_MEMORY_ENTRIES = 1000;
 const MEMORY_DIR = 'memory';
+/**
+ * A promoted lesson, optionally retracting earlier ones.
+ *
+ * `supersedes` is absent from the required list on purpose. Records promoted before retraction
+ * existed do not carry it, and they must keep validating and keep hashing to their own filenames
+ * — the store is content-addressed, so a schema that rejected them would turn every lesson earned
+ * so far into a corrupted entry. Present or absent, the digest is taken over whatever is there.
+ */
+const MAX_SUPERSEDES = 100;
 const candidateSchema = object({
   version: { const: 1 }, lesson: string,
   evidenceHashes: { type: 'array', minItems: 1, maxItems: 1000, items: hash64 },
   status: { const: 'proposed' }, executable: { const: false }, candidateHash: hash64,
-});
+  supersedes: { type: 'array', maxItems: MAX_SUPERSEDES, items: hash64 },
+}, ['version', 'lesson', 'evidenceHashes', 'status', 'executable', 'candidateHash']);
+/** How many retracted or dangling hashes recall will name. The counts beside them stay exact. */
+const MAX_LISTED_RETRACTIONS = 32;
 
 export function makeBuiltinTools() {
   return [
@@ -138,9 +150,28 @@ export function makeBuiltinTools() {
         if (score < threshold) throw new HarnessError('JUDGMENT_REJECTED', 'Evidence does not meet the declared threshold');
         return { accepted: true, score, threshold, evidenceHash: digest(evidence), grantsCapabilities: false };
       } },
-    { name: 'memory.candidate', version: '1.0.0', outputKeys: ['candidateHash', 'evidenceHashes', 'executable', 'lesson', 'status', 'version'], effect: 'pure', inputSchema: object({ lesson: string, evidence: { type: 'array', minItems: 1, maxItems: 1000, items: true } }),
-      execute({ lesson, evidence }) {
-        const candidate = { version: 1, lesson, evidenceHashes: evidence.map(digest).sort(), status: 'proposed', executable: false };
+    /**
+     * A lesson, and what it retracts.
+     *
+     * The store is content-addressed and append-only, which is what makes it tamper-evident and
+     * is not negotiable. So a lesson that later evidence falsifies cannot be edited or deleted —
+     * the only honest move is to record the correction as a new lesson that NAMES the one it
+     * replaces. That keeps the fact that something was once believed, and why, which a deletion
+     * would destroy; `memory.recall` then stops serving what a retraction supersedes.
+     *
+     * `supersedes` is always emitted, empty when nothing is retracted, because outputKeys names
+     * the keys a result ALWAYS has and a model builds task references from exactly that list.
+     */
+    { name: 'memory.candidate', version: '2.0.0', outputKeys: ['candidateHash', 'evidenceHashes', 'executable', 'lesson', 'status', 'supersedes', 'version'], effect: 'pure',
+      inputSchema: object({
+        lesson: string,
+        evidence: { type: 'array', minItems: 1, maxItems: 1000, items: true },
+        supersedes: { type: 'array', maxItems: MAX_SUPERSEDES, items: hash64 },
+      }, ['lesson', 'evidence']),
+      execute({ lesson, evidence, supersedes = [] }) {
+        const candidate = { version: 1, lesson, evidenceHashes: evidence.map(digest).sort(), status: 'proposed', executable: false,
+          // Sorted and de-duplicated so the same retraction expressed two ways is one record.
+          supersedes: [...new Set(supersedes)].sort() };
         return { ...candidate, candidateHash: digest(candidate) };
       } },
     { name: 'files.read', version: '1.0.0', outputKeys: ['bytes', 'path', 'sha256', 'text', 'untrusted'], effect: 'read', inputSchema: object({ path: string }),
@@ -351,7 +382,7 @@ export function makeBuiltinTools() {
         }
         return { path: relative, candidateHash, promoted: true };
       } },
-    { name: 'memory.recall', version: '1.0.0', outputKeys: ['corruptedEntries', 'matchedCount', 'results', 'strategy', 'totalEntries'], effect: 'read', inputSchema: object({ query: string, limit: { type: 'integer', minimum: 1, maximum: 100 } }, ['query']),
+    { name: 'memory.recall', version: '2.0.0', outputKeys: ['corruptedEntries', 'danglingSupersedes', 'matchedCount', 'results', 'retracted', 'retractedCount', 'strategy', 'totalEntries'], effect: 'read', inputSchema: object({ query: string, limit: { type: 'integer', minimum: 1, maximum: 100 } }, ['query']),
       execute({ query, limit = 10 }, context) {
         const base = realpathSync(context.workspaceRoot);
         let names;
@@ -372,16 +403,45 @@ export function makeBuiltinTools() {
             if (digest(rest) !== candidateHash || candidateHash !== name.slice(0, -'.json'.length)) throw new HarnessError('MEMORY_INVALID', 'Stored entry does not match its own digest');
             const tokens = new Set(candidate.lesson.toLowerCase().match(/[a-z0-9]+/g) ?? []);
             const score = [...terms].filter((t) => tokens.has(t)).length;
-            matches.push({ candidateHash, lesson: candidate.lesson, evidenceHashes: candidate.evidenceHashes, score });
+            matches.push({ candidateHash, lesson: candidate.lesson, evidenceHashes: candidate.evidenceHashes,
+              supersedes: candidate.supersedes ?? [], score });
           } catch { corruptedEntries += 1; }
         }
-        matches.sort((a, b) => b.score - a.score || (a.candidateHash < b.candidateHash ? -1 : a.candidateHash > b.candidateHash ? 1 : 0));
+
+        // Retraction is monotone and permanent: a lesson is withheld if ANY valid stored record
+        // supersedes it, including a record that something else has since superseded. The
+        // alternative -- letting a retracted retraction resurrect what it replaced -- makes what
+        // the model is told depend on a chain nobody can see, and a falsified lesson coming back
+        // to life is the one outcome this must never produce. To restore a lesson, promote it
+        // again with its own evidence; that is a new record and a new grant, which is the point.
+        const retractedBy = new Map();
+        for (const entry of matches) {
+          for (const hash of entry.supersedes) {
+            if (hash === entry.candidateHash) continue; // a record cannot retract itself
+            if (!retractedBy.has(hash)) retractedBy.set(hash, []);
+            retractedBy.get(hash).push(entry.candidateHash);
+          }
+        }
+        const stored = new Set(matches.map((entry) => entry.candidateHash));
+        // Named but not present: a retraction of something this store never held, or no longer
+        // does. Reported rather than ignored, because a mistyped hash retracts nothing and would
+        // otherwise look exactly like a retraction that worked.
+        const dangling = [...retractedBy.keys()].filter((hash) => !stored.has(hash)).sort();
+        const retracted = [...retractedBy.keys()].filter((hash) => stored.has(hash)).sort();
+        const live = matches.filter((entry) => !retractedBy.has(entry.candidateHash));
+
+        live.sort((a, b) => b.score - a.score || (a.candidateHash < b.candidateHash ? -1 : a.candidateHash > b.candidateHash ? 1 : 0));
         // `results` is a RANKED list, not a filter: it includes entries that scored zero, and
         // fetchMemoryExcerpt applies the score>0 filter itself. Round 012 measured a reader
         // calling a zero-scoring entry "matched", which the output gave no way to contradict.
         // matchedCount states how many actually share a term with the query.
         return { strategy: 'lexical-overlap-v1', totalEntries: names.length, corruptedEntries,
-          matchedCount: matches.filter((m) => m.score > 0).length, results: matches.slice(0, limit) };
+          // Declared, never silent: a withheld lesson is named so an operator can see that a
+          // retraction took effect, the same way compaction names the records it drops. Counts
+          // are exact; the lists beside them are bounded.
+          retractedCount: retracted.length, retracted: retracted.slice(0, MAX_LISTED_RETRACTIONS),
+          danglingSupersedes: dangling.slice(0, MAX_LISTED_RETRACTIONS),
+          matchedCount: live.filter((m) => m.score > 0).length, results: live.slice(0, limit) };
       } },
   ];
 }
