@@ -120,6 +120,51 @@ original run. Model outputs are represented by replies and the current proposal 
 embedding all responses. Rejected proposals produce supervisor observations. `EFFECT_INDETERMINATE`
 remains explicit; it cannot establish that an effect did not occur.
 
+### Fetching back an output that did not fit
+
+`boundedValue` does not shorten an oversized output. Past 8 KiB it drops the value entirely and leaves
+`{fullDigest, bytes, omitted: true, reason: 'byte-limit'}` — a commitment to what the output was, with
+none of what it said. That is honest and, on its own, inert. Measured repeatedly in this project: a model
+handed a digest where content belongs does not report that it cannot see the file, it describes the file.
+Six fabricated readings in one session, every one of an output that existed and was recorded in full
+throughout.
+
+`observation.part` is the retrieval half, and it completes the pattern the other two windows already have:
+compaction names the turns it drops and `conversation.turn` returns them; `boundedByRelevance` names the
+lessons it omits and `instructions.lesson` returns those. An oversized observation was the one declared
+loss with no way back, which is what made declaring it insufficient.
+
+Input is `{runId, taskId, path?, offset?}`. `path` is an RFC 6901 pointer resolved by the same rules
+`engine.mjs` applies to a task reference, so a path means here what it means there; unsafe keys are
+refused rather than traversed. What comes back depends on what the path names:
+
+- **A string** is returned as a slice reporting `offset`, `returned`, `totalLength` and `hasMore`. This is
+  not the silent truncation this project refuses elsewhere: a slice is *asked for* by offset and states
+  exactly which part of what it is, so a caller always knows what it is holding and how much remains.
+- **Any other value** is returned whole or not at all. Half an object is a different object and a caller
+  handed one could not tell. When it does not fit, `keys` lists what it holds so a deeper path can be
+  chosen — naming what was withheld rather than only refusing it.
+- **An unknown run, task or path** comes back `found: false` rather than throwing, the way an unknown turn
+  id does. Naming something that is not there is a question, and the answer is no.
+
+A slice never splits a multi-byte character and never exceeds its byte bound, which defaults to 4 KiB
+specifically so a result survives the 8 KiB observation window that caused the problem — a reply one byte
+over would be dropped whole, which is the failure this tool exists to undo. It is a `read` effect and needs
+no grant: these are outputs of tasks this session already ran, under grants already given, recorded in
+receipts already shown. The store reaches it through a closure rather than its `config`, for the reason
+`conversation.turn`'s transcript does.
+
+Shipping the tool was not enough on its own. The system prompt names the case directly — an output reading
+`omitted: true` means the task really produced it and you were simply not shown it, so fetch it rather than
+describe it — because a capability the model does not know to reach for changes nothing. That lesson was
+learned the hard way earlier the same day, when a correctly shipped feature went unused because promoted
+memory still taught the rule it had replaced.
+
+Because `observation.part` is a `read` effect, a plan may hold several of them and retrieve a large output
+in one pass. Note the interaction: several large slices in one plan make one large receipt, and a receipt
+larger than the whole observation window is reported in `droppedNewest` rather than shown. Retrieving more
+per plan than the window can hold therefore returns evidence the turn cannot read.
+
 Acquired skill excerpts, recalled memory, and selected catalog references are untrusted user-payload data,
 outside the system instructions. Skill and memory text are bounded to 1,500 characters each, with explicit
 truncation flags and source/candidate identity. Only the thirteen reviewed, digest-checked modules are system

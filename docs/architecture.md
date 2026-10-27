@@ -95,6 +95,8 @@ With `--journal`, the kernel exclusively creates a JSONL sink and fsyncs the hea
 
 Instruction modules are original reviewed syntheses with pinned source citations. Imported source skill text remains untrusted reference material and cannot override the supervisor. Context selection has deterministic lexical scoring, tie-breaks, snippet limits, and a history window with a commitment to omitted messages. The model request and resulting tool proposal are separate authorization stages.
 
+Every bound in that assembly declares what it dropped, and each declaration has a retrieval to match it: omitted turns through `conversation.turn`, omitted lessons through `instructions.lesson`, and an oversized task output — which is dropped whole rather than shortened — through `observation.part`. The pairing is the point. A commitment to content the model cannot reach does not stop it inventing that content; it just makes the invention auditable afterwards. See [chat instructions](chat-instructions.md).
+
 The local UI shows selected references, available tools, proposed plans, exact blocked operations and recorded runs. The server serves only its three application assets and narrow JSON APIs on loopback; state-changing APIs require the instance token and the expected local origin. It does not expose the upstream tree or a general filesystem endpoint.
 
 Chat records persist locally. Successful receipts can be replayed without tool execution; the current process keeps the original replay context. Restart reconstruction and uncertain-effect recovery remain explicit future modules rather than silently retrying actions.
