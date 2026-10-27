@@ -24,6 +24,7 @@ import { makeGovernanceTools } from './governance.mjs';
 import { buildChatContext } from './chat-context.mjs';
 import { makeConversationTools } from './conversation.mjs';
 import { makeVariantTools, runSummary } from './variant.mjs';
+import { makeObservationTools } from './observation.mjs';
 import { createChatHarness } from './chat.mjs';
 import { createServer, listenServer } from './server.mjs';
 
@@ -161,6 +162,23 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
   // buildContext below, which the harness calls with the full history at the start of each turn.
   let transcript = [];
   for (const tool of makeConversationTools({ readTranscript: () => transcript })) registry.set(tool.name, tool);
+  // The retrieval half of observation compaction. boundedValue drops an output over 8 KiB
+  // entirely rather than shortening it, so a turn that read a large file was shown a hash where
+  // the content should be — and described the file anyway, six times in one session. The content
+  // was recorded throughout; nothing could reach it. This indexes the recorded completed outputs
+  // by run and task so a turn can fetch back what it was not shown.
+  //
+  // Journals are held by reference, never copied: the chat harness already retains every run for
+  // the life of the session, so this costs a map entry rather than a second copy of the evidence.
+  const runJournals = new Map();
+  for (const tool of makeObservationTools({
+    readOutput: (runId, taskId) => {
+      const result = runJournals.get(runId);
+      if (!result) return null;
+      const event = result.events.find((e) => e.type === 'completed' && e.data.taskId === taskId);
+      return event ? { output: event.data.output, outputHash: event.data.outputHash } : null;
+    },
+  })) registry.set(tool.name, tool);
   // Task-level recursion over plans, registered here for the same two reasons, and reading the
   // run ledger through the same kind of reference rather than through its own config.
   //
@@ -216,6 +234,7 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
       // comparing a subset of what executed. A summary cannot fail on content the journal holds.
       runLedger.push(runSummary(record));
       if (record.plan) runPlans.set(id, record.plan);
+      if (record.result) runJournals.set(id, record.result);
       const file = path.join(store, id + '.json');
       const content = canonical(record) + '\n';
       try { fs.writeFileSync(file, content, { flag: 'wx' }); }
