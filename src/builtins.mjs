@@ -63,6 +63,228 @@ const candidateSchema = object({
 /** How many retracted or dangling hashes recall will name. The counts beside them stay exact. */
 const MAX_LISTED_RETRACTIONS = 32;
 
+// ---------------------------------------------------------------------------
+// Arithmetic.
+//
+// A calculator has to be a parser, never an evaluator. `eval` and `new Function` would execute
+// model-supplied source inside the kernel, and model output is untrusted by contract, so neither
+// appears here. What follows is a recursive-descent parser over a fixed grammar: no variables, no
+// assignment, no property access, no way to name anything outside the expression text.
+//
+// The operator set is chosen for REPRODUCIBILITY rather than for completeness, which is why it is
+// smaller than a pocket calculator's. A pure tool makes the strictest promise in this codebase:
+// the same input yields the same bytes on any machine, under any future Node, forever. IEEE-754
+// specifies +, -, *, /, % and sqrt as exactly rounded, so those hold that promise. It does NOT
+// specify sin, cos, tan, log, exp, or a fractional power — those are allowed to differ in the
+// last bit between implementations, and V8 has changed its own more than once. Shipping them
+// would mean recording a run here that replays differently on another machine, which is a worse
+// failure than not offering the function. They are refused by name so a model is told the
+// operation is excluded and why, instead of meeting a bare "unknown function".
+const MATH_MAX_DEPTH = 32;
+const MATH_MAX_EXPONENT = 1024;
+
+const MATH_EXCLUDED = new Set([
+  'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'atan2', 'sinh', 'cosh', 'tanh',
+  'log', 'ln', 'log2', 'log10', 'exp', 'pow', 'random',
+]);
+
+const MATH_CONSTANTS = { pi: Math.PI, e: Math.E };
+
+/**
+ * Refuse a result canonical JSON could not carry.
+ *
+ * Infinity and NaN are not representable in this kernel's canonical form, so a tool returning one
+ * would produce output that cannot be journalled — the failure would surface later, somewhere
+ * less informative. Division by zero and overflow are therefore errors at the point they happen,
+ * named for the operation that caused them.
+ */
+function mathFinite(value, operation) {
+  if (Number.isNaN(value)) throw new HarnessError('MATH_UNDEFINED', `${operation} is undefined for those operands`);
+  if (!Number.isFinite(value)) throw new HarnessError('MATH_RANGE', `${operation} overflowed the range a recorded number can hold`);
+  return value;
+}
+
+/**
+ * Integer exponentiation by squaring, built only from multiplications.
+ *
+ * Math.pow is not exactly rounded, so it cannot be used. Each multiplication here is, which makes
+ * the result identical everywhere even though squaring rounds differently from a naive repeated
+ * multiply. A fractional exponent has no such construction and is refused rather than approximated.
+ */
+function mathPower(base, exponent) {
+  if (!Number.isInteger(exponent)) {
+    throw new HarnessError('MATH_UNSUPPORTED', 'Only an integer exponent is supported: a fractional power is not specified to the last bit and so would not replay identically');
+  }
+  if (Math.abs(exponent) > MATH_MAX_EXPONENT) {
+    throw new HarnessError('MATH_RANGE', `An exponent must be between -${MATH_MAX_EXPONENT} and ${MATH_MAX_EXPONENT}`, { exponent });
+  }
+  let result = 1;
+  let factor = base;
+  let remaining = Math.abs(exponent);
+  while (remaining > 0) {
+    if (remaining % 2 === 1) result = mathFinite(result * factor, 'exponentiation');
+    remaining = Math.floor(remaining / 2);
+    if (remaining > 0) factor = mathFinite(factor * factor, 'exponentiation');
+  }
+  return exponent < 0 ? mathFinite(1 / result, 'exponentiation') : result;
+}
+
+// Every one of these is exactly specified by IEEE-754 or by ECMA-262 in terms that leave no
+// implementation freedom, so each returns the same bits on every platform.
+const MATH_FUNCTIONS = {
+  sqrt: { min: 1, max: 1, apply: ([x]) => {
+    if (x < 0) throw new HarnessError('MATH_UNDEFINED', 'sqrt is undefined for a negative number', { value: x });
+    return Math.sqrt(x);
+  } },
+  abs: { min: 1, max: 1, apply: ([x]) => Math.abs(x) },
+  floor: { min: 1, max: 1, apply: ([x]) => Math.floor(x) },
+  ceil: { min: 1, max: 1, apply: ([x]) => Math.ceil(x) },
+  round: { min: 1, max: 1, apply: ([x]) => Math.round(x) },
+  trunc: { min: 1, max: 1, apply: ([x]) => Math.trunc(x) },
+  sign: { min: 1, max: 1, apply: ([x]) => Math.sign(x) },
+  min: { min: 1, max: 64, apply: (args) => Math.min(...args) },
+  max: { min: 1, max: 64, apply: (args) => Math.max(...args) },
+};
+
+function mathTokens(source) {
+  const tokens = [];
+  let at = 0;
+  while (at < source.length) {
+    const character = source[at];
+    if (character === ' ' || character === '\t' || character === '\n' || character === '\r') { at += 1; continue; }
+    if (character >= '0' && character <= '9' || character === '.') {
+      const literal = /^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/.exec(source.slice(at));
+      if (!literal) throw new HarnessError('MATH_SYNTAX', 'A number could not be read', { at });
+      const value = Number(literal[0]);
+      if (!Number.isFinite(value)) throw new HarnessError('MATH_RANGE', 'A literal is outside the range a number can hold', { literal: literal[0] });
+      tokens.push({ type: 'number', value });
+      at += literal[0].length;
+      continue;
+    }
+    if (/[a-zA-Z]/.test(character)) {
+      const name = /^[a-zA-Z][a-zA-Z0-9]*/.exec(source.slice(at))[0];
+      tokens.push({ type: 'name', value: name.toLowerCase() });
+      at += name.length;
+      continue;
+    }
+    if ('+-*/%^(),'.includes(character)) { tokens.push({ type: character }); at += 1; continue; }
+    throw new HarnessError('MATH_SYNTAX', 'Unexpected character in the expression', { character, at });
+  }
+  return tokens;
+}
+
+/**
+ * expression := term (('+' | '-') term)*
+ * term       := unary (('*' | '/' | '%') unary)*
+ * unary      := ('+' | '-') unary | power
+ * power      := primary ('^' unary)?
+ * primary    := number | constant | name '(' expression (',' expression)* ')' | '(' expression ')'
+ *
+ * `unary` sits above `power` so that -2^2 is -(2^2), the convention every calculator uses, and
+ * `power`'s right side is a unary so that 2^-1 parses and 2^3^2 associates rightwards.
+ */
+function mathParse(tokens, source) {
+  let index = 0;
+  let depth = 0;
+  const peek = () => tokens[index];
+
+  const expect = (type, message) => {
+    if (peek()?.type !== type) throw new HarnessError('MATH_SYNTAX', message, { expression: source });
+    index += 1;
+  };
+
+  function expression() {
+    depth += 1;
+    if (depth > MATH_MAX_DEPTH) throw new HarnessError('MATH_DEPTH', `An expression may nest at most ${MATH_MAX_DEPTH} deep`);
+    let value = term();
+    for (;;) {
+      const token = peek();
+      if (token?.type === '+') { index += 1; value = mathFinite(value + term(), 'addition'); continue; }
+      if (token?.type === '-') { index += 1; value = mathFinite(value - term(), 'subtraction'); continue; }
+      break;
+    }
+    depth -= 1;
+    return value;
+  }
+
+  function term() {
+    let value = unary();
+    for (;;) {
+      const token = peek();
+      if (token?.type === '*') { index += 1; value = mathFinite(value * unary(), 'multiplication'); continue; }
+      if (token?.type === '/') {
+        index += 1;
+        const divisor = unary();
+        if (divisor === 0) throw new HarnessError('MATH_UNDEFINED', 'Division by zero');
+        value = mathFinite(value / divisor, 'division');
+        continue;
+      }
+      if (token?.type === '%') {
+        index += 1;
+        const divisor = unary();
+        if (divisor === 0) throw new HarnessError('MATH_UNDEFINED', 'Remainder by zero');
+        value = mathFinite(value % divisor, 'remainder');
+        continue;
+      }
+      break;
+    }
+    return value;
+  }
+
+  function unary() {
+    const token = peek();
+    if (token?.type === '-') { index += 1; return mathFinite(-unary(), 'negation'); }
+    if (token?.type === '+') { index += 1; return unary(); }
+    return power();
+  }
+
+  function power() {
+    const base = primary();
+    if (peek()?.type === '^') { index += 1; return mathPower(base, unary()); }
+    return base;
+  }
+
+  function primary() {
+    const token = peek();
+    if (token === undefined) throw new HarnessError('MATH_SYNTAX', 'The expression ended before it was complete', { expression: source });
+    if (token.type === 'number') { index += 1; return token.value; }
+    if (token.type === '(') {
+      index += 1;
+      const value = expression();
+      expect(')', 'A parenthesis was opened and never closed');
+      return value;
+    }
+    if (token.type === 'name') {
+      index += 1;
+      const name = token.value;
+      if (peek()?.type !== '(') {
+        if (Object.hasOwn(MATH_CONSTANTS, name)) return MATH_CONSTANTS[name];
+        throw new HarnessError('MATH_UNKNOWN', 'Unknown name in the expression', { name, known: Object.keys(MATH_CONSTANTS).sort().join(',') });
+      }
+      if (MATH_EXCLUDED.has(name)) {
+        throw new HarnessError('MATH_UNSUPPORTED', `${name} is deliberately not offered: its result is not specified to the last bit, so a run recorded with it could replay differently on another machine`, { name });
+      }
+      if (!Object.hasOwn(MATH_FUNCTIONS, name)) {
+        throw new HarnessError('MATH_UNKNOWN', 'Unknown function', { name, known: Object.keys(MATH_FUNCTIONS).sort().join(',') });
+      }
+      index += 1;
+      const args = [expression()];
+      while (peek()?.type === ',') { index += 1; args.push(expression()); }
+      expect(')', `The arguments to ${name} were not closed`);
+      const definition = MATH_FUNCTIONS[name];
+      if (args.length < definition.min || args.length > definition.max) {
+        throw new HarnessError('MATH_ARITY', `${name} takes between ${definition.min} and ${definition.max} arguments`, { given: args.length });
+      }
+      return mathFinite(definition.apply(args), name);
+    }
+    throw new HarnessError('MATH_SYNTAX', 'An operator appeared where a value was expected', { expression: source });
+  }
+
+  const value = expression();
+  if (index !== tokens.length) throw new HarnessError('MATH_SYNTAX', 'The expression had trailing text that is not part of it', { expression: source });
+  return value;
+}
+
 export function makeBuiltinTools() {
   return [
     { name: 'json.value', version: '1.0.0', effect: 'pure', inputSchema: true,
@@ -101,6 +323,58 @@ export function makeBuiltinTools() {
           }
         }
         return { value: merged };
+      } },
+    // Pure, because arithmetic is a function of its input and nothing else. That is also why the
+    // grammar is restricted: see the note above mathTokens for which operations are exactly
+    // specified and which are refused for being unable to promise the same bits twice.
+    { name: 'math.evaluate', version: '1.0.0', outputKeys: ['value', 'expression', 'limitations'], effect: 'pure',
+      inputSchema: object({ expression: { type: 'string', minLength: 1, maxLength: 1024 } }, ['expression'],
+        'Evaluate an arithmetic expression exactly. Supports + - * / % and ^ with an integer exponent, parentheses, the functions sqrt abs floor ceil round trunc sign min max, and the constants pi and e. Transcendental functions are refused because their results are not bit-identical across platforms and so would not replay.'),
+      // Self-validates rather than trusting the declared schema alone, for the same reason
+      // text.concat does: a pure tool's execute() is called directly on unsanitized input elsewhere.
+      execute({ expression }) {
+        if (typeof expression !== 'string') throw new HarnessError('INPUT_INVALID', 'expression must be a string');
+        const value = mathParse(mathTokens(expression), expression);
+        return {
+          value,
+          expression,
+          limitations: [
+            'Computed in IEEE-754 double precision: about 15 significant digits, and 0.1 + 0.2 is not exactly 0.3. Do not settle money to the cent with it',
+            'sin, cos, tan, log, exp and fractional powers are refused rather than approximated, because their results are not specified to the last bit and a run recorded with one could replay differently elsewhere',
+          ],
+        };
+      } },
+    // A read effect, not a pure one, and this is the whole design of it.
+    //
+    // The kernel may not read a clock — reading one twice gives two answers, which is the exact
+    // shape of thing that breaks replay. AGENTS.md allows ambient state in only one way: through
+    // an explicit effect. A read effect is recorded when it runs and never invoked again on
+    // replay, so the recorded instant is what a replay sees. The run stays byte-identical; what
+    // changes is only that two LIVE runs of the same plan differ, which is already true of every
+    // tool that reads a file.
+    //
+    // schedule.due is left exactly as it was, still requiring `now` from its caller. It was
+    // written that way to keep itself reproducible, and it still is — the difference is that the
+    // caller now has somewhere true to get the answer instead of the model inventing a timestamp.
+    // Feed one into the other with a task reference: {"$task": "clock", "path": "/iso"}.
+    { name: 'time.now', version: '1.0.0', outputKeys: ['iso', 'epochMs', 'limitations'], effect: 'read',
+      inputSchema: { type: 'object', additionalProperties: false, properties: {},
+        description: 'Read the current time from the host clock, as a UTC ISO-8601 timestamp and epoch milliseconds. Recorded when it runs, so a replay sees the instant that was recorded rather than the time of the replay.' },
+      execute() {
+        const at = new Date();
+        const epochMs = at.getTime();
+        // Date can hold an invalid instant; a tool that returned one would emit NaN, which
+        // canonical JSON cannot carry. Checked rather than assumed.
+        if (!Number.isFinite(epochMs)) throw new HarnessError('CLOCK_UNAVAILABLE', 'The host clock did not return a usable instant');
+        return {
+          iso: at.toISOString(),
+          epochMs,
+          limitations: [
+            'UTC only, to millisecond precision. No timezone or calendar conversion is performed here',
+            'The instant is whatever the host clock said, which is not evidence that the host clock is correct',
+            'Recorded, so a replay returns the instant this run observed and not the time of the replay',
+          ],
+        };
       } },
     { name: 'skills.rank', version: '1.0.0', outputKeys: ['ranked', 'strategy'], effect: 'pure', inputSchema: object({ query: string, skills: { type: 'array', maxItems: 10000, items: object({ id: string, text: string }) }, limit: { type: 'integer', minimum: 1, maximum: 100 } }, ['query', 'skills']),
       execute({ query, skills, limit = 5 }) {

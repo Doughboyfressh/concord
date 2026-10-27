@@ -361,6 +361,9 @@ test('every declared outputKeys set is really present in that tool\'s actual res
     'memory.promote': candidate,
     'memory.recall': { query: 'lesson', limit: 3 },
     'skills.rank': { query: 'binary', skills: [{ id: 'a', text: 'binary analysis' }] },
+    'math.evaluate': { expression: '2+2' },
+    // Takes no input; listed anyway, because this sweep requires an entry per declaring tool.
+    'time.now': {},
     ...ghidraInputs,
   };
   const declared = [...tools.values()].filter(t => Array.isArray(t.outputKeys));
