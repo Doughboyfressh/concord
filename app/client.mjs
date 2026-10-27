@@ -898,6 +898,9 @@ function planActions() {
   const last = attempts[attempts.length - 1];
   return h('div', { class: 'actions' },
     h('span', { class: 'ran-badge', 'data-status': last.status, text: proposer.execution.ran ? 'already ran' : last.status }),
+    // Offered once a plan has run, which is when "what next" is the real question. It grants
+    // reasoning calls only: anything that touches the world still stops and asks.
+    h('button', { type: 'button', onClick: () => advance(4), title: 'Let Concord take up to four more steps on its own. It stops at any effect needing approval.', text: 'Continue without me' }),
     h('span', { class: 'note', text: tools.length
       ? `${plural(attempts.length, 'attempt')} · ${tools.join(', ')} · receipt on the reply above`
       : `${plural(attempts.length, 'attempt')} · receipt on the reply above` }),
@@ -1089,6 +1092,39 @@ async function approvePending() {
   try {
     const payload = await call('/api/approve', { requestHash: state.pending.requestHash });
     applyState(payload.state);
+  } catch (error) {
+    showError(error.message);
+    setActivity('Failed', 'error');
+  } finally {
+    setBusy(false);
+  }
+}
+
+/**
+ * Let the harness keep going without another message.
+ *
+ * The budget is in the button rather than in a setting, because it is the authorisation: pressing
+ * this grants that many reasoning calls and nothing else. The copy says where it will stop, since
+ * an operator handing over control should know in advance what brings it back.
+ */
+async function advance(maxSteps) {
+  if (busy) return;
+  showError(null);
+  setBusy(true, `Continuing up to ${plural(maxSteps, 'step')}`);
+  try {
+    const payload = await call('/api/advance', { maxSteps });
+    applyState(payload.state);
+    const reason = payload.state?.advanced?.reason ?? null;
+    const steps = payload.state?.advanced?.steps ?? 0;
+    showToast({
+      AWAITING_APPROVAL: 'Stopped: the next plan performs an effect and needs your approval.',
+      BUDGET_SPENT: `Ran ${plural(steps, 'step')} and stopped at the budget you set.`,
+      NOTHING_PROPOSED: `Stopped after ${plural(steps, 'step')}: Concord proposed no further plan.`,
+      PLAN_FAILED: `Stopped after ${plural(steps, 'step')}: a plan failed. The receipt says why.`,
+      REASONING_FAILED: `Stopped after ${plural(steps, 'step')}: the model call failed.`,
+      UNEXPECTED_GATE: 'Stopped: an unexpected effect asked for approval.',
+    }[reason] ?? `Stopped after ${plural(steps, 'step')}.`);
+    setActivity('Ready', 'ok');
   } catch (error) {
     showError(error.message);
     setActivity('Failed', 'error');

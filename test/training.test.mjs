@@ -734,3 +734,109 @@ test('a successful composition distils its own lesson, and infrastructure plans 
     assert.ok(!wins.some(w => (w.tools ?? []).includes('memory.recall')));
   } finally { f.close(); }
 });
+
+/**
+ * advance() carries one turn across several plans.
+ *
+ * The authorisation it rests on is weaker than everywhere else in this harness - a bounded budget
+ * of model calls rather than an exact request hash per call - because each prompt depends on
+ * results the previous step has not produced yet, so the hashes cannot exist in advance. The tests
+ * that matter are therefore the ones about what it still refuses to do.
+ */
+
+const planOf = (tasks) => ({ version: 1, tasks });
+const concat = (id, value) => ({ id, tool: 'text.concat', input: { values: [value, '!'], separator: '' } });
+
+test('advance runs several plans from one instruction, with no message between them', async () => {
+  let step = 0;
+  const f = fixture(() => {
+    step += 1;
+    return step <= 3
+      ? { reply: `step ${step}`, plan: planOf([concat('t' + step, 'step' + step)]) }
+      : { reply: 'done', plan: null };
+  });
+  try {
+    await send(f.harness, 'Start the work.');
+    const before = f.harness.snapshot().runs.length;
+
+    const state = await f.harness.advance(4);
+
+    assert.equal(state.advanced.reason, 'NOTHING_PROPOSED', 'it stopped when the model said it was done');
+    assert.ok(state.runs.length > before + 3, 'several model calls and several plans, unattended');
+    // No invented user turns: the transcript holds only what the operator actually said.
+    assert.equal(state.history.filter((m) => m.role === 'user').length, 1);
+  } finally { f.close(); }
+});
+
+test('advance stops at the first effect that touches the world, with the plan proposed', async () => {
+  // The invariant the whole design rests on: a budget of model calls is not a budget of effects.
+  const f = fixture(() => ({ reply: 'writing', plan: planOf([{ id: 'w', tool: 'files.write', input: { path: 'a.txt', content: 'A' } }]) }));
+  try {
+    await send(f.harness, 'Do the thing.');
+    const state = await f.harness.advance(8);
+
+    assert.equal(state.advanced.reason, 'AWAITING_APPROVAL');
+    assert.equal(state.advanced.gatedCount, 1);
+    assert.equal(state.advanced.steps, 0, 'it stopped on the first step rather than spending the budget');
+    assert.equal(state.proposedPlan.tasks[0].tool, 'files.write', 'and hands back a decision, not a mess');
+    assert.equal(state.plannedGrants.grants.length, 1);
+    assert.equal(state.plannedGrants.grants[0].granted, false, 'nothing about the write was authorised');
+  } finally { f.close(); }
+});
+
+test('advance spends its budget and no more', async () => {
+  let step = 0;
+  const f = fixture(() => { step += 1; return { reply: 'again', plan: planOf([concat('t' + step, 'x')]) }; });
+  try {
+    await send(f.harness, 'Loop forever if you can.');
+    const state = await f.harness.advance(2);
+    assert.equal(state.advanced.reason, 'BUDGET_SPENT');
+    assert.equal(state.advanced.steps, 2);
+    assert.equal(step, 3, 'one model call for the opening turn, then exactly two more');
+  } finally { f.close(); }
+});
+
+test('advance stops when a plan fails rather than reasoning past it', async () => {
+  // step 1 is the opening turn's own model call, which send() consumes; advance's first call is 2.
+  let step = 0;
+  const f = fixture(() => {
+    step += 1;
+    return step === 2
+      ? { reply: 'bad plan', plan: planOf([{ id: 'j', tool: 'json.assert', input: { value: 1, schema: { type: 'string' } } }]) }
+      : { reply: 'again', plan: planOf([concat('t' + step, 'x')]) };
+  });
+  try {
+    await send(f.harness, 'Start.');
+    const state = await f.harness.advance(5);
+    assert.equal(state.advanced.reason, 'PLAN_FAILED');
+    assert.equal(state.advanced.taskId, 'j');
+    assert.equal(state.advanced.steps, 0);
+  } finally { f.close(); }
+});
+
+test('advance records how far it got and why it handed back', async () => {
+  const f = fixture(() => ({ reply: 'done', plan: null }));
+  try {
+    await send(f.harness, 'Start.');
+    const state = await f.harness.advance(3);
+    const note = state.observations.records.find((r) => r.status === 'advance');
+    assert.ok(note, 'the outcome of an unattended run is evidence and is recorded');
+    assert.equal(note.reason, 'NOTHING_PROPOSED');
+    assert.equal(note.maxSteps, 3);
+    assert.equal(note.source, 'supervisor');
+  } finally { f.close(); }
+});
+
+test('advance refuses an unbounded or absent budget, and refuses to start from nothing', async () => {
+  const f = fixture(() => ({ reply: 'x', plan: null }));
+  try {
+    // The shapes the server can actually send. It passes ONE POSITIONAL FIELD from the validated
+    // body, so advance receives a bare number; an options object read that as {} and fell back to
+    // a one-step budget without failing, which is how a button asking for four recorded one.
+    for (const bad of [0, -1, 99, 1.5, 'many', undefined, { maxSteps: 4 }]) {
+      await assert.rejects(f.harness.advance(bad), (e) => e.code === 'CHAT_INPUT');
+    }
+    // Nothing has been said yet, so there is no work to continue and no objective to infer.
+    await assert.rejects(f.harness.advance(2), (e) => e.code === 'CHAT_PLAN');
+  } finally { f.close(); }
+});

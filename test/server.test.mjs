@@ -219,3 +219,44 @@ test('scripts/chat.mjs tolerates a repeated identical turn without crashing (reg
     fs.rmSync(store, { recursive: true, force: true });
   }
 });
+
+test('every API route names a method the running facade actually exposes', async () => {
+  // advance shipped with a route, a schema, a button and six passing tests, and answered 404 in
+  // the browser: src/app.mjs hands the server a facade built from an explicit method list, and
+  // the new method was not on it. Every unit test drove the harness directly and so could not see
+  // it. This holds the two halves together instead.
+  const { routes } = await import('../src/server.mjs');
+  const source = await fs.promises.readFile(new URL('../src/app.mjs', import.meta.url), 'utf8');
+
+  // The facade's own keys, plus the list it copies across from the harness.
+  const declared = new Set([...source.matchAll(/^\s{4}(\w+):/gm)].map((m) => m[1]));
+  const forwarded = source.match(/for \(const method of \[([^\]]+)\]\) wrapped\[method\]/);
+  assert.ok(forwarded, 'the forwarding list must stay findable for this check to mean anything');
+  for (const name of forwarded[1].match(/'([^']+)'/g).map((q) => q.slice(1, -1))) declared.add(name);
+
+  for (const [path, route] of routes) {
+    assert.ok(declared.has(route.method), `${path} calls ${route.method}, which the app facade does not expose`);
+  }
+});
+
+test('every route that takes one field names a field its own schema declares', async () => {
+  // The dispatch used to be a chain testing two method names and falling through to input.plan,
+  // so a route added after those two was handed the wrong field and nothing said so. /api/advance
+  // received undefined for an afternoon: first silently defaulting, then failing validation, and
+  // in both cases looking like a problem with the model rather than with the route table.
+  const { routes } = await import('../src/server.mjs');
+  for (const [path, route] of routes) {
+    if (route.whole) {
+      assert.equal(route.field, undefined, `${path} takes the whole body and must not also name a field`);
+      continue;
+    }
+    const declared = Object.keys(route.schema.properties ?? {});
+    if (declared.length === 0) {
+      assert.equal(route.field, undefined, `${path} declares no fields, so it must not name one`);
+      continue;
+    }
+    assert.ok(route.field, `${path} takes one field but does not say which`);
+    assert.ok(declared.includes(route.field),
+      `${path} names ${route.field}, which is not in its schema (${declared.join(', ')})`);
+  }
+});

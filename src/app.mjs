@@ -308,7 +308,7 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
       return harness.snapshot();
     },
   };
-  for (const method of ['send', 'approve', 'executePlan', 'replay']) wrapped[method] = async (...args) => {
+  for (const method of ['send', 'approve', 'executePlan', 'advance', 'replay']) wrapped[method] = async (...args) => {
     // A prompt typed here goes three places: Concord's own model, Concord's pipeline, and the
     // provider connected over MCP. The third is a file rather than a call because no MCP client
     // measured so far declares sampling, so the provider collects rather than being pushed to.

@@ -16,6 +16,20 @@ const MAX_CITATION_QUOTE_CHARS = 512;
 // Self-distilled lesson candidates kept from measured failures. Bounded like every other
 // context record, newest retained, because a session should not grow an unbounded teaching log.
 const MAX_LESSON_CANDIDATES = 16;
+/**
+ * How far one operator instruction may carry an unattended run. Small on purpose: the grant it
+ * authorises is a budget rather than an exact request hash, so it should run out while someone is
+ * still paying attention rather than drift on.
+ */
+const MAX_ADVANCE_STEPS = 8;
+/**
+ * What an unattended step asks. Deliberately a continuation rather than a goal: the objective is
+ * already in the conversation, and restating it here would let this string quietly become the
+ * instruction instead of the operator's own words.
+ */
+const ADVANCE_REQUEST = 'Continue the work already under way in this conversation. '
+  + 'Take the next step that the recorded receipts show is actually needed, propose a plan for it, '
+  + 'and say plainly if the work is finished or if you need a decision rather than another step.';
 
 const PRINCIPLES = {
   INVALID_REFERENCE: 'A reference must be an unquoted {"$task":...} object placed where the value belongs, with a direct declared dependsOn, and any path built only from the declared outputKeys of that tool.',
@@ -643,5 +657,89 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
     return snapshot();
   }
 
-  return { send, approve, executePlan, replay, cancel, snapshot };
+  /**
+   * Carry a turn across several plans without a human message between them.
+   *
+   * Until now one turn meant one model call meant one plan. A ninety-line module with its tests
+   * took about twenty interactions, nearly all of it turn overhead rather than thinking, because
+   * every step needed a person to type something before the harness would reason again.
+   *
+   * The thing in the way is not the plan, it is the reasoning call. `model.propose` is a network
+   * effect and gates like any other, so continuing without a person means authorising model calls
+   * that do not exist yet — and their request hashes cannot be precomputed, because each prompt
+   * depends on results the previous step has not produced. `planGrants` already names this exact
+   * case `deferred`. An exact hash per call is therefore not available here, and pretending
+   * otherwise would be the dishonest move.
+   *
+   * So the grant is coarser and is labelled as such: calling this IS the authorisation, bounded by
+   * `maxSteps`, for model calls only. That is strictly weaker than an exact request hash and an
+   * operator should read it that way. What it is not is a general loosening — every other effect
+   * still needs its own exact grant, and reaching one stops the loop and hands it back. The
+   * narrowest true statement: this lets Concord keep THINKING on its own; it never lets Concord
+   * act on the world on its own.
+   *
+   * Each step is an ordinary recorded run and replays exactly as a hand-driven one does. Nothing
+   * about the kernel changes here; this is orchestration over it.
+   */
+  // One positional field, matching send, approve, executePlan and replay. An options object read
+  // a bare number as `{}` and silently fell back to a one-step budget: the button asked for four
+  // and the journal recorded one, and nothing failed loudly enough to notice. There is no default
+  // for the same reason the route has none - the budget is the authorisation, so it is stated.
+  async function advance(maxSteps) {
+    if (!Number.isInteger(maxSteps) || maxSteps < 1 || maxSteps > MAX_ADVANCE_STEPS) {
+      throw new HarnessError('CHAT_INPUT', `maxSteps must be an integer from 1 to ${MAX_ADVANCE_STEPS}`);
+    }
+    if (!isLive()) throw new HarnessError('CHAT_NO_MODEL', 'No model adapter is registered, so no plan can be proposed');
+    if (!history.length) throw new HarnessError('CHAT_PLAN', 'There is nothing to continue; send a message first');
+
+    const stop = (reason, detail) => {
+      // Recorded rather than only returned: how far an unattended run got, and why it handed back,
+      // is evidence about the session and belongs where the rest of the evidence is.
+      observations.push({ source: 'supervisor', status: 'advance', reason, steps: taken, maxSteps, ...(detail ?? {}) });
+      return { ...snapshot(), advanced: { steps: taken, reason, ...(detail ?? {}) } };
+    };
+    let taken = 0;
+
+    for (; taken < maxSteps; taken += 1) {
+      // No fabricated user message. The continuation instruction is this turn's currentRequest,
+      // which the payload already supplies separately from the conversation; writing it into
+      // history would put words the operator never said into the transcript.
+      const context = await buildContext({ message: ADVANCE_REQUEST, history: settleHistory(clone(history)),
+        observations: clone(observations), proposedPlan: proposedPlan ? clone(proposedPlan) : null, policy: turnPolicy });
+      sourceCoverage = Array.isArray(context.sourceCoverage) ? [...context.sourceCoverage] : [];
+      selected = Array.isArray(context.selected) ? [...context.selected] : [];
+      mode = 'live';
+      adoptPlan(livePlan(ADVANCE_REQUEST, context, await fetchSkillExcerpt(), await fetchMemoryExcerpt(ADVANCE_REQUEST)));
+
+      let reasoning = await attempt(proposedPlan);
+      if (reasoning.status === 'blocked') {
+        const blocked = reasoning.result.events.find((e) => e.type === 'blocked');
+        // The one effect this budget covers, checked by tool name on the recorded event rather
+        // than inferred from the plan: anything else blocking here is a bug, not a model call.
+        if (!blocked || blocked.data.tool !== MODEL_TOOL) {
+          applyOutcome(reasoning);
+          return stop('UNEXPECTED_GATE', { tool: blocked ? blocked.data.tool : null });
+        }
+        approvals.add(blocked.data.requestHash);
+        reasoning = await attempt(proposedPlan);
+      }
+      applyOutcome(reasoning);
+      if (reasoning.status !== 'completed') return stop('REASONING_FAILED', { code: reasoning.result.outcome.code });
+      if (!proposedPlan) return stop('NOTHING_PROPOSED');
+
+      // A plan touching the world stops the loop with the plan proposed and its grants computed,
+      // so the operator returns to a decision rather than to a mess.
+      const preflight = grantsFor(proposedPlan);
+      if (preflight.gatedCount > 0) {
+        return stop('AWAITING_APPROVAL', { gatedCount: preflight.gatedCount, singlePass: preflight.singlePass });
+      }
+
+      const run = await attempt(proposedPlan);
+      applyOutcome(run);
+      if (run.status !== 'completed') return stop('PLAN_FAILED', { code: run.result.outcome.code, taskId: run.result.outcome.taskId });
+    }
+    return stop('BUDGET_SPENT');
+  }
+
+  return { send, approve, executePlan, advance, replay, cancel, snapshot };
 }

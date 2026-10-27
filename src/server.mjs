@@ -12,11 +12,17 @@ const assets = new Map([
   ['/client.mjs', { file: new URL('../app/client.mjs', import.meta.url), type: 'text/javascript; charset=utf-8' }],
 ]);
 const objectSchema = (properties, required = []) => ({ type: 'object', properties, required, additionalProperties: false });
-const routes = new Map([
-  ['/api/chat', { method: 'send', schema: objectSchema({ message: { type: 'string', minLength: 1, maxLength: 32768 } }, ['message']) }],
-  ['/api/approve', { method: 'approve', schema: objectSchema({ requestHash: { type: 'string', minLength: 64, maxLength: 64 } }, ['requestHash']) }],
-  ['/api/execute', { method: 'executePlan', schema: objectSchema({ plan: { type: 'object' } }) }],
-  ['/api/replay', { method: 'replay', schema: objectSchema({ runId: { type: 'string', minLength: 1, maxLength: 128 } }, ['runId']) }],
+// Exported so a test can hold the route table and the harness facade to each other. A route
+// naming a method the facade does not expose answers 404 at runtime and nothing earlier notices:
+// advance shipped that way, passing every unit test because they drove the harness directly.
+export const routes = new Map([
+  ['/api/chat', { method: 'send', field: 'message', schema: objectSchema({ message: { type: 'string', minLength: 1, maxLength: 32768 } }, ['message']) }],
+  ['/api/approve', { method: 'approve', field: 'requestHash', schema: objectSchema({ requestHash: { type: 'string', minLength: 64, maxLength: 64 } }, ['requestHash']) }],
+  ['/api/execute', { method: 'executePlan', field: 'plan', schema: objectSchema({ plan: { type: 'object' } }) }],
+  // The bound is required rather than defaulted: an unattended run's budget is the operator's
+  // decision, and a route that quietly picked one would be choosing on their behalf.
+  ['/api/advance', { method: 'advance', field: 'maxSteps', schema: objectSchema({ maxSteps: { type: 'integer', minimum: 1, maximum: 8 } }, ['maxSteps']) }],
+  ['/api/replay', { method: 'replay', field: 'runId', schema: objectSchema({ runId: { type: 'string', minLength: 1, maxLength: 128 } }, ['runId']) }],
   // Stops whatever is executing. Takes no fields: there is only ever one turn in flight, and
   // naming it would invite cancelling something that had already finished.
   ['/api/cancel', { method: 'cancel', schema: objectSchema({}) }],
@@ -61,7 +67,7 @@ function publicState(snapshot) {
   // The chat harness owns message/context sanitation. Do not expose its private
   // properties, provider configuration, credentials, or complete run journals.
   const result = {};
-  for (const key of ['mode', 'history', 'selected', 'sourceCoverage', 'pending', 'proposedPlan', 'plannedGrants', 'runs', 'lastError', 'observations', 'lessonCandidates', 'authority']) {
+  for (const key of ['mode', 'history', 'selected', 'sourceCoverage', 'pending', 'proposedPlan', 'plannedGrants', 'advanced', 'runs', 'lastError', 'observations', 'lessonCandidates', 'authority']) {
     if (snapshot && Object.hasOwn(snapshot, key)) result[key] = snapshot[key];
   }
   return parseJson(canonical(result));
@@ -190,11 +196,15 @@ export function createServer({ harness, status = {}, host = '127.0.0.1', port = 
       if (route.method === 'openSession') {
         return json(response, 200, { session: await harness.openSession(input), token });
       }
-      // `whole: true` routes take the validated body; the rest take one positional field, which
-      // is how every route before them was written.
-      const argument = route.whole ? input
-        : route.method === 'send' ? input.message
-          : route.method === 'approve' ? input.requestHash : input.plan;
+      // `whole: true` routes take the validated body; the rest take the one field they name.
+      //
+      // This was a chain testing two method names and falling through to `input.plan`, so every
+      // route added after those two silently received the wrong field. /api/advance was handed
+      // undefined and spent an afternoon looking like a model problem: with an options-object
+      // signature it read as {} and quietly defaulted to a one-step budget, and with a positional
+      // one it failed validation. Naming the field on the route makes a new route say what it
+      // takes instead of inheriting whatever the last branch happened to be.
+      const argument = route.whole ? input : input[route.field];
       return json(response, 200, { state: publicState(await harness[route.method](argument)) });
     } catch (error) {
       if (response.headersSent || response.destroyed) { response.destroy(); return; }
