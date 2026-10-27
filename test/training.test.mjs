@@ -23,7 +23,7 @@ function fixture(execute, additional = []) {
   const model = { name: 'model.propose', version: 'fixture-1', effect: 'network', inputSchema: { type: 'object' },
     execute(input) { inputs.push(input); return { model: 'fixture-1', proposal: execute(input) }; } };
   const registry = new Map([...makeBuiltinTools(), model, ...additional].map(t => [t.name, t]));
-  const policy = { version: 1, allowedTools: [...registry.keys()], allowedEffects: ['pure', 'read', 'write', 'network'], maxTasks: 32 };
+  const policy = { version: 1, allowedTools: [...registry.keys()], allowedEffects: ['pure', 'read', 'write', 'network', 'process'], maxTasks: 32 };
   const workspaceRoot = realTempDir('concord-training-');
   const harness = createChatHarness({ registry, policy, sourceLock, workspaceRoot,
     buildContext: args => context(registry, args) });
@@ -838,5 +838,78 @@ test('advance refuses an unbounded or absent budget, and refuses to start from n
     }
     // Nothing has been said yet, so there is no work to continue and no objective to infer.
     await assert.rejects(f.harness.advance(2), (e) => e.code === 'CHAT_PLAN');
+  } finally { f.close(); }
+});
+
+/**
+ * Declaring what has not been checked.
+ *
+ * Given four unattended steps to survey a module, Concord read the files, reasoned, and asserted
+ * a specific defect with a worked example. The defect was not real, and one run of the registered
+ * test target would have refuted it against six existing cases. The target was there the whole
+ * time; nothing told it so and nothing noticed it had not looked.
+ */
+const runner = (targets) => ({
+  name: 'build.run', version: '1', effect: 'process',
+  inputSchema: { type: 'object', additionalProperties: true },
+  config: { targets: targets.map((name) => ({ name })) },
+  execute: (input) => ({ target: input.target, exitCode: 0, ok: true, stdoutTail: 'pass 6' }),
+});
+
+test('a check that exists and has not been run is reported as such', async () => {
+  const f = fixture(() => ({ reply: 'thinking', plan: null }), [runner(['tests'])]);
+  try {
+    const state = await send(f.harness, 'Survey the module.');
+    assert.equal(state.lastError, null);
+    const payload = JSON.parse(f.inputs.at(-1).prompt);
+    assert.deepEqual(payload.verification.targets, ['tests']);
+    assert.equal(payload.verification.neverRun, true, 'it has not been run, and the model is told so');
+    assert.equal(payload.verification.lastRun, null);
+    assert.equal(payload.verification.tool, 'build.run');
+  } finally { f.close(); }
+});
+
+test('once a check has run, how stale it is travels with it', async () => {
+  let turn = 0;
+  const f = fixture(() => {
+    turn += 1;
+    if (turn === 1) return { reply: 'checking', plan: { version: 1, tasks: [{ id: 'v', tool: 'build.run', input: { target: 'tests' } }] } };
+    return { reply: 'now working', plan: { version: 1, tasks: [{ id: 'j', tool: 'json.value', input: { x: turn } }] } };
+  }, [runner(['tests'])]);
+  try {
+    await send(f.harness, 'Check it.');
+    // send() clears the model gate; the build.run gate only appears once the plan is attempted.
+    const blocked = await f.harness.executePlan();
+    assert.equal(blocked.pending.tool, 'build.run');
+    await f.harness.approve(blocked.pending.requestHash);
+
+    let payload = JSON.parse(f.inputs.at(-1).prompt);
+    // Not yet: this turn's context was built before the check ran.
+    assert.equal(payload.verification.neverRun, true);
+
+    await send(f.harness, 'Carry on.');
+    payload = JSON.parse(f.inputs.at(-1).prompt);
+    assert.equal(payload.verification.neverRun, false);
+    assert.equal(payload.verification.lastRun.target, 'tests');
+    assert.equal(payload.verification.lastRun.exitCode, 0);
+    assert.equal(payload.verification.lastRun.ok, true);
+    assert.equal(typeof payload.verification.lastRun.runsAgo, 'number');
+
+    // Work happens, and the distance from the evidence grows. A pass recorded before the files
+    // changed is evidence about code that may no longer exist, which is the misleading case.
+    const before = JSON.parse(f.inputs.at(-1).prompt).verification.lastRun.runsAgo;
+    await f.harness.executePlan();
+    await send(f.harness, 'And again.');
+    const after = JSON.parse(f.inputs.at(-1).prompt).verification.lastRun.runsAgo;
+    assert.ok(after > before, `runsAgo must grow as plans run (${before} -> ${after})`);
+  } finally { f.close(); }
+});
+
+test('a session with nothing to run says so rather than inventing a check', async () => {
+  const f = fixture(() => ({ reply: 'no checks here', plan: null }));
+  try {
+    const state = await send(f.harness, 'Survey it.');
+    assert.equal(state.lastError, null);
+    assert.equal(JSON.parse(f.inputs.at(-1).prompt).verification, null);
   } finally { f.close(); }
 });

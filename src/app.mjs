@@ -219,12 +219,12 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
         try { listener(update); } catch { progressListeners.delete(listener); }
       }
     },
-    buildContext: ({ message, history, observations, proposedPlan }) => {
+    buildContext: ({ message, history, observations, proposedPlan, verification }) => {
       // The one point each turn where the full history is in hand. conversation.turn resolves
       // turn-N against exactly this array, which is the same array the context then compacts, so
       // an id the model is given and the turn it fetches back cannot disagree about what N means.
       transcript = Array.isArray(history) ? history : [];
-      return buildChatContext({ message, history, observations, proposedPlan, sourceLock: catalog, inventory, registry: visibleRegistry, policy, instructionRoot: path.join(root, 'instructions') });
+      return buildChatContext({ message, history, observations, proposedPlan, verification, sourceLock: catalog, inventory, registry: visibleRegistry, policy, instructionRoot: path.join(root, 'instructions') });
     },
     persistRun: async record => {
       const id = record.id ?? digest(record).slice(0, 24);

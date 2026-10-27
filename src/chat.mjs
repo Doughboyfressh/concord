@@ -4,6 +4,9 @@ import { planGrants, assertSinglePass } from './preflight.mjs';
 import { boundedRecords, boundedValue } from './chat-data.mjs';
 
 const MODEL_TOOL = 'model.propose';
+// The tool that can falsify a claim about code by running it. Named here rather than discovered,
+// because a check this harness cannot identify is one it cannot report as unrun.
+const VERIFY_TOOL = 'build.run';
 const MAX_SKILL_EXCERPT_CHARS = 1500;
 const MAX_SETTLED_ATTEMPTS = 8;
 // How much learned knowledge one turn may carry. Bounded by bytes rather than by count so the
@@ -80,6 +83,9 @@ function livePlan(message, context, skillExcerpt, memoryExcerpt) {
     conversation: context.conversation ?? boundedRecords([]),
     observations: context.observations ?? boundedRecords([]),
     proposal: context.proposal ?? null,
+    // Supervisor-computed, like observations and unlike references: what checks this session has
+    // and whether they have been run is a fact about the record, not untrusted material.
+    verification: context.verification ?? null,
     references: { trust: 'untrusted-data', capabilities: context.selected ?? [], skill: skillExcerpt, memory: memoryExcerpt },
   }) };
   const system = context.systemPrompt ?? '';
@@ -293,6 +299,40 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
    */
   function assertExecutable(plan) {
     assertSinglePass(grantsFor(plan), plan);
+  }
+
+  /**
+   * What this session can check, and whether it has.
+   *
+   * Given four unattended steps to survey a module, Concord read the files, reasoned, and asserted
+   * a specific defect with a worked example. The defect was not real — its example described a
+   * patch whose header disagreed with its own body, which a well-formed diff cannot do — and one
+   * run of the reviewed test target would have refuted it against six existing cases. The target
+   * was registered the whole time. Nothing told it so, and nothing noticed it had not looked.
+   *
+   * Declaring it is the intervention, which is the move this harness keeps reaching for: an
+   * omitted turn is named so it can be fetched, an omitted lesson likewise, an oversized output
+   * likewise. A check that exists and has not been run is the same kind of absence, and saying so
+   * is both mechanical and true. It is not an enforcement — a model may still conclude without
+   * checking — but it removes the excuse that it did not know.
+   *
+   * `runsAgo` matters as much as whether it ran at all: a pass recorded before the files changed
+   * is evidence about code that no longer exists, which is the staler and more misleading case.
+   */
+  function verificationState() {
+    const tool = registry.get(VERIFY_TOOL);
+    if (!tool) return null;
+    const targets = Array.isArray(tool.config?.targets) ? tool.config.targets.map((t) => t.name).filter(Boolean) : [];
+    let last = null;
+    runs.forEach((record, index) => {
+      if (record.status !== 'completed') return;
+      const task = (record.plan.tasks ?? []).find((t) => t.tool === VERIFY_TOOL);
+      if (!task) return;
+      const output = record.result.results[task.id];
+      last = { target: task.input?.target ?? null, exitCode: output?.exitCode ?? null,
+        ok: output?.ok === true, runsAgo: runs.length - 1 - index };
+    });
+    return { tool: VERIFY_TOOL, targets, lastRun: last, neverRun: last === null };
   }
 
   // The authority in force for the turn being processed. It equals `policy` unless the caller
@@ -549,7 +589,7 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
     // first so the context the model receives describes the authority it will actually get.
     turnPolicy = options && options.attenuate ? attenuatePolicy(policy, options.attenuate) : policy;
     history.push({ role: 'user', content: message });
-    const context = await buildContext({ message, history: settleHistory(clone(history)), observations: clone(observations),
+    const context = await buildContext({ message, verification: verificationState(), history: settleHistory(clone(history)), observations: clone(observations),
       proposedPlan: proposedPlan ? clone(proposedPlan) : null, policy: turnPolicy });
     sourceCoverage = Array.isArray(context.sourceCoverage) ? [...context.sourceCoverage] : [];
     selected = Array.isArray(context.selected) ? [...context.selected] : [];
@@ -704,7 +744,7 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
       // No fabricated user message. The continuation instruction is this turn's currentRequest,
       // which the payload already supplies separately from the conversation; writing it into
       // history would put words the operator never said into the transcript.
-      const context = await buildContext({ message: ADVANCE_REQUEST, history: settleHistory(clone(history)),
+      const context = await buildContext({ message: ADVANCE_REQUEST, verification: verificationState(), history: settleHistory(clone(history)),
         observations: clone(observations), proposedPlan: proposedPlan ? clone(proposedPlan) : null, policy: turnPolicy });
       sourceCoverage = Array.isArray(context.sourceCoverage) ? [...context.sourceCoverage] : [];
       selected = Array.isArray(context.selected) ? [...context.selected] : [];
