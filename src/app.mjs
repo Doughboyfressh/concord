@@ -168,8 +168,13 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
   // already keeps every run untruncated, and a summary is a few hundred bytes against a journal's
   // budget of megabytes. It is appended in persistRun below, which the harness calls once per
   // recorded attempt, so what a contrast can compare is exactly what actually executed.
+  // The plan store is separate from the summary ledger because they are read for different
+  // reasons and bound differently: a summary is compared and digested, a plan is fetched whole so
+  // a variant can be built from it. Holding the recorded plan by reference rather than by copy
+  // costs a map entry, since the chat harness already retains it for the session's run ledger.
   const runLedger = [];
-  for (const tool of makeVariantTools({ readRuns: () => runLedger })) registry.set(tool.name, tool);
+  const runPlans = new Map();
+  for (const tool of makeVariantTools({ readRuns: () => runLedger, readPlan: (id) => runPlans.get(id) ?? null })) registry.set(tool.name, tool);
 
   const policy = flags.policy ? readJson(flags.policy) : {
     version: 1, allowedTools: [...registry.keys()].sort(), allowedEffects: ['pure', 'read', 'write', 'network', 'process'],
@@ -210,6 +215,7 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
       // a contrast that silently omitted a run because its file could not be created would be
       // comparing a subset of what executed. A summary cannot fail on content the journal holds.
       runLedger.push(runSummary(record));
+      if (record.plan) runPlans.set(id, record.plan);
       const file = path.join(store, id + '.json');
       const content = canonical(record) + '\n';
       try { fs.writeFileSync(file, content, { flag: 'wx' }); }

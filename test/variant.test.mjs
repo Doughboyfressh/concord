@@ -407,6 +407,71 @@ test('a contrast too large for the observation window fails closed rather than t
     (error) => error.code === 'CONTRAST_TOO_LARGE');
 });
 
+test('a recorded plan comes back verbatim, which is what makes a variant a variant of it', async () => {
+  // The propose half. chat.mjs overwrites `proposedPlan` every turn and nulls it on a rejected
+  // proposal, so the plan a model is asked to vary is NOT reliably in its context; addressed by
+  // run id it is the thing that actually ran rather than whatever survived compaction as prose.
+  const reference = plan('reference', [okTask('a', 1), { ...okTask('b', 2), dependsOn: ['a'] }]);
+  const summary = await record(reference);
+  const [, , fetch] = makeVariantTools({ readRuns: () => [summary], readPlan: (id) => (id === summary.runId ? reference : null) });
+
+  const result = fetch.execute({ runId: summary.runId }, context);
+  assert.equal(result.found, true);
+  assert.deepEqual(result.plan, reference, 'verbatim: a variant of a paraphrase is a variant of nothing');
+  assert.equal(result.oversized, false);
+  assert.deepEqual(result.shape, [
+    { id: 'a', tool: 't.ok', dependsOn: [] },
+    { id: 'b', tool: 't.ok', dependsOn: ['a'] },
+  ]);
+  // The summary travels with it, so one call answers both what the run did and how it went.
+  assert.equal(result.summary.status, 'completed');
+  assert.equal(result.summary.trajectory.toolCalls, 2);
+  for (const key of fetch.outputKeys) assert.ok(key in result, `missing declared key ${key}`);
+});
+
+test('an oversized plan is withheld entire, and its shape still names every task', async () => {
+  const big = plan('big', [okTask('a', 'x'.repeat(4000)), { ...okTask('b', 2), dependsOn: ['a'] }]);
+  const summary = await record(big);
+  const [, , fetch] = makeVariantTools({ readRuns: () => [summary], readPlan: () => big, maxBytes: 2048 });
+
+  const result = fetch.execute({ runId: summary.runId }, context);
+  assert.equal(result.found, true);
+  assert.equal(result.oversized, true);
+  assert.equal(result.plan, null, 'withheld whole: half a plan would be varied as if it were all of it');
+  assert.deepEqual(result.shape.map((t) => t.id), ['a', 'b'], 'the topology is what a variant varies, and it still fits');
+  assert.ok(Buffer.byteLength(JSON.stringify(result)) <= 4096);
+});
+
+test('a plan this session never recorded is reported, not invented', async () => {
+  const summary = await record(plan('reference', [okTask('a', 1)]));
+  const [, , fetch] = makeVariantTools({ readRuns: () => [summary], readPlan: () => null });
+  const result = fetch.execute({ runId: 'deadbeefdeadbeefdeadbeef' }, context);
+  assert.equal(result.found, false);
+  assert.equal(result.plan, null);
+  assert.deepEqual(result.shape, []);
+  assert.equal(result.summary, null);
+  assert.ok(result.limitations.some((l) => /earlier session/.test(l)));
+});
+
+test('the plan tool is registered only where a plan store exists', () => {
+  assert.equal(makeVariantTools({ readRuns: () => [] }).length, 2);
+  const withStore = makeVariantTools({ readRuns: () => [], readPlan: () => null });
+  assert.equal(withStore.length, 3);
+  // Order is load-bearing: callers destructure [contrast, select] and must keep binding those two.
+  assert.deepEqual(withStore.map((t) => t.name), ['variant.contrast', 'variant.select', 'variant.plan']);
+  assert.throws(() => makeVariantTools({ readRuns: () => [], readPlan: 'not a function' }), /VARIANT_CONFIG|readPlan/);
+});
+
+test('the plan store does not move the registry digest either', async () => {
+  let plans = new Map();
+  const [, , fetch] = makeVariantTools({ readRuns: () => [], readPlan: (id) => plans.get(id) ?? null });
+  const manifest = () => digest(registryManifest(new Map([[fetch.name, fetch]])));
+  const before = manifest();
+  plans.set('abc', plan('late', [okTask('a', 1)]));
+  assert.equal(before, manifest());
+  assert.equal(fetch.execute({ runId: 'abc' }, context).found, true);
+});
+
 test('the store refuses a configuration it cannot read a ledger from', () => {
   assert.throws(() => makeVariantTools({}), /VARIANT_CONFIG|readRuns/);
   assert.throws(() => makeVariantTools({ readRuns: () => [], maxBytes: 16 }), /VARIANT_CONFIG|maxBytes/);

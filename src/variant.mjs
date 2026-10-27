@@ -93,6 +93,12 @@ const fieldAt = (path) => {
  */
 const IDENTITY_KEYS = ['policyHash', 'registryHash', 'sourceHash', 'workspaceRoot'];
 
+const PLAN_LIMITATIONS = [
+  'This is the plan as recorded, returned verbatim; it is what ran, not a description of what ran',
+  'A plan is a proposal the kernel accepted, not a correct one: this run may have failed, and the summary beside it says which',
+  'Varying this plan proposes nothing by itself. A variant becomes evidence only once it has run and been contrasted',
+];
+
 const LIMITATIONS = [
   'Adopting a plan says it did better on the declared criteria in the recorded runs; it does not say the plan is correct, and no ground truth was consulted',
   'keep is a real outcome, not a failure to decide: it means nothing beat the reference by more than the declared tolerance',
@@ -393,9 +399,12 @@ const select = Object.freeze({
   },
 });
 
-export function makeVariantTools({ readRuns, maxBytes = DEFAULT_MAX_BYTES } = {}) {
+export function makeVariantTools({ readRuns, readPlan, maxBytes = DEFAULT_MAX_BYTES } = {}) {
   if (typeof readRuns !== 'function') {
     throw new HarnessError('VARIANT_CONFIG', 'The variant store needs a readRuns function');
+  }
+  if (readPlan !== undefined && typeof readPlan !== 'function') {
+    throw new HarnessError('VARIANT_CONFIG', 'readPlan must be a function when supplied');
   }
   if (!Number.isInteger(maxBytes) || maxBytes < 1024) {
     throw new HarnessError('VARIANT_CONFIG', 'maxBytes must be an integer of at least 1024');
@@ -541,5 +550,59 @@ export function makeVariantTools({ readRuns, maxBytes = DEFAULT_MAX_BYTES } = {}
     },
   });
 
-  return [contrast, select];
+  // The propose half, and the reason it has to be a tool rather than something already in context.
+  //
+  // A turn's user payload does carry `proposal`, but chat.mjs overwrites it on every turn and
+  // nulls it when a proposal is rejected, so by the time a model is asked to vary the plan it
+  // just ran, that plan has already been replaced by whatever the current turn proposed. Asking
+  // the model to vary "the plan from earlier" therefore asks it to work from whatever survived
+  // compaction as prose — which is how a harness ends up proposing a variant of a plan that never
+  // existed. Addressed by run id against the recorded ledger, it is varying the thing that ran.
+  //
+  // Registered only when a plan store is supplied, the way an adapter is registered only when its
+  // configuration exists. A deployment that keeps summaries but not plans simply does not offer it.
+  const plan = Object.freeze({
+    name: 'variant.plan', version: '1.0.0', effect: 'read',
+    outputKeys: ['runId', 'found', 'plan', 'shape', 'oversized', 'summary', 'limitations'],
+    inputSchema: object({ runId: runIdSchema }),
+    config: { source: 'session-plan-store-v1', maxBytes },
+    execute(input) {
+      if (!RUN_ID_PATTERN.test(input.runId)) throw new HarnessError('INPUT_INVALID', 'A run id must be a bare identifier');
+      const ledger = readRuns();
+      if (!Array.isArray(ledger)) throw new HarnessError('VARIANT_LEDGER', 'The run ledger is unavailable');
+      const recorded = readPlan(input.runId) ?? null;
+      const entry = ledger.find((run) => run && run.runId === input.runId) ?? null;
+      const summary = entry
+        ? { status: entry.status, trajectory: entry.trajectory, deliverable: entry.deliverable, failure: entry.failure }
+        : null;
+
+      const base = {
+        runId: input.runId,
+        found: recorded !== null,
+        // Always present when the plan is known, because the topology is what a variant varies and
+        // it stays small even when the inputs do not. Not a shortened plan: a different, declared
+        // projection of one, which is why it has its own name.
+        shape: recorded && Array.isArray(recorded.tasks)
+          ? recorded.tasks.map((task) => ({ id: task.id, tool: task.tool, dependsOn: task.dependsOn ?? [] }))
+          : [],
+        summary,
+      };
+      if (!recorded) {
+        return { ...base, plan: null, oversized: false, limitations: [...PLAN_LIMITATIONS, 'This run id is not in the plan store; it may belong to an earlier session'] };
+      }
+      // Withheld whole rather than cut, the way conversation.turn defers an oversized turn. Half a
+      // plan is not a plan, and a model handed one would vary tasks it could not see.
+      const oversized = Buffer.byteLength(canonical({ ...base, plan: recorded, limitations: PLAN_LIMITATIONS })) > maxBytes;
+      return {
+        ...base,
+        plan: oversized ? null : recorded,
+        oversized,
+        limitations: oversized
+          ? [...PLAN_LIMITATIONS, 'This plan exceeds the byte bound, so its task inputs were withheld entire rather than shortened; shape still names every task, its tool and its dependencies']
+          : PLAN_LIMITATIONS,
+      };
+    },
+  });
+
+  return readPlan ? [contrast, select, plan] : [contrast, select];
 }

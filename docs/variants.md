@@ -81,6 +81,31 @@ Warnings follow `experiment.compare`'s posture: per condition, never an aggregat
 `missing` rather than failing the call, the way `conversation.turn` handles one. A contrast that would
 exceed its byte bound fails closed with `CONTRAST_TOO_LARGE` rather than returning half a comparison.
 
+## `variant.plan` — the propose half
+
+Input is `{runId}`; output is that run's plan **verbatim**, plus `shape` (every task's id, tool and
+dependencies), plus the run's summary so one call answers both what the plan was and how it went.
+A plan too large for the byte bound is withheld entire with `oversized: true` — `shape` still names
+every task, because the topology is what a variant varies and it stays small when the inputs do not.
+A run id the store does not know comes back `found: false` rather than throwing.
+
+It has to be a tool, and the reason is specific. A turn's user payload does carry `proposal`, but
+`src/chat.mjs` overwrites it on every turn and nulls it when a proposal is rejected. So by the time
+a model is asked to vary the plan it just ran, that plan has already been replaced by whatever the
+current turn proposed. Asking it to vary "the plan from earlier" therefore asks it to work from
+whatever survived compaction as prose — which is how a harness proposes a variant of a plan that
+never existed. Addressed by run id against the recorded ledger, it is varying the thing that ran.
+
+The plan store is separate from the summary ledger because the two are read for different reasons
+and bounded differently: a summary is compared and digested, a plan is fetched whole. The tool is
+registered only where a plan store is supplied, the way an adapter is registered only when its
+configuration exists.
+
+What this does *not* do is generate the variant. The model does that, exactly as Harness²'s editor
+model writes its candidates — the kernel supplies the evidence, the model supplies the idea, and the
+supervisor validates the result before it can become a proposal. A full cycle is therefore four
+turns: run the reference, fetch its plan, propose and run the variant, contrast and select.
+
 ## `variant.select`
 
 Input is a contrast, an ordered `prefer` list over `completed`, `fewerToolCalls`, `fewerTasks`, and an
