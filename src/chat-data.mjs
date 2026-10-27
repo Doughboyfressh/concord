@@ -70,8 +70,18 @@ export function boundedByRelevance(items, { query = '', maxBytes = 16384, maxIte
   };
 }
 
-/** A complete-record suffix: never cut JSON, invent a summary, or skip a large newest record. */
-export function boundedRecords(records, { maxItems = 24, maxBytes = 16384 } = {}) {
+/**
+ * A complete-record suffix: never cut JSON, invent a summary, or skip a large newest record.
+ *
+ * `idOf` is what turns the dropped prefix into something addressable. The relevance-ranked path
+ * above has always declared the ids it left out, because an omitted lesson can be fetched back by
+ * id; a conversation could not, so omission there was a count and a digest and nothing a turn
+ * could act on. Naming the dropped records is the half that makes retrieval possible at all.
+ *
+ * The ids come out in the records' own order rather than sorted, unlike boundedByRelevance, whose
+ * set has no inherent order. A transcript read out of order is a different transcript.
+ */
+export function boundedRecords(records, { maxItems = 24, maxBytes = 16384, idOf = null } = {}) {
   const copy = clone(records);
   let bytes = 2;
   let start = copy.length;
@@ -81,5 +91,10 @@ export function boundedRecords(records, { maxItems = 24, maxBytes = 16384 } = {}
     bytes += size;
     start--;
   }
-  return { records: copy.slice(start), omittedCount: start, totalCount: copy.length, fullDigest: digest(copy) };
+  const bounded = { records: copy.slice(start), omittedCount: start, totalCount: copy.length, fullDigest: digest(copy) };
+  // Added only when the caller can say what an id means. Without idOf the envelope keeps its exact
+  // previous shape, so every existing reader is untouched and nothing is handed an id it cannot
+  // resolve. The index is absolute because the omitted records are always the leading prefix.
+  if (idOf) bounded.omittedIds = copy.slice(0, start).map((record, index) => idOf(record, index));
+  return bounded;
 }

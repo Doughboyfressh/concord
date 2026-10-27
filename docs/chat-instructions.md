@@ -78,6 +78,23 @@ cut or summarized: if the newest record exceeds its window, no older records are
 does not give the model access to omitted content. The current validated proposal is supplied separately
 for follow-up edits, with a 16 KiB bound and explicit omission metadata.
 
+`conversation` additionally reports `omittedIds`: the dropped turns named `turn-N`, in transcript order,
+where N indexes the full history. A count says that something is missing; an id is the way back to it.
+`conversation.turn` takes up to 32 of those ids and returns the turns verbatim — a `read` effect, so it
+needs no grant, and nothing is reachable through it that the turn was not already entitled to be told,
+since these are turns of the same conversation. It bounds its own result at 6 KiB, below the 8 KiB an
+observation keeps, so a result it accepts is a result the model actually sees; a turn that does not fit
+is listed in `deferredIds` and can be asked for next, withheld whole rather than cut. Ids that name
+nothing come back in `missing` instead of failing the call. This is the same pair `references.trained`
+and `instructions.lesson` already form for the lesson corpus: compaction names what it dropped, and a
+separate read fetches it back, so the context stays bounded without the history becoming unreachable.
+
+The transcript reaches that tool through a closure rather than its `config`, which is not a style
+choice. `registryManifest` hashes every descriptor's config into the registry digest that binds each
+approval hash and each replay check, so a config carrying the history would change on every turn —
+invalidating the previous turn's grants and making recorded runs unreplayable. The config declares only
+what is stable, and `test/conversation.test.mjs` asserts the digest holds still while the transcript moves.
+
 Receipts identify run, journal root, task, tool, status and output hash, with actual non-model outputs or
 failure codes. Individual outputs have an 8 KiB and 32-level nesting budget to leave room for surrounding
 JSON. Larger/deeper values retain their hash and explicit omission reason; full evidence remains in the

@@ -22,6 +22,7 @@ import { modelCredentialPlan } from './desktop.mjs';
 import { makeInstructionTools } from './instructions.mjs';
 import { makeGovernanceTools } from './governance.mjs';
 import { buildChatContext } from './chat-context.mjs';
+import { makeConversationTools } from './conversation.mjs';
 import { createChatHarness } from './chat.mjs';
 import { createServer, listenServer } from './server.mjs';
 
@@ -149,6 +150,16 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
   // registered once the registry and source lock exist and before allowedTools is derived from
   // them — a tool added after that derivation would be filtered straight back out.
   for (const tool of makeGovernanceTools({ registry, sourceLock })) registry.set(tool.name, tool);
+  // The retrieval half of conversation compaction, registered here for the same reason governance
+  // is: after the registry exists, before allowedTools is derived from it.
+  //
+  // It reads the transcript through this reference rather than through its own config, because a
+  // descriptor's config is hashed into the registry digest that binds every approval and every
+  // replay. History in config would change the digest on every turn, invalidating the previous
+  // turn's grants and making recorded runs unreplayable. The reference is assigned in
+  // buildContext below, which the harness calls with the full history at the start of each turn.
+  let transcript = [];
+  for (const tool of makeConversationTools({ readTranscript: () => transcript })) registry.set(tool.name, tool);
 
   const policy = flags.policy ? readJson(flags.policy) : {
     version: 1, allowedTools: [...registry.keys()].sort(), allowedEffects: ['pure', 'read', 'write', 'network', 'process'],
@@ -175,7 +186,13 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
         try { listener(update); } catch { progressListeners.delete(listener); }
       }
     },
-    buildContext: ({ message, history, observations, proposedPlan }) => buildChatContext({ message, history, observations, proposedPlan, sourceLock: catalog, inventory, registry: visibleRegistry, policy, instructionRoot: path.join(root, 'instructions') }),
+    buildContext: ({ message, history, observations, proposedPlan }) => {
+      // The one point each turn where the full history is in hand. conversation.turn resolves
+      // turn-N against exactly this array, which is the same array the context then compacts, so
+      // an id the model is given and the turn it fetches back cannot disagree about what N means.
+      transcript = Array.isArray(history) ? history : [];
+      return buildChatContext({ message, history, observations, proposedPlan, sourceLock: catalog, inventory, registry: visibleRegistry, policy, instructionRoot: path.join(root, 'instructions') });
+    },
     persistRun: async record => {
       const id = record.id ?? digest(record).slice(0, 24);
       if (!/^[A-Za-z0-9._-]{1,128}$/.test(id)) throw new HarnessError('CHAT_STORE', 'Invalid run ID');
