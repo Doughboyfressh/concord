@@ -99,6 +99,8 @@ The local UI shows selected references, available tools, proposed plans, exact b
 
 Chat records persist locally. Successful receipts can be replayed without tool execution; the current process keeps the original replay context. Restart reconstruction and uncertain-effect recovery remain explicit future modules rather than silently retrying actions.
 
+Recorded runs are also comparable to each other. `variant.contrast` and `variant.select` run the task-level propose/probe/compose cycle over *plans* rather than over harness configuration, because policy, registry and source digests are what every approval hash and replay check binds — a harness that edited itself mid-run would invalidate its own grant. The same header digests that make that edit impossible are what let a contrast prove only the plan differed, and a selection may cite no field the contrast did not observe. See [variants](variants.md).
+
 ## Remaining modules
 
 Preserving sources does not complete a port of every upstream feature. Next dedicated adapters: REA MCP handshake/evidence export; ego task-space lifecycle; Orca task/dispatch receipts; Hermes daemon-aware ACP; 21st asset/license acquisition. Further modules include worker isolation, queue/schedule persistence, review UI, provider adapters, persistent memory stores, eval suites, remote channels and reviewed skill updates. Each must preserve the kernel contract and pass native runtime tests before being called operational.

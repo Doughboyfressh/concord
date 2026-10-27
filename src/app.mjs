@@ -23,6 +23,7 @@ import { makeInstructionTools } from './instructions.mjs';
 import { makeGovernanceTools } from './governance.mjs';
 import { buildChatContext } from './chat-context.mjs';
 import { makeConversationTools } from './conversation.mjs';
+import { makeVariantTools, runSummary } from './variant.mjs';
 import { createChatHarness } from './chat.mjs';
 import { createServer, listenServer } from './server.mjs';
 
@@ -160,6 +161,15 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
   // buildContext below, which the harness calls with the full history at the start of each turn.
   let transcript = [];
   for (const tool of makeConversationTools({ readTranscript: () => transcript })) registry.set(tool.name, tool);
+  // Task-level recursion over plans, registered here for the same two reasons, and reading the
+  // run ledger through the same kind of reference rather than through its own config.
+  //
+  // The ledger holds bounded SUMMARIES, not second copies of the journals: the chat harness
+  // already keeps every run untruncated, and a summary is a few hundred bytes against a journal's
+  // budget of megabytes. It is appended in persistRun below, which the harness calls once per
+  // recorded attempt, so what a contrast can compare is exactly what actually executed.
+  const runLedger = [];
+  for (const tool of makeVariantTools({ readRuns: () => runLedger })) registry.set(tool.name, tool);
 
   const policy = flags.policy ? readJson(flags.policy) : {
     version: 1, allowedTools: [...registry.keys()].sort(), allowedEffects: ['pure', 'read', 'write', 'network', 'process'],
@@ -196,6 +206,10 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
     persistRun: async record => {
       const id = record.id ?? digest(record).slice(0, 24);
       if (!/^[A-Za-z0-9._-]{1,128}$/.test(id)) throw new HarnessError('CHAT_STORE', 'Invalid run ID');
+      // Before the write, not after: the run happened whether or not persisting it succeeds, and
+      // a contrast that silently omitted a run because its file could not be created would be
+      // comparing a subset of what executed. A summary cannot fail on content the journal holds.
+      runLedger.push(runSummary(record));
       const file = path.join(store, id + '.json');
       const content = canonical(record) + '\n';
       try { fs.writeFileSync(file, content, { flag: 'wx' }); }
