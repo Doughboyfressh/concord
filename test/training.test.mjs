@@ -35,7 +35,7 @@ async function send(harness, message) {
   return harness.approve(state.pending.requestHash);
 }
 
-test('bounded context retains a complete suffix and commits to omitted history', () => {
+test('bounded context retains a complete run of records and commits to what it dropped', () => {
   const registry = new Map(makeBuiltinTools().map(t => [t.name, t]));
   const history = Array.from({ length: 30 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: 'marker-' + i }));
   const first = context(registry, { history });
@@ -44,8 +44,18 @@ test('bounded context retains a complete suffix and commits to omitted history',
   assert.equal(first.conversation.fullDigest, digest(history));
   assert.deepEqual(first, context(registry, { history }));
   assert.notEqual(first.conversation.fullDigest, context(registry, { history: history.slice(1) }).conversation.fullDigest);
-  assert.deepEqual(boundedRecords([{ text: 'old' }, { text: 'x'.repeat(17000) }]).records, []);
+  // A newest record too large for the whole window used to blank the window: this returned [] and
+  // reported the older record, which fits easily, as omitted. Throwing away what fits to avoid
+  // showing it was the wrong trade, and the reason it was made - that the envelope could only
+  // describe a dropped leading prefix - is fixed by droppedNewest describing the tail instead.
+  const oversized = boundedRecords([{ text: 'old' }, { text: 'x'.repeat(17000) }]);
+  assert.deepEqual(oversized.records, [{ text: 'old' }]);
+  assert.equal(oversized.droppedNewest, 1);
+  assert.equal(oversized.omittedCount, 0);
+  assert.equal(oversized.records.length + oversized.omittedCount + oversized.droppedNewest, oversized.totalCount);
+  // Records that merely do not all fit are still dropped oldest-first, unchanged.
   assert.equal(boundedRecords(history, { maxBytes: 100 }).omittedCount, 28);
+  assert.equal(boundedRecords(history, { maxBytes: 100 }).droppedNewest, 0);
   assert.throws(() => context(registry, { history: [{ role: 'system', content: 'invent authority' }] }), { code: 'CHAT_CONTEXT' });
 });
 

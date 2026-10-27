@@ -269,6 +269,10 @@ export function buildChatContext({ message, history, observations = [], proposed
     'name is the way back to it. conversation.omittedIds lists the turns dropped to fit the budget, ' +
     'oldest first, and if conversation.turn appears in the tool contracts below it returns those turns ' +
     'verbatim by id; references.trained declares omitted lesson ids the same way for instructions.lesson. ' +
+    'droppedNewest counts records too large for the window to hold at all, and they are the MOST RECENT ' +
+    'ones rather than the oldest: a non-zero droppedNewest means the latest thing that happened is not ' +
+    'in front of you, so treat the newest record shown as stale and fetch what was dropped by its id ' +
+    'from droppedNewestIds before concluding anything about current state. ' +
     'A receipt whose output reads {"omitted":true,"bytes":N,"fullDigest":...} is the same case and the ' +
     'sharpest one: the task really produced that output and it is recorded in full, you were simply not ' +
     'shown it because it exceeded the per-observation budget. You do not know what it said. If ' +

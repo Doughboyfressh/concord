@@ -100,11 +100,48 @@ test('the registry digest does not move when the transcript does', () => {
   assert.equal(tool.execute({ ids: ['turn-400'] }, context).returned, 1);
 });
 
-test('without idOf the bounded envelope keeps its previous shape exactly', () => {
-  // Additive by construction: every existing reader of this envelope predates omittedIds.
+test('without idOf the bounded envelope names only what it can resolve', () => {
+  // The id fields stay behind idOf, because an id a caller cannot resolve is worse than no id.
+  // The counts do not: droppedNewest is always present and zero when nothing was dropped, so a
+  // reader never has to tell "no tail was dropped" apart from "this envelope cannot say".
   const plain = boundedRecords(history(30));
-  assert.deepEqual(Object.keys(plain).sort(), ['fullDigest', 'omittedCount', 'records', 'totalCount']);
+  assert.deepEqual(Object.keys(plain).sort(), ['droppedNewest', 'fullDigest', 'omittedCount', 'records', 'totalCount']);
   assert.equal('omittedIds' in plain, false);
+  assert.equal('droppedNewestIds' in plain, false);
+  assert.equal(plain.droppedNewest, 0);
+});
+
+test('a record too big for the window no longer blanks the window', () => {
+  // Measured live before this: a plan holding six retrieved slices made one ~24 KB receipt
+  // against a 16 KiB budget, the fill broke on its first step, and the turn was handed
+  // records:[] with all seventeen observations reported omitted. Everything that would have fit
+  // was thrown away to avoid showing it.
+  const records = [...history(6), { role: 'user', content: 'x'.repeat(40000) }];
+  const bounded = boundedRecords(records, { idOf: (record, index) => turnId(index) });
+
+  assert.equal(bounded.droppedNewest, 1, 'the oversized newest record is skipped, not fatal');
+  assert.deepEqual(bounded.droppedNewestIds, ['turn-6'], 'and named, so it can be fetched back');
+  assert.ok(bounded.records.length > 0, 'the records that fit are still shown');
+  assert.equal(bounded.records.at(-1).content, 'turn 5 body', 'the newest that fits is the newest shown');
+
+  // Every record is accounted for in exactly one place.
+  assert.equal(bounded.records.length + bounded.omittedCount + bounded.droppedNewest, bounded.totalCount);
+
+  // And the declaration is not inert: the id it named resolves to the record it dropped.
+  const fetched = toolOver(() => records).execute({ ids: bounded.droppedNewestIds }, context);
+  assert.equal(fetched.deferredIds.length, 1, 'too large for one call, so deferred rather than cut');
+  assert.deepEqual(fetched.deferredIds, ['turn-6']);
+});
+
+test('an oversized record in the middle is counted with the omitted prefix', () => {
+  // Only a trailing oversized record is skipped. One further back stops the backward fill, so it
+  // and everything older are the omitted prefix - which is what omittedCount has always meant.
+  const records = [...history(3), { role: 'user', content: 'y'.repeat(40000) }, ...history(3)];
+  const bounded = boundedRecords(records, { idOf: (record, index) => turnId(index) });
+  assert.equal(bounded.droppedNewest, 0);
+  assert.equal(bounded.omittedCount, 4, 'the big one and the three before it');
+  assert.deepEqual(bounded.omittedIds, ['turn-0', 'turn-1', 'turn-2', 'turn-3']);
+  assert.equal(bounded.records.length, 3);
 });
 
 test('the store refuses a configuration it cannot read a transcript from', () => {

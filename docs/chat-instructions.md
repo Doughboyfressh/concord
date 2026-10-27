@@ -71,12 +71,30 @@ The complete contract list has a 64 KiB budget; exceeding it fails closed rather
 An explicit normalized policy supplies allowed origins and budgets; it does not supply approval grants.
 
 The model's user payload is a JSON object with `currentRequest`, `conversation`, `observations`, `proposal`,
-and `references`. Prior conversation retains a complete suffix of at most 24 messages and 16 KiB, excluding
+and `references`. Prior conversation retains a complete run of at most 24 messages and 16 KiB, excluding
 the current request supplied separately. Supervisor receipts retain at most eight records and 16 KiB.
-Both windows report `omittedCount`, `totalCount`, and a digest of the entire record list. Records are never
-cut or summarized: if the newest record exceeds its window, no older records are substituted. A digest
-does not give the model access to omitted content. The current validated proposal is supplied separately
-for follow-up edits, with a 16 KiB bound and explicit omission metadata.
+Both windows report `omittedCount`, `droppedNewest`, `totalCount`, and a digest of the entire record list.
+Records are never cut or summarized. A digest does not give the model access to omitted content. The current
+validated proposal is supplied separately for follow-up edits, with a 16 KiB bound and explicit omission
+metadata.
+
+The kept run is the newest suffix unless the newest records are individually larger than the whole window,
+and those are reported in `droppedNewest` rather than silently folded into `omittedCount`. Until recently
+one such record blanked the window entirely: the fill walks backwards from the newest, so it broke on the
+first step and returned no records at all, reporting every older record that would have fitted as omitted.
+Measured: a plan holding six retrieved slices made a single receipt of roughly 24 KB against the 16 KiB
+budget, and the turn was handed `records: []` with all seventeen observations gone, then asked a question
+only those observations could answer.
+
+The old rule had a real reason — the envelope could describe only a dropped leading prefix, so keeping
+older records in place of a newer one would have shown stale state as though it were current, with no way
+to say otherwise. `droppedNewest` is that missing way to say otherwise, so the records that fit are now
+kept. The distinction matters to a reader: `omittedCount` is history falling off the back, while a non-zero
+`droppedNewest` means *the most recent thing is missing* and the newest record shown is stale. Where the
+caller supplies `idOf`, `droppedNewestIds` names them by the same absolute ids `omittedIds` uses, so they
+are fetched back through `conversation.turn` exactly like any other omission. An oversized record in the
+middle of the set is not a tail, and still counts with the omitted prefix, which is what `omittedCount` has
+always meant.
 
 `conversation` additionally reports `omittedIds`: the dropped turns named `turn-N`, in transcript order,
 where N indexes the full history. A count says that something is missing; an id is the way back to it.
