@@ -55,9 +55,18 @@ process restarts, and does not clear or rotate the approval set — approvals ac
 harness instance, which is safe only because a request hash is specific to one exact plan/task/input/identity
 combination.
 
-There is still no resume, so a plan that **fails** partway has the same standing it always had: completed
-effects stand, and re-running repeats them. Durable retries still need the idempotency keys and
-reconciliation `docs/architecture.md` names.
+There is still no resume, and there cannot usefully be one for the case that matters: correcting a task
+changes the plan hash, hence every approval hash, so a corrected plan is a different run by construction
+rather than a continuation of the old one. What makes that recoverable instead is idempotent creation.
+`files.write` and `files.writeText` accept a file that already holds **exactly** the bytes they were about
+to write, returning `created: false` rather than `EEXIST`. The approval hash binds the exact content, so
+bytes that match are bytes the operator approved; different bytes at the same path are still refused, which
+is the rule exclusive creation exists for.
+
+So a four-file build whose last task is wrong can be fixed and re-run: the three files that already landed
+are accepted unchanged and only the corrected task writes. `test/preflight.test.mjs` runs exactly that.
+Effects that are not idempotent by construction — a process, a network call — still stand where they
+landed, and reconciling those needs what `docs/architecture.md` names.
 
 ## Granting a plan's effects before it runs
 

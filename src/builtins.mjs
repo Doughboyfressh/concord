@@ -7,6 +7,36 @@ import { workspaceFile, workspaceDir, readWorkspaceFile } from './workspace-fs.m
 // The optional third argument is a schema `description`: an allowed keyword that validation
 // ignores and that the system prompt carries verbatim, so it is how a tool tells a model what it
 // is for. Omitted by default, so every existing schema hashes exactly as it did.
+/**
+ * Create a file, or accept that it already holds exactly these bytes.
+ *
+ * Exclusive creation is why an approval can never silently replace existing user data, and that
+ * stays. What changes is the one case where "already there" and "what you approved" are the same
+ * thing: identical bytes. Re-running is then a no-op rather than an EEXIST, and `created` says
+ * which happened, so a receipt never claims to have written something it found.
+ *
+ * This is what makes a long build recoverable. A plan whose fourth task fails cannot be
+ * "resumed" — correcting the fourth task changes the plan hash, hence every approval hash, so it
+ * is a different run by construction. The corrected plan therefore re-runs the three writes that
+ * already landed, and before this it died on the first of them. The approval hash binds the exact
+ * content, so bytes that match are bytes the operator approved; nothing else is ever accepted.
+ *
+ * @returns {boolean} true if this call created the file, false if it already held these bytes.
+ */
+function writeExclusiveOrIdentical(filename, contents) {
+  const intended = Buffer.isBuffer(contents) ? contents : Buffer.from(contents, 'utf8');
+  try {
+    writeFileSync(filename, intended, { flag: 'wx' });
+    return true;
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    // Compared as bytes, never as decoded text: two different encodings of the same string are
+    // different files, and a comparison that called them equal would skip a write that mattered.
+    if (!readFileSync(filename).equals(intended)) throw error;
+    return false;
+  }
+}
+
 const object = (properties, required = Object.keys(properties), description) => ({
   type: 'object', properties, required, additionalProperties: false,
   ...(description === undefined ? {} : { description }),
@@ -200,7 +230,7 @@ export function makeBuiltinTools() {
      * `description` is already an allowed schema keyword and is inert during validation, so the
      * fix belongs in the contract the model actually reads rather than in prose somewhere else.
      */
-    { name: 'files.write', version: '1.1.0', outputKeys: ['contentHash', 'created', 'path'], effect: 'write',
+    { name: 'files.write', version: '1.2.0', outputKeys: ['contentHash', 'created', 'path'], effect: 'write',
       inputSchema: object({
         path: string,
         content: { description: 'Any JSON value. It is written as canonical JSON, so a string arrives on disk quoted and escaped rather than as its own bytes.' },
@@ -215,9 +245,11 @@ export function makeBuiltinTools() {
         // because the tool should not depend on a caller having checked, and because the identical
         // guard in memory.promote is reachable, at exactly the budget equal to its input.
         if (Buffer.byteLength(text) > context.policy.maxOutputBytes) throw new HarnessError('OUTPUT_LIMIT', 'Write exceeds byte budget');
-        // Exclusive creation: an approval cannot silently replace existing user data.
-        writeFileSync(filename, text, { flag: 'wx', encoding: 'utf8' });
-        return { path: relative, contentHash: digest(content), created: true };
+        // Exclusive creation: an approval cannot silently replace existing user data. An identical
+        // rewrite is the one exception, and it is not an exception to that rule at all -- see
+        // `created` below.
+        const created = writeExclusiveOrIdentical(filename, text);
+        return { path: relative, contentHash: digest(content), created };
       } },
     /**
      * Changing a file that already exists, bound to the bytes it expected to find.
@@ -332,7 +364,7 @@ export function makeBuiltinTools() {
      * files.write has it, and the parent directory must already exist: files.mkdir is a separate
      * grant because making a tree somewhere is a different act from putting a file in one.
      */
-    { name: 'files.writeText', version: '1.1.0', outputKeys: ['path', 'created', 'sha256', 'bytes'], effect: 'write',
+    { name: 'files.writeText', version: '1.2.0', outputKeys: ['path', 'created', 'sha256', 'bytes'], effect: 'write',
       inputSchema: object({
         path: string,
         text: { type: 'string', maxLength: 4194304, description: 'The exact bytes of the file. Written as UTF-8 with nothing added, so what you supply is what another program will read.' },
@@ -341,8 +373,8 @@ export function makeBuiltinTools() {
         const filename = workspaceFile(context.workspaceRoot, relative);
         const encoded = Buffer.from(text, 'utf8');
         if (encoded.length > context.policy.maxOutputBytes) throw new HarnessError('OUTPUT_LIMIT', 'Write exceeds byte budget');
-        writeFileSync(filename, encoded, { flag: 'wx' });
-        return { path: relative, created: true, sha256: createHash('sha256').update(encoded).digest('hex'), bytes: encoded.length };
+        const created = writeExclusiveOrIdentical(filename, encoded);
+        return { path: relative, created, sha256: createHash('sha256').update(encoded).digest('hex'), bytes: encoded.length };
       } },
     { name: 'files.mkdir', version: '1.0.0', outputKeys: ['path', 'created'], effect: 'write',
       inputSchema: object({ path: string }),

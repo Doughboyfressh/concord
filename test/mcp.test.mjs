@@ -170,10 +170,20 @@ test('a write effect blocks with a requestHash, executes once confirmed, and ref
     assert.equal(confirmed.created, true);
     assert.equal(fs.existsSync(path.join(temp, 'round.json')), true);
 
-    const stale = await session.request('tools/call', { name: 'files_write', arguments: { path: 'round.json', content: { v: 1 }, _confirm: proposed.requestHash } });
-    assert.equal(stale.result.isError, true);
+    // Repeating the SAME request with the same hash is not a stale confirm, it is the same
+    // request: the hash is derived from the content, so identical bytes mean this grant still
+    // describes exactly what is on disk. It is a no-op, and `created` says so.
+    const again = await session.request('tools/call', { name: 'files_write', arguments: { path: 'round.json', content: { v: 1 }, _confirm: proposed.requestHash } });
+    assert.equal(again.result.isError, undefined);
+    assert.equal(JSON.parse(again.result.content[0].text).created, false);
+
+    // A genuinely stale confirm is a hash that does not bind this call. Still refused, which is
+    // the property this test is named for: a grant is for one exact request, not for a path.
+    const stale = await session.request('tools/call', { name: 'files_write', arguments: { path: 'round.json', content: { v: 2 }, _confirm: proposed.requestHash } });
     const staleBody = JSON.parse(stale.result.content[0].text);
-    assert.equal(staleBody.code, 'EFFECT_INDETERMINATE');
+    assert.equal(staleBody.status, 'blocked', 'a hash bound to different content grants nothing');
+    assert.notEqual(staleBody.requestHash, proposed.requestHash);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(temp, 'round.json'), 'utf8')), { v: 1 }, 'and nothing was overwritten');
   });
 });
 

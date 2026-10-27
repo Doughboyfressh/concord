@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { planGrants, assertSinglePass } from '../src/preflight.mjs';
 import { runPlan, replayPlan } from '../src/engine.mjs';
+import { digest as digestOf } from '../src/value.mjs';
 
 /**
  * The claim under test is narrow and total: a hash computed before the plan runs is the SAME hash
@@ -207,4 +208,45 @@ test('preflight runs nothing', () => {
   const computed = preflight(many);
   assert.equal(computed.grants.length, 3);
   assert.deepEqual(landed, [], 'computing a request is not performing it');
+});
+
+test('a four-file build whose last task is wrong is fixed and re-run without repeating the three that landed', async () => {
+  // The point of all of this, end to end, with a real workspace.
+  //
+  // A plan cannot be "resumed" after a failure: correcting the broken task changes the plan hash,
+  // hence every approval hash, so the corrected plan is a different run by construction and
+  // re-executes the writes that already succeeded. Before writeExclusiveOrIdentical that re-run
+  // died on the first of them with EEXIST, and the three good files made the build unrepeatable.
+  const { makeBuiltinTools } = await import('../src/builtins.mjs');
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const real = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'concord-build-')));
+  const builtins = new Map(makeBuiltinTools().map((t) => [t.name, t]));
+  const site = new Map([['files.writeText', builtins.get('files.writeText')]]);
+  const sitePolicy = { version: 1, allowedTools: ['files.writeText'], allowedEffects: ['write'], maxOutputBytes: 65536, maxJournalBytes: 1048576 };
+  const text = (id, file, body) => ({ id, tool: 'files.writeText', input: { path: file, text: body } });
+  const run = (plan, approvals = []) => runPlan({ plan, policy: sitePolicy, registry: site, sourceLock: { version: 1 }, workspaceRoot: real, approvals });
+  const grantsOf = (plan) => planGrants({ plan, policy: sitePolicy, registry: site, sourceLock: { version: 1 }, workspaceRoot: real })
+    .grants.map((g) => g.requestHash);
+
+  const good = [text('a', 'index.html', '<h1>Site</h1>'), text('b', 'style.css', 'body{}'), text('c', 'app.js', 'console.log(1)')];
+  // The fourth task writes into a directory that does not exist, so it fails after three succeed.
+  const broken = plan('build', [...good, text('d', 'missing/README.md', '# Site')]);
+
+  const first = await run(broken, grantsOf(broken));
+  assert.equal(first.outcome.status, 'failed');
+  assert.equal(first.outcome.taskId, 'd');
+  assert.equal(fs.readFileSync(path.join(real, 'index.html'), 'utf8'), '<h1>Site</h1>', 'the first three landed');
+
+  // Correct the fourth task. Different plan, different hashes, a fresh set of grants.
+  const fixed = plan('build', [...good, text('d', 'README.md', '# Site')]);
+  assert.notEqual(digestOf(fixed), digestOf(broken));
+  const second = await run(fixed, grantsOf(fixed));
+
+  assert.equal(second.outcome.status, 'completed');
+  // The three that already existed were accepted rather than rewritten, and say so.
+  assert.deepEqual(['a', 'b', 'c'].map((id) => second.results[id].created), [false, false, false]);
+  assert.equal(second.results.d.created, true, 'only the corrected task actually wrote');
+  assert.equal(fs.readFileSync(path.join(real, 'README.md'), 'utf8'), '# Site');
+  fs.rmSync(real, { recursive: true, force: true });
 });

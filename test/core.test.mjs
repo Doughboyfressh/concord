@@ -134,7 +134,23 @@ test('file write requires grant, uses exclusive create, and is not repeated on r
     const j = await runPlan({ ...o, approvals: [b.outcome.requestHash] });
     assert.equal(j.outcome.status, 'completed'); replayPlan({ ...o, journal: j });
     assert.deepEqual(JSON.parse(readFileSync(path.join(temp, 'memory.json'), 'utf8')), { lesson: 'x' });
-    const second = await runPlan({ ...o, approvals: [b.outcome.requestHash] }); assert.equal(second.outcome.code, 'EFFECT_INDETERMINATE');
+    // Re-running the identical write is a no-op, not a failure. The approval hash binds the exact
+    // content, so bytes already on disk that match are bytes this grant approved; writing them
+    // again would change nothing. `created` is false so the receipt never claims otherwise.
+    const second = await runPlan({ ...o, approvals: [b.outcome.requestHash] });
+    assert.equal(second.outcome.status, 'completed');
+    assert.equal(second.results.a.created, false);
+    assert.equal(j.results.a.created, true, 'the run that really created it says so');
+    assert.deepEqual(JSON.parse(readFileSync(path.join(temp, 'memory.json'), 'utf8')), { lesson: 'x' });
+
+    // And the rule exclusive creation exists for is untouched: different content at the same path
+    // is still refused, because an approval must never silently replace existing data.
+    const conflicting = { version: 1, tasks: [{ id: 'a', tool: 'files.write', input: { path: 'memory.json', content: { lesson: 'DIFFERENT' } } }] };
+    const c = base(conflicting, { workspaceRoot: temp });
+    const blocked = await runPlan(c);
+    const clash = await runPlan({ ...c, approvals: [blocked.outcome.requestHash] });
+    assert.equal(clash.outcome.code, 'EFFECT_INDETERMINATE', 'a grant does not license overwriting');
+    assert.deepEqual(JSON.parse(readFileSync(path.join(temp, 'memory.json'), 'utf8')), { lesson: 'x' }, 'the original bytes survive');
   } finally { rmSync(temp, { recursive: true, force: true }); }
 });
 test('untrusted inputs cannot mutate downstream evidence', async () => {
