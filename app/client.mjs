@@ -839,10 +839,16 @@ function plannedGrantsCard(planned) {
       h('div', { class: 'actions' },
         h('button', {
           type: 'button', class: 'btn-gate',
-          onClick: () => approveAllPlanned(),
-          text: ungranted.length === 1 ? 'Approve this exact request' : `Approve all ${ungranted.length} exact requests`,
+          onClick: () => approveAllPlannedAndRun(),
+          title: 'Grants each of these exact requests, then runs the plan. Every grant is still recorded separately.',
+          text: ungranted.length === 1 ? 'Approve this request and run' : `Approve all ${ungranted.length} and run`,
         }),
-        h('span', { class: 'note', text: 'Approving runs nothing on its own — press Run this plan afterwards.' }))));
+        h('button', {
+          type: 'button',
+          onClick: () => approveAllPlanned(),
+          title: 'Records the grants without running anything. Use Run this plan when you are ready.',
+          text: 'Approve only',
+        }))));
 }
 
 function planCard(plan) {
@@ -1085,6 +1091,46 @@ async function approveAllPlanned() {
   }
 }
 
+/**
+ * Grant every effect this plan performs, then run it.
+ *
+ * Underneath this is exactly the two-step sequence it has always been: each grant is its own
+ * authorisation, posted and recorded separately, and the run is a separate call that the harness
+ * only completes because every grant is already held. Nothing here is new authority -- the
+ * operator is looking at the full list of effects and their exact requests when they press it.
+ *
+ * It exists because the old surface made one decision cost two controls on two cards: granting
+ * said "Granted" and then nothing happened, and the control that would make it happen was further
+ * down the thread. Over a build that proposes a gated plan per step, that is most of the
+ * interaction. Approving without running stays available beside this, because granting and
+ * running really are different decisions and sometimes only the first one is wanted.
+ */
+async function approveAllPlannedAndRun() {
+  const ungranted = ungrantedPlanned();
+  if (busy || !ungranted.length) return;
+  showError(null);
+  setBusy(true, `Granting ${plural(ungranted.length, 'effect')}`);
+  const before = state.runs.length;
+  try {
+    // Sequential and stopping at the first refusal, exactly as approveAllPlanned does: a failure
+    // halfway must leave the rest ungranted rather than racing them through.
+    for (const grant of ungranted) {
+      const payload = await call('/api/approve', { requestHash: grant.requestHash });
+      applyState(payload.state);
+    }
+    setBusy(true, 'Running the plan');
+    const payload = await call('/api/execute', {});
+    applyState(payload.state);
+    reportRun(before);
+  } catch (error) {
+    // The grants that did land stay landed and are rendered as held; only the run is abandoned.
+    showError(error.message);
+    setActivity('Failed', 'error');
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function approvePending() {
   if (busy || !state.pending) return;
   showError(null);
@@ -1133,28 +1179,39 @@ async function advance(maxSteps) {
   }
 }
 
+/**
+ * Say what a press on Run actually did, from the run count either side of the call.
+ *
+ * Counted before and after, because the harness answers an already-attempted plan with the
+ * snapshot unchanged and a 200. Without this the interface could not tell "ran" from "declined
+ * to run again", and reported neither -- which is what made a working button look broken.
+ *
+ * Shared by the two controls that run a plan so they cannot drift into describing the same
+ * outcome differently.
+ */
+function reportRun(before) {
+  if (state.runs.length > before) {
+    const latest = observationIndex().get(state.runs[state.runs.length - 1].id);
+    const tasks = Array.isArray(latest?.tasks) ? latest.tasks.length : 0;
+    showToast(latest?.status === 'completed'
+      ? `Plan ran: ${plural(tasks, 'task')} completed. The receipt is on the reply above.`
+      : `Plan ran and ${latest?.status ?? 'did not complete'}. The receipt says why.`);
+  } else if (state.pending) {
+    showToast('The plan stopped at an effect that needs your approval.');
+  } else {
+    showToast('Nothing ran: this plan was already attempted. Ask again to propose a new one.');
+  }
+}
+
 async function executePlan() {
   if (busy) return;
   showError(null);
   setBusy(true, 'Running the plan');
-  // Counted before and after, because the harness answers an already-attempted plan with the
-  // snapshot unchanged and a 200. Without this the interface could not tell "ran" from "declined
-  // to run again", and reported neither -- which is what made a working button look broken.
   const before = state.runs.length;
   try {
     const payload = await call('/api/execute', {});
     applyState(payload.state);
-    if (state.runs.length > before) {
-      const latest = observationIndex().get(state.runs[state.runs.length - 1].id);
-      const tasks = Array.isArray(latest?.tasks) ? latest.tasks.length : 0;
-      showToast(latest?.status === 'completed'
-        ? `Plan ran: ${plural(tasks, 'task')} completed. The receipt is on the reply above.`
-        : `Plan ran and ${latest?.status ?? 'did not complete'}. The receipt says why.`);
-    } else if (state.pending) {
-      showToast('The plan stopped at an effect that needs your approval.');
-    } else {
-      showToast('Nothing ran: this plan was already attempted. Ask again to propose a new one.');
-    }
+    reportRun(before);
   } catch (error) {
     showError(error.message);
     setActivity('Failed', 'error');
