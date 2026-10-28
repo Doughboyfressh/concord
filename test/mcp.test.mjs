@@ -297,6 +297,104 @@ test('a grants file inside the delegate workspace is refused at startup', async 
   }
 });
 
+async function withAutonomousSession(prefix, run, { policy, logIsDirectory = false } = {}) {
+  const outer = tempDir(prefix);
+  const workspace = path.join(outer, 'workspace');
+  fs.mkdirSync(workspace);
+  const log = path.join(outer, 'autonomy.jsonl');
+  if (logIsDirectory) fs.mkdirSync(log);
+  const extra = ['--autonomous', log];
+  if (policy) {
+    const policyFile = path.join(outer, 'policy.json');
+    fs.writeFileSync(policyFile, JSON.stringify(policy));
+    extra.push('--policy', policyFile);
+  }
+  const session = startMcpServer(workspace, extra);
+  try {
+    await run(session, { workspace, log });
+    assertStdoutIsPureJsonRpc(session);
+  } finally {
+    await session.close();
+    fs.rmSync(outer, { recursive: true, force: true });
+  }
+}
+
+const readLog = (file) => fs.readFileSync(file, 'utf8').trim().split('\n').map((line) => parseJson(line));
+
+test('an autonomous delegate acts in one call, and every act is on the record', async () => {
+  await withAutonomousSession('concord-mcp-auto-act-', async (session, { workspace, log }) => {
+    const init = await handshake(session);
+    assert.match(init.result.instructions, /AUTONOMOUS DELEGATE/);
+
+    // No propose, no _confirm: the effect happens on the first call.
+    const call = await session.request('tools/call', { name: 'files_write', arguments: writeArgs });
+    assert.equal(call.result.isError, undefined);
+    const body = JSON.parse(call.result.content[0].text);
+    assert.equal(body.created, true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(workspace, 'out.json'), 'utf8')), { v: 1 });
+
+    // Intent before, outcome after, tied together by the exact hash the kernel computed.
+    const [intent, outcome] = readLog(log);
+    assert.equal(intent.phase, 'intent');
+    assert.equal(intent.tool, 'files.write');
+    assert.equal(intent.effect, 'write');
+    assert.deepEqual(intent.input, writeArgs);
+    assert.match(intent.requestHash, /^[a-f0-9]{64}$/);
+    assert.equal(outcome.phase, 'outcome');
+    assert.equal(outcome.requestHash, intent.requestHash);
+    assert.equal(outcome.status, 'completed');
+    assert.equal(outcome.outputDigest, digest(body), 'the log can be checked against what the caller was given');
+  });
+});
+
+test('the policy is the whole boundary on what an autonomous delegate may do', async () => {
+  const policy = {
+    version: 1, allowedTools: ['files.writeText', 'files.read'], allowedEffects: ['pure', 'read', 'write'],
+    allowedOrigins: [], maxTasks: 4, maxOutputBytes: 65536, maxJournalBytes: 1048576, timeoutMs: 30000,
+  };
+  await withAutonomousSession('concord-mcp-auto-policy-', async (session, { workspace }) => {
+    await handshake(session);
+    const listed = await session.request('tools/list', {});
+    const names = listed.result.tools.map((tool) => tool.name);
+    assert.ok(names.includes('files_writeText'));
+    // Autonomy is not authority: a tool outside the policy is not merely refused, it is not there.
+    assert.ok(!names.includes('files_delete'));
+    assert.ok(!names.includes('files_write'));
+    const outside = await session.request('tools/call', { name: 'files_delete', arguments: { path: 'anything' } });
+    assert.ok(outside.error || outside.result?.isError, 'a tool the policy leaves out cannot be called');
+    // The server keeps its own run store and exchange in the workspace; nothing else may appear.
+    assert.deepEqual(fs.readdirSync(workspace).filter((name) => !['exchange', 'runs'].includes(name)), []);
+  }, { policy });
+});
+
+test('no record, no effect: an autonomous write is refused if the log cannot be written', async () => {
+  await withAutonomousSession('concord-mcp-auto-nolog-', async (session, { workspace }) => {
+    await handshake(session);
+    const call = await session.request('tools/call', { name: 'files_write', arguments: writeArgs });
+    assert.equal(call.result.isError, true);
+    assert.equal(JSON.parse(call.result.content[0].text).code, 'DELEGATE_LOG_UNAVAILABLE');
+    assert.equal(fs.existsSync(path.join(workspace, 'out.json')), false, 'the effect was not performed');
+  }, { logIsDirectory: true });
+});
+
+test('the autonomy log must be outside the workspace, and the two delegate modes are exclusive', async () => {
+  const workspace = tempDir('concord-mcp-auto-inside-');
+  try {
+    const { createAutonomousLog } = await import('../src/mcp.mjs');
+    const real = fs.realpathSync(workspace);
+    // Inside, the delegate could rewrite the record of what it did.
+    assert.throws(() => createAutonomousLog(path.join(real, 'autonomy.jsonl'), real), { code: 'MCP_CONFIG' });
+    assert.equal(createAutonomousLog(path.join(path.dirname(real), 'autonomy.jsonl'), real).mode, 'autonomous');
+
+    const both = spawn(process.execPath, [path.join(root, 'src', 'mcp.mjs'), '--workspace', real,
+      '--grants', path.join(path.dirname(real), 'g.json'), '--autonomous', path.join(path.dirname(real), 'a.jsonl')], { stdio: ['pipe', 'pipe', 'pipe'], cwd: root });
+    const exitCode = await new Promise((resolve) => both.once('exit', resolve));
+    assert.notEqual(exitCode, 0, 'asking for supervised and autonomous at once is refused, not resolved by precedence');
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test('an ordinary session keeps the two-step confirm exactly as before', async () => {
   await withSession('concord-mcp-not-delegate-', async (session, temp) => {
     const init = await handshake(session);

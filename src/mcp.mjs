@@ -72,11 +72,11 @@ function readJsonFile(file, maxBytes = 33554432) {
 
 function parseArgs(argv) {
   const flags = {};
-  const allowed = ['workspace', 'policy', 'integrations', 'workers', 'browser', 'decompiler', 'web', 'build', 'reverse', 'foreign', 'mailbox', 'grants'];
+  const allowed = ['workspace', 'policy', 'integrations', 'workers', 'browser', 'decompiler', 'web', 'build', 'reverse', 'foreign', 'mailbox', 'grants', 'autonomous'];
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i]?.replace(/^--/, '');
     if (!argv[i]?.startsWith('--') || !allowed.includes(key) || !argv[i + 1] || Object.hasOwn(flags, key)) {
-      throw new HarnessError('MCP_USAGE', 'Usage: node src/mcp.mjs [--workspace DIR] [--policy FILE] [--integrations FILE] [--workers FILE] [--browser FILE] [--decompiler FILE] [--web FILE] [--build FILE] [--reverse FILE] [--foreign FILE] [--mailbox DIR] [--grants FILE]');
+      throw new HarnessError('MCP_USAGE', 'Usage: node src/mcp.mjs [--workspace DIR] [--policy FILE] [--integrations FILE] [--workers FILE] [--browser FILE] [--decompiler FILE] [--web FILE] [--build FILE] [--reverse FILE] [--foreign FILE] [--mailbox DIR] [--grants FILE | --autonomous FILE]');
     }
     flags[key] = argv[i + 1];
   }
@@ -190,20 +190,25 @@ function publicChatState(snapshot) {
  */
 const GRANT_HASH = /^[a-f0-9]{64}$/;
 
-export function createDelegateGrants(grantsFile, workspaceRoot) {
-  const file = path.resolve(grantsFile);
+/** A control file the delegate must not be able to reach with Concord's own file tools. */
+function outsideWorkspace(target, workspaceRoot, what, why) {
+  const file = path.resolve(target);
   let directory;
   try { directory = fs.realpathSync(path.dirname(file)); }
-  catch { throw new HarnessError('MCP_CONFIG', 'The grants file must be in a directory that exists'); }
+  catch { throw new HarnessError('MCP_CONFIG', `The ${what} must be in a directory that exists`); }
   const relative = path.relative(workspaceRoot, directory);
   const inside = relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
-  if (inside) {
-    throw new HarnessError('MCP_CONFIG', 'The grants file must be outside the delegate workspace, or the delegate could write its own grants');
-  }
+  if (inside) throw new HarnessError('MCP_CONFIG', `The ${what} must be outside the delegate workspace, or ${why}`);
+  return file;
+}
+
+export function createDelegateGrants(grantsFile, workspaceRoot) {
+  const file = outsideWorkspace(grantsFile, workspaceRoot, 'grants file', 'the delegate could write its own grants');
   const requestsFile = `${file}.requests.jsonl`;
   const recorded = new Set();
 
   return {
+    mode: 'supervised',
     file,
     requestsFile,
     granted(hash) {
@@ -219,6 +224,37 @@ export function createDelegateGrants(grantsFile, workspaceRoot) {
       if (recorded.has(entry.requestHash)) return;
       recorded.add(entry.requestHash);
       try { fs.appendFileSync(requestsFile, canonical(entry) + '\n'); } catch { /* the refusal itself still stands */ }
+    },
+  };
+}
+
+/**
+ * Autonomous delegate: acts without asking, and accounts for every act.
+ *
+ * Per-effect approval is removed, by the operator's choice, so a delegate does not stop and wait
+ * on a person. What is NOT removed is the ledger. The delegate still acts only through Concord's
+ * tools and only inside Concord's policy, so the policy file is now the entire boundary on what
+ * it may do unasked — which tools, which effects, which workspace, which origins.
+ *
+ * The log is the reason this mode exists rather than simply letting a delegate echo its own
+ * confirm hashes back. A raw MCP call runs its plan with no journal on disk, which was tolerable
+ * while a person approved each effect, because the approval was the accountability. With nobody
+ * approving, the record has to be the accountability, so every gated effect is appended here with
+ * its exact request hash, its input, how it ended and a digest of what it returned.
+ *
+ * Each grant is still exact: it is the hash the kernel computed for this very call, issued for
+ * that call and nothing else. Autonomy removes the person from the loop, not the binding.
+ */
+export function createAutonomousLog(logFile, workspaceRoot) {
+  const file = outsideWorkspace(logFile, workspaceRoot, 'autonomy log', 'the delegate could rewrite the record of what it did');
+  return {
+    mode: 'autonomous',
+    file,
+    granted() { return true; },
+    record(entry) {
+      // A failed append is surfaced to the caller rather than swallowed: in this mode an effect
+      // that cannot be recorded must not be reported as though it had been accounted for.
+      fs.appendFileSync(file, canonical(entry) + '\n');
     },
   };
 }
@@ -254,7 +290,7 @@ export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, h
     // In delegate mode a confirm is honoured only when the parent granted that exact hash. The
     // check is on the hash the caller supplied; the kernel then still requires it to equal the
     // request hash it computes, so a granted hash cannot be spent on a different input.
-    const ungranted = Boolean(delegate && confirmHash && !delegate.granted(confirmHash));
+    const ungranted = Boolean(delegate?.mode === 'supervised' && confirmHash && !delegate.granted(confirmHash));
     const approvals = confirmHash && !ungranted ? [confirmHash] : [];
     let result;
     try {
@@ -264,6 +300,35 @@ export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, h
       const message = error instanceof HarnessError ? error.message : 'The tool call could not be completed.';
       return { content: [{ type: 'text', text: canonical({ status: 'failed', code, message }) }], isError: true };
     }
+
+    // Autonomous: grant exactly the hash the kernel just computed for THIS call, and run it.
+    // Intent is written before the effect happens and the effect is refused if that write fails,
+    // because an outcome can only be logged after the fact, and by then the effect has happened.
+    if (result.outcome.status === 'blocked' && delegate?.mode === 'autonomous') {
+      const detail = blockedDetail(result);
+      const requestHash = result.outcome.requestHash;
+      try {
+        delegate.record({ phase: 'intent', requestHash, tool: toolName, effect: detail.effect, input: detail.input });
+      } catch {
+        return { content: [{ type: 'text', text: canonical({ status: 'failed', code: 'DELEGATE_LOG_UNAVAILABLE', message: 'The autonomy log could not be written, so the effect was not performed.' }) }], isError: true };
+      }
+      try {
+        result = await runPlan({ plan, policy, registry, sourceLock, approvals: [requestHash], workspaceRoot });
+      } catch (error) {
+        const code = error instanceof HarnessError ? error.code : 'TOOL_CALL_FAILED';
+        try { delegate.record({ phase: 'outcome', requestHash, status: 'failed', code }); } catch { /* intent stands */ }
+        return { content: [{ type: 'text', text: canonical({ status: 'failed', code, message: 'The tool call could not be completed.' }) }], isError: true };
+      }
+      const output = result.outcome.status === 'completed' ? result.results[RAW_TASK_ID] : undefined;
+      try {
+        delegate.record({
+          phase: 'outcome', requestHash, status: result.outcome.status,
+          ...(result.outcome.code ? { code: result.outcome.code } : {}),
+          ...(output === undefined ? {} : { outputDigest: digest(output) }),
+        });
+      } catch { /* the intent line already records that this was attempted */ }
+    }
+
     if (result.outcome.status === 'blocked') {
       const detail = blockedDetail(result);
       if (delegate) {
@@ -314,9 +379,14 @@ export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, h
           if (typeof args.requestHash !== 'string') throw new McpProtocolError(-32602, 'Invalid params: "requestHash" is required');
           // The chat harness is the second route to a grant, and closing only the raw-tool route
           // would leave this one as the way round it.
-          if (delegate && !delegate.granted(args.requestHash)) {
+          if (delegate?.mode === 'supervised' && !delegate.granted(args.requestHash)) {
             delegate.record({ requestHash: args.requestHash, via: 'concord_approve' });
             return { content: [{ type: 'text', text: canonical({ status: 'failed', code: 'DELEGATE_UNGRANTED', message: 'This session is a delegate and cannot approve its own effects. The request has been recorded for the operator.' }) }], isError: true };
+          }
+          if (delegate?.mode === 'autonomous') {
+            // Same rule as the raw route: no record, no effect.
+            try { delegate.record({ phase: 'intent', requestHash: args.requestHash, via: 'concord_approve' }); }
+            catch { return { content: [{ type: 'text', text: canonical({ status: 'failed', code: 'DELEGATE_LOG_UNAVAILABLE', message: 'The autonomy log could not be written, so nothing was approved.' }) }], isError: true }; }
           }
           snapshot = await harness.approve(args.requestHash);
         } else if (name === 'concord_execute_plan') {
@@ -492,7 +562,9 @@ export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, h
           // A delegate is told plainly, at the first message, that it cannot approve itself. The
           // standard text tells a caller to confirm its own hash, which is exactly the move this
           // mode refuses, and an agent following stale instructions would just loop on refusals.
-          instructions: delegate
+          instructions: delegate?.mode === 'autonomous'
+            ? 'Concord is a deterministic AI chat harness, and this session is an AUTONOMOUS DELEGATE. You may act without asking: a write, network, or process tool call executes immediately, with no "_confirm" step, as long as the tool and effect are permitted by this session\'s policy. Every such effect is recorded with its exact request hash, input and outcome in a log the operator reviews, so act as someone whose every action will be read. Work only through these Concord tools.'
+            : delegate
             ? 'Concord is a deterministic AI chat harness, and this session is a DELEGATE. Every write, network, or process effect needs an exact approval hash, and in this session only the operator can grant one. A gated tool call returns "blocked" with a requestHash and the request is recorded for the operator; you cannot approve it yourself, and calling again with "_confirm" has no effect until the operator has granted that exact hash. Do the work that needs no grant, state plainly which effects you requested and why, and leave the decision to the operator. Pure and read tools run normally.'
             : 'Concord is a deterministic AI chat harness: every write, network, or process effect requires an exact content-derived approval hash before it runs. A raw tool call that needs a grant returns a "blocked" result with a requestHash; call the same tool again with "_confirm" set to that hash to execute it. The concord_* tools drive a stateful, instruction-grounded chat session over the same kernel; resources/* exposes the 12 reviewed source instruction modules.',
         };
@@ -595,7 +667,12 @@ export async function main(argv = process.argv.slice(2)) {
   // the source lock describe the same bytes.
   const uiAppPath = path.join(root, 'app', 'mcp-app.html');
   const uiApp = fs.existsSync(uiAppPath) ? fs.readFileSync(uiAppPath, 'utf8') : null;
-  const delegate = flags.grants ? createDelegateGrants(flags.grants, workspaceRoot) : null;
+  // Supervised and autonomous are opposite answers to "who grants?", so asking for both is a
+  // configuration mistake to refuse, not a precedence rule to guess at.
+  if (flags.grants && flags.autonomous) throw new HarnessError('MCP_USAGE', 'Use either --grants (supervised delegate) or --autonomous (autonomous delegate), not both');
+  const delegate = flags.grants ? createDelegateGrants(flags.grants, workspaceRoot)
+    : flags.autonomous ? createAutonomousLog(flags.autonomous, workspaceRoot)
+    : null;
   const server = createMcpServer({ registry, policy, sourceLock, workspaceRoot, harness, instructionModules: resourceContext.instructions, channel, uiApp, mailboxDir, onClientReady: joinPeerHub, delegate });
 
   // Watch the exchange and tell the client when what it should know has changed. This is the
