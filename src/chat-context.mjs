@@ -58,7 +58,151 @@ function loadManifest(instructionRoot) {
  * instruction module, plus a lexical preview of relevant catalogued capabilities.
  * Reads only the explicit instructionRoot; never network, clock, or ambient state.
  */
-export function buildChatContext({ message, history, observations = [], proposedPlan = null, verification = null, sourceLock, inventory, registry, policy, instructionRoot }) {
+/**
+ * How many bytes of fully spelled-out tool contracts a turn may carry.
+ *
+ * Measured before this existed: the whole registry rendered to 53,390 bytes of a 108,045-byte
+ * system prompt — roughly half the prompt describing 112 tools when a turn uses one to three. On
+ * the prompt that was reliably looping, trimming to five tools took reasoning from 116,017
+ * characters with no answer to 6,938 characters and a correct answer in 48.6 seconds. This budget
+ * is the dial on that, set well above the five that was measured because starving the model of a
+ * contract it needed is the failure that matters here.
+ */
+export const TOOL_CONTRACT_BUDGET = 16384;
+
+// Function words carry no signal about which tool a turn needs, and leaving them in made every
+// contract whose description happened to contain "with" or "this" score against every message:
+// the first measurement of this selector ranked files.write top for "How many tools does this
+// harness have?". Lexical overlap is only as good as what it refuses to count.
+const CONTRACT_STOPWORDS = new Set([
+  'a', 'about', 'all', 'an', 'and', 'any', 'are', 'as', 'at', 'be', 'been', 'but', 'by', 'can',
+  'do', 'does', 'each', 'for', 'from', 'get', 'give', 'had', 'has', 'have', 'how', 'i', 'if',
+  'in', 'into', 'is', 'it', 'its', 'just', 'many', 'may', 'me', 'much', 'must', 'my', 'no',
+  'not', 'of', 'on', 'one', 'only', 'or', 'other', 'our', 'out', 'over', 'own', 'same', 'should',
+  'so', 'some', 'such', 'than', 'that', 'the', 'their', 'them', 'then', 'there', 'these', 'they',
+  'this', 'those', 'to', 'up', 'use', 'used', 'using', 'was', 'we', 'were', 'what', 'when',
+  'where', 'whether', 'which', 'while', 'who', 'why', 'will', 'with', 'would', 'you', 'your',
+]);
+
+const CONTRACT_TERMS = (text) => {
+  const terms = new Set(String(text ?? '').toLowerCase().match(/[a-z0-9]+/g) ?? []);
+  for (const term of terms) if (CONTRACT_STOPWORDS.has(term) || term.length < 2) terms.delete(term);
+  return terms;
+};
+// `files.writeText` has to yield files, write, text, so the camelCase boundary is split before
+// the lowercase pass that would destroy it.
+const CONTRACT_NAME_TERMS = (name) => CONTRACT_TERMS(String(name).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/\./g, ' '));
+const NAME_WEIGHT = 3;
+
+/**
+ * Tools whose usefulness does not depend on the topic, always spelled out.
+ *
+ * Lexical ranking can only match words the message actually contains, and the measurement that
+ * forced this was a calculator question it got wrong: "the annual pass is $60 and admission is
+ * $12 — how many visits before it pays for itself" shares no vocabulary with math.evaluate, whose
+ * name and description talk about expressions and exponents. The tool was dropped from the very
+ * turn that needed it. No better ranking fixes that inside a zero-dependency lexical scheme, so
+ * the distinction is drawn where it actually lies: between tools that are relevant only when the
+ * subject comes up, and tools a turn may reach for whatever it is about.
+ *
+ * Kept deliberately short. Everything here costs bytes on every single turn, so a tool earns a
+ * place only by being plausibly needed by a turn on any subject at all.
+ */
+const CONTRACT_ALWAYS = [
+  'tools.catalog',   // how to see everything this selection left out
+  'files.read',      // looking at the workspace is topic-independent
+  'files.write',
+  'files.writeText', // so is producing a file
+  'math.evaluate',   // arithmetic turns up inside questions that are not about arithmetic
+  'time.now',        // as does the date
+];
+
+/**
+ * Choose which tool contracts this turn spells out in full.
+ *
+ * The complete list of registered NAMES stays in the prompt either way — it is about two kilobytes
+ * and it is what stops the model inventing a tool. What is selected here is the expensive half:
+ * the input schemas. So a tool left out is one whose existence the model still knows and whose
+ * exact shape it does not; `tools.catalog` returns that shape, and a wrong guess is a visible
+ * SCHEMA_MISMATCH rather than a silent absence. That asymmetry is the whole reason this is safe to
+ * do at all.
+ *
+ * Three sets are included before anything is ranked, because each is a case where omitting a
+ * contract would make the prompt contradict itself or the turn impossible:
+ *
+ *   - any tool the surrounding prose names, derived from the prose itself rather than from a
+ *     hand-kept list, so the two cannot drift. The instructions say a tool question MUST be
+ *     answered by calling tools.catalog; a prompt that said so without carrying its contract
+ *     would be instructing the model to do something it had not been shown how to do.
+ *   - any tool the operator named verbatim in their message.
+ *   - any tool in the plan already on the table, so a follow-up turn can still reason about it.
+ *
+ * Only then is the remainder ranked and taken until the budget is spent. Ranking is lexical
+ * overlap against the tool's name and its schema description, name matches weighted higher, which
+ * is the same honest-but-shallow strategy skills.rank and memory.recall already use. It is
+ * deterministic: the same message and registry select the same set, so the request hash over this
+ * prompt is stable.
+ */
+export function selectToolContracts({ message, contracts, prose = '', proposedPlan = null, budgetBytes = TOOL_CONTRACT_BUDGET }) {
+  const all = Array.isArray(contracts) ? contracts : [];
+  // A registry that already fits is shown whole. Selecting from it could only ever remove
+  // something for no saving, and on a small registry it removed everything: the floor tools were
+  // not registered and nothing else scored, so a one-tool harness got a prompt with no contracts
+  // at all. Trimming is for the case where the budget actually binds.
+  const everything = Buffer.byteLength(canonical(all));
+  if (everything <= budgetBytes) {
+    return { contracts: all, shown: all.length, total: all.length, omittedNames: [], bytes: everything, strategy: 'complete' };
+  }
+  const queryTerms = CONTRACT_TERMS(message);
+  const planTools = new Set((proposedPlan?.tasks ?? []).map((task) => task?.tool).filter((name) => typeof name === 'string'));
+
+  const always = new Set(CONTRACT_ALWAYS);
+  const pinned = new Set();
+  for (const contract of all) {
+    const { name } = contract;
+    // Named against the registry rather than assumed into it: a tool on the always-list that this
+    // policy does not make visible is simply not here, and must not be conjured into the prompt.
+    if (always.has(name)) { pinned.add(name); continue; }
+    if (planTools.has(name)) { pinned.add(name); continue; }
+    // Whole-name match only. A substring test would pin files.read on the word "read".
+    if (typeof prose === 'string' && prose.includes(name)) { pinned.add(name); continue; }
+    if (typeof message === 'string' && message.includes(name)) pinned.add(name);
+  }
+
+  const scored = all.filter((contract) => !pinned.has(contract.name)).map((contract) => {
+    const nameTerms = CONTRACT_NAME_TERMS(contract.name);
+    const describedTerms = CONTRACT_TERMS(contract.inputSchema?.description);
+    let score = 0;
+    for (const term of queryTerms) {
+      if (nameTerms.has(term)) score += NAME_WEIGHT;
+      if (describedTerms.has(term)) score += 1;
+    }
+    return { contract, score };
+  }).sort((a, b) => b.score - a.score || (a.contract.name < b.contract.name ? -1 : a.contract.name > b.contract.name ? 1 : 0));
+
+  const chosen = new Map(all.filter((contract) => pinned.has(contract.name)).map((contract) => [contract.name, contract]));
+  // Measured as the rendered list grows rather than per contract, because the canonical form of a
+  // list is not the sum of its parts and a budget checked against the wrong number is not a budget.
+  const rendered = () => Buffer.byteLength(canonical([...chosen.values()]));
+  for (const { contract, score } of scored) {
+    if (score <= 0) break;
+    chosen.set(contract.name, contract);
+    if (rendered() > budgetBytes) { chosen.delete(contract.name); break; }
+  }
+
+  const selected = all.filter((contract) => chosen.has(contract.name));
+  const omittedNames = all.filter((contract) => !chosen.has(contract.name)).map((contract) => contract.name);
+  return {
+    contracts: selected,
+    shown: selected.length,
+    total: all.length,
+    omittedNames,
+    bytes: Buffer.byteLength(canonical(selected)),
+    strategy: 'pinned-then-lexical-v1',
+  };
+}
+
+export function buildChatContext({ message, history, observations = [], proposedPlan = null, verification = null, sourceLock, inventory, registry, policy, instructionRoot, toolBudgetBytes = TOOL_CONTRACT_BUDGET }) {
   if (typeof message !== 'string' || !message.trim()) throw new HarnessError('CHAT_CONTEXT', 'A chat message is required');
   if (!Array.isArray(history)) throw new HarnessError('CHAT_CONTEXT', 'History must be an array of messages');
   const prior = clone(history);
@@ -168,8 +312,9 @@ export function buildChatContext({ message, history, observations = [], proposed
     // honest rather than guessed.
     ...(Array.isArray(tool.outputKeys) ? { outputKeys: [...tool.outputKeys] } : {}),
   }));
-  const contractText = canonical(toolContracts);
-  if (Buffer.byteLength(contractText) > 65536) throw new HarnessError('CHAT_CONTEXT', 'Tool contracts exceed the context budget');
+  // The complete name list, always. It is cheap, it is what stops a tool being invented, and it
+  // is what makes trimming the schemas below safe: a tool whose contract is not spelled out is
+  // still one the model knows exists and can ask tools.catalog about.
   const toolNames = toolContracts.map(t => t.name);
   const outputContract = 'Respond with exactly one JSON object and nothing else: ' +
     '{"reply": "<your message to the user, as plain text>", "plan": <optional>, "citations": <optional>}. ' +
@@ -314,11 +459,13 @@ export function buildChatContext({ message, history, observations = [], proposed
     'and that its result was not recorded, quoting the failure reason. Deterministic ' +
     'replay validates recorded events and state transitions; it NEVER invokes tools or makes model calls. ' +
     'Live model inference is not guaranteed deterministic. Coaching and promoted memories do not change model weights. ' +
-    // The contracts below this prompt are the whole registry, which makes it tempting to answer
-    // an inventory question by reading them. That produced a confident miscount -- ninety for
+    // The names below this prompt are the whole registry, which makes it tempting to answer an
+    // inventory question by reading them. That produced a confident miscount -- ninety for
     // ninety-three -- under a receipt that correctly said nothing had run and there was nothing
     // to verify. The list is in context, so the model can always *attempt* the answer; the rule
     // is that it must not, because a counted answer carries a receipt and a remembered one cannot.
+    // Since contracts became a per-turn selection the rule matters more, not less: counting the
+    // spelled-out contracts would now undercount the registry rather than merely miscount it.
     'When asked what tools, capabilities or effects this harness has, or how many of them there ' +
     'are, you MUST answer by proposing a plan whose task calls tools.catalog, and state the ' +
     'numbers from its recorded output. Do NOT count or summarise the registered tool contracts ' +
@@ -339,10 +486,37 @@ export function buildChatContext({ message, history, observations = [], proposed
     'does not permit, a format no reader handles, a tool whose own limitations say what it does ' +
     'not establish -- and each tool returns those limitations for you to quote.';
 
+  // Selected here rather than above because the prose is one of the inputs: a tool the
+  // instructions name by force must carry its contract, and deriving that from the assembled text
+  // means the two cannot drift apart as the instructions are edited.
+  //
+  // The roster is cut out of the prose first. It is the sentence listing every valid tool name,
+  // so leaving it in meant every tool counted as "named by the instructions" and the whole
+  // registry pinned itself — the selector returned all 91 contracts and the first test to look
+  // caught it. What should pin a contract is prose that tells the model to USE that tool, not the
+  // list that merely says it exists.
+  const toolRoster = toolNames.join(', ');
+  const pinningProse = toolRoster ? (outputContract + behavior).split(toolRoster).join(' ') : outputContract + behavior;
+  const toolSelection = selectToolContracts({
+    message, contracts: toolContracts, prose: pinningProse,
+    proposedPlan, budgetBytes: toolBudgetBytes,
+  });
+  const contractText = canonical(toolSelection.contracts);
+  if (Buffer.byteLength(contractText) > 65536) throw new HarnessError('CHAT_CONTEXT', 'Tool contracts exceed the context budget');
+  // Said plainly, because a model that believed it was seeing every contract would read an absent
+  // one as a capability it does not have, and report that to the operator as a limit.
+  const contractHeader = toolSelection.omittedNames.length === 0
+    ? `Registered tool contracts (all ${toolSelection.total}):\n`
+    : `Tool contracts spelled out for this turn: ${toolSelection.shown} of ${toolSelection.total}, chosen by ` +
+      'relevance to this message. Every registered name is listed above and all of them remain callable. ' +
+      'For a tool whose contract is not below, propose a plan calling tools.catalog to read its exact input ' +
+      'shape rather than guessing it, and never report a tool as unavailable merely because its contract is ' +
+      'not spelled out here.\n';
+
   const systemPrompt = 'You are Concord, a deterministic chat harness supervisor. Ground every reply in the ' +
     `following ${instructions.length} reviewed source instruction modules. You may propose at most one tool ` +
     'plan as data; you cannot grant yourself a capability, effect, or approval the supervisor has not recorded.' +
-    '\n\n' + outputContract + '\n\n' + behavior + '\n\nRegistered tool contracts:\n' + contractText +
+    '\n\n' + outputContract + '\n\n' + behavior + '\n\n' + contractHeader + contractText +
     '\n\nEffective policy (null means not supplied, never an approval):\n' + canonical(effectivePolicy) +
     '\n\n' + instructionText;
 
@@ -350,5 +524,9 @@ export function buildChatContext({ message, history, observations = [], proposed
   // No `reply`: the harness has no demonstration mode, so a reply only ever comes from the model
   // via proposal.reply. Assembling one here produced a sentence that read like an answer and was
   // written by the context builder, which is exactly the confusion removing the demo was for.
-  return { sourceCoverage: sourceIds, instructions, selected, systemPrompt, toolContracts, conversation, observations: evidence, proposal, trained, verification };
+  // `toolContracts` keeps its meaning: every contract the policy makes visible. `toolSelection`
+  // says which of them this turn actually spelled out, and which it left to tools.catalog —
+  // reported rather than inferable, so a turn that went wrong because a contract was missing can
+  // be told apart from one that went wrong on its own.
+  return { sourceCoverage: sourceIds, instructions, selected, systemPrompt, toolContracts, toolSelection, conversation, observations: evidence, proposal, trained, verification };
 }

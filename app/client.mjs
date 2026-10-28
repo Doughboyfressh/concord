@@ -43,7 +43,7 @@ let viewing = null;
 
 function emptyState() {
   return { mode: null, history: [], sourceCoverage: [], selected: [], pending: null,
-    proposedPlan: null, plannedGrants: null, runs: [], observations: [], lessonCandidates: [], authority: null, lastError: null };
+    proposedPlan: null, plannedGrants: null, toolSelection: null, runs: [], observations: [], lessonCandidates: [], authority: null, lastError: null };
 }
 
 const el = (id) => document.getElementById(id);
@@ -453,6 +453,14 @@ function renderAuthority() {
       ['Effects', effects.join(' · ') || 'none'],
       ['Gated', gated.join(' · ') || 'none'],
       ['Tools allowed', String(tools)],
+      // Which contracts the last turn actually put in front of the model. Every registered name
+      // is always in the prompt; this is the expensive half, selected by relevance. Shown because
+      // a turn that went wrong for want of a contract should be diagnosable, not guessed at.
+      ...(state.toolSelection
+        ? [['Contracts this turn', state.toolSelection.omittedNames?.length
+            ? `${state.toolSelection.shown} of ${state.toolSelection.total} · ${bytes(state.toolSelection.bytes)}`
+            : `all ${state.toolSelection.total}`]]
+        : []),
       ['Max tasks', String(authority.maxTasks ?? '—')],
       ['Deadline', authority.timeoutMs ? `${authority.timeoutMs} ms` : '—'],
       ['Output cap', bytes(authority.maxOutputBytes)],

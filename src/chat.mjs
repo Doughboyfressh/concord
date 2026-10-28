@@ -131,6 +131,10 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
   let mode = null;
   let sourceCoverage = [];
   let selected = [];
+  // Which tool contracts the last turn spelled out in full, and which it left to tools.catalog.
+  // Reported for the same reason plannedGrants is: a turn that went wrong because a contract was
+  // not in front of the model must be tellable from one that went wrong on its own.
+  let toolSelection = null;
 
   const isLive = () => registry.has(MODEL_TOOL);
 
@@ -594,6 +598,7 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
       proposedPlan: proposedPlan ? clone(proposedPlan) : null, policy: turnPolicy });
     sourceCoverage = Array.isArray(context.sourceCoverage) ? [...context.sourceCoverage] : [];
     selected = Array.isArray(context.selected) ? [...context.selected] : [];
+    toolSelection = context.toolSelection ? clone(context.toolSelection) : null;
     const skillExcerpt = await fetchSkillExcerpt();
     const memoryExcerpt = await fetchMemoryExcerpt(message);
     mode = 'live';
@@ -653,6 +658,7 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
       history: settleHistory(history).map(m => clone(m)),
       sourceCoverage: [...sourceCoverage],
       selected: [...selected],
+      toolSelection: toolSelection ? clone(toolSelection) : null,
       pending: pending ? { ...pending } : null,
       lastError: lastError ? { ...lastError } : null,
       observations: boundedRecords(observations, { maxItems: 8, maxBytes: 16384 }),
@@ -749,6 +755,7 @@ export function createChatHarness({ registry, policy, sourceLock, workspaceRoot,
         observations: clone(observations), proposedPlan: proposedPlan ? clone(proposedPlan) : null, policy: turnPolicy });
       sourceCoverage = Array.isArray(context.sourceCoverage) ? [...context.sourceCoverage] : [];
       selected = Array.isArray(context.selected) ? [...context.selected] : [];
+    toolSelection = context.toolSelection ? clone(context.toolSelection) : null;
       mode = 'live';
       adoptPlan(livePlan(ADVANCE_REQUEST, context, await fetchSkillExcerpt(), await fetchMemoryExcerpt(ADVANCE_REQUEST)));
 

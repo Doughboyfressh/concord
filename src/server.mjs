@@ -67,7 +67,7 @@ function publicState(snapshot) {
   // The chat harness owns message/context sanitation. Do not expose its private
   // properties, provider configuration, credentials, or complete run journals.
   const result = {};
-  for (const key of ['mode', 'history', 'selected', 'sourceCoverage', 'pending', 'proposedPlan', 'plannedGrants', 'advanced', 'runs', 'lastError', 'observations', 'lessonCandidates', 'authority']) {
+  for (const key of ['mode', 'history', 'selected', 'sourceCoverage', 'pending', 'proposedPlan', 'plannedGrants', 'advanced', 'toolSelection', 'runs', 'lastError', 'observations', 'lessonCandidates', 'authority']) {
     if (snapshot && Object.hasOwn(snapshot, key)) result[key] = snapshot[key];
   }
   return parseJson(canonical(result));
