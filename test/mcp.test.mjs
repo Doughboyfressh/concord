@@ -15,10 +15,10 @@ import { tempDir } from './temp-workspace.mjs';
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const catalog = await loadSourceLock(path.join(root, 'sources.lock.json'));
 
-function startMcpServer(workspaceRoot) {
+function startMcpServer(workspaceRoot, extraArgs = []) {
   // Each session gets its own exchange directory. Sharing the live one would make the pushed
   // tool description depend on whatever the operator happens to have asked.
-  const child = spawn(process.execPath, [path.join(root, 'src', 'mcp.mjs'), '--workspace', workspaceRoot, '--mailbox', path.join(workspaceRoot, 'exchange')], { stdio: ['pipe', 'pipe', 'pipe'], cwd: root });
+  const child = spawn(process.execPath, [path.join(root, 'src', 'mcp.mjs'), '--workspace', workspaceRoot, '--mailbox', path.join(workspaceRoot, 'exchange'), ...extraArgs], { stdio: ['pipe', 'pipe', 'pipe'], cwd: root });
   const stdoutLines = [];
   const pending = new Map();
   let buffered = '';
@@ -184,6 +184,127 @@ test('a write effect blocks with a requestHash, executes once confirmed, and ref
     assert.equal(staleBody.status, 'blocked', 'a hash bound to different content grants nothing');
     assert.notEqual(staleBody.requestHash, proposed.requestHash);
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(temp, 'round.json'), 'utf8')), { v: 1 }, 'and nothing was overwritten');
+  });
+});
+
+/**
+ * A delegate session: the workspace is the delegate's, and the grants file lives beside it, not
+ * in it — which is the arrangement the mode requires.
+ */
+async function withDelegateSession(prefix, run) {
+  const outer = tempDir(prefix);
+  const workspace = path.join(outer, 'workspace');
+  fs.mkdirSync(workspace);
+  const grants = path.join(outer, 'grants.json');
+  const session = startMcpServer(workspace, ['--grants', grants]);
+  try {
+    await run(session, { workspace, grants, requests: `${grants}.requests.jsonl` });
+    assertStdoutIsPureJsonRpc(session);
+  } finally {
+    await session.close();
+    fs.rmSync(outer, { recursive: true, force: true });
+  }
+}
+
+const writeArgs = { path: 'out.json', content: { v: 1 } };
+
+test('a delegate cannot approve its own effect by echoing the hash back', async () => {
+  await withDelegateSession('concord-mcp-delegate-self-', async (session, { workspace, requests }) => {
+    const init = await handshake(session);
+    assert.match(init.result.instructions, /DELEGATE/, 'the delegate is told what it is at the first message');
+
+    const propose = await session.request('tools/call', { name: 'files_write', arguments: writeArgs });
+    const proposed = JSON.parse(propose.result.content[0].text);
+    assert.equal(proposed.status, 'blocked');
+
+    // The move that makes an ordinary session's gate a formality for an autonomous agent.
+    const selfConfirm = await session.request('tools/call', { name: 'files_write', arguments: { ...writeArgs, _confirm: proposed.requestHash } });
+    const refused = JSON.parse(selfConfirm.result.content[0].text);
+    assert.equal(refused.status, 'blocked');
+    assert.equal(refused.code, 'DELEGATE_UNGRANTED');
+    assert.equal(fs.existsSync(path.join(workspace, 'out.json')), false, 'nothing was written');
+
+    // The parent reviews what was asked for from a record, not from the delegate's account of it.
+    const logged = fs.readFileSync(requests, 'utf8').trim().split('\n').map((line) => parseJson(line));
+    assert.equal(logged.length, 1, 'one request, recorded once however often it is retried');
+    assert.equal(logged[0].requestHash, proposed.requestHash);
+    assert.equal(logged[0].tool, 'files.write');
+    assert.equal(logged[0].effect, 'write');
+  });
+});
+
+test('a grant the parent writes takes effect on the next attempt, and only for that exact request', async () => {
+  await withDelegateSession('concord-mcp-delegate-grant-', async (session, { workspace, grants }) => {
+    await handshake(session);
+    const proposed = JSON.parse((await session.request('tools/call', { name: 'files_write', arguments: writeArgs })).result.content[0].text);
+
+    // The parent grants while the delegate session is still running: no restart.
+    fs.writeFileSync(grants, JSON.stringify({ grants: [proposed.requestHash] }));
+    const confirmed = await session.request('tools/call', { name: 'files_write', arguments: { ...writeArgs, _confirm: proposed.requestHash } });
+    assert.equal(confirmed.result.isError, undefined);
+    assert.equal(JSON.parse(confirmed.result.content[0].text).created, true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(workspace, 'out.json'), 'utf8')), { v: 1 });
+
+    // A granted hash cannot be spent on different content: the kernel still requires it to bind
+    // the exact request, so the grant is for one write, not for a path.
+    const other = await session.request('tools/call', { name: 'files_write', arguments: { path: 'other.json', content: { v: 2 }, _confirm: proposed.requestHash } });
+    assert.equal(JSON.parse(other.result.content[0].text).status, 'blocked');
+    assert.equal(fs.existsSync(path.join(workspace, 'other.json')), false);
+  });
+});
+
+test('a malformed or revoked grants file grants nothing', async () => {
+  await withDelegateSession('concord-mcp-delegate-revoke-', async (session, { workspace, grants }) => {
+    await handshake(session);
+    const proposed = JSON.parse((await session.request('tools/call', { name: 'files_write', arguments: writeArgs })).result.content[0].text);
+
+    // Unparseable must fail closed, not open.
+    fs.writeFileSync(grants, '{ "grants": [ not json');
+    const malformed = JSON.parse((await session.request('tools/call', { name: 'files_write', arguments: { ...writeArgs, _confirm: proposed.requestHash } })).result.content[0].text);
+    assert.equal(malformed.code, 'DELEGATE_UNGRANTED');
+
+    // Granted and then withdrawn before use: withdrawal is honoured because the file is re-read.
+    fs.writeFileSync(grants, JSON.stringify({ grants: [proposed.requestHash] }));
+    fs.writeFileSync(grants, JSON.stringify({ grants: [] }));
+    const revoked = JSON.parse((await session.request('tools/call', { name: 'files_write', arguments: { ...writeArgs, _confirm: proposed.requestHash } })).result.content[0].text);
+    assert.equal(revoked.code, 'DELEGATE_UNGRANTED');
+    assert.equal(fs.existsSync(path.join(workspace, 'out.json')), false);
+  });
+});
+
+test('the chat-harness approval route is closed to a delegate too', async () => {
+  await withDelegateSession('concord-mcp-delegate-chat-', async (session) => {
+    await handshake(session);
+    const approve = await session.request('tools/call', { name: 'concord_approve', arguments: { requestHash: 'a'.repeat(64) } });
+    assert.equal(approve.result.isError, true);
+    assert.equal(JSON.parse(approve.result.content[0].text).code, 'DELEGATE_UNGRANTED');
+  });
+});
+
+test('a grants file inside the delegate workspace is refused at startup', async () => {
+  const workspace = tempDir('concord-mcp-delegate-inside-');
+  try {
+    // Concord's file tools reach anywhere in the workspace, so a grants file there is one the
+    // delegate could write for itself. The server must not start rather than run that way.
+    const { createDelegateGrants } = await import('../src/mcp.mjs');
+    const real = fs.realpathSync(workspace);
+    assert.throws(() => createDelegateGrants(path.join(real, 'grants.json'), real), { code: 'MCP_CONFIG' });
+    assert.throws(() => createDelegateGrants(path.join(real, 'nested', '..', 'grants.json'), real), { code: 'MCP_CONFIG' });
+    const outside = createDelegateGrants(path.join(path.dirname(real), 'grants.json'), real);
+    assert.equal(outside.granted('a'.repeat(64)), false, 'absent file grants nothing');
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('an ordinary session keeps the two-step confirm exactly as before', async () => {
+  await withSession('concord-mcp-not-delegate-', async (session, temp) => {
+    const init = await handshake(session);
+    assert.doesNotMatch(init.result.instructions, /DELEGATE/);
+    const proposed = JSON.parse((await session.request('tools/call', { name: 'files_write', arguments: writeArgs })).result.content[0].text);
+    const confirmed = JSON.parse((await session.request('tools/call', { name: 'files_write', arguments: { ...writeArgs, _confirm: proposed.requestHash } })).result.content[0].text);
+    assert.equal(confirmed.created, true);
+    assert.equal(fs.existsSync(path.join(temp, 'out.json')), true);
   });
 });
 

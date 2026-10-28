@@ -72,11 +72,11 @@ function readJsonFile(file, maxBytes = 33554432) {
 
 function parseArgs(argv) {
   const flags = {};
-  const allowed = ['workspace', 'policy', 'integrations', 'workers', 'browser', 'decompiler', 'web', 'build', 'reverse', 'foreign', 'mailbox'];
+  const allowed = ['workspace', 'policy', 'integrations', 'workers', 'browser', 'decompiler', 'web', 'build', 'reverse', 'foreign', 'mailbox', 'grants'];
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i]?.replace(/^--/, '');
     if (!argv[i]?.startsWith('--') || !allowed.includes(key) || !argv[i + 1] || Object.hasOwn(flags, key)) {
-      throw new HarnessError('MCP_USAGE', 'Usage: node src/mcp.mjs [--workspace DIR] [--policy FILE] [--integrations FILE] [--workers FILE] [--browser FILE] [--decompiler FILE] [--web FILE] [--build FILE] [--reverse FILE] [--foreign FILE] [--mailbox DIR]');
+      throw new HarnessError('MCP_USAGE', 'Usage: node src/mcp.mjs [--workspace DIR] [--policy FILE] [--integrations FILE] [--workers FILE] [--browser FILE] [--decompiler FILE] [--web FILE] [--build FILE] [--reverse FILE] [--foreign FILE] [--mailbox DIR] [--grants FILE]');
     }
     flags[key] = argv[i + 1];
   }
@@ -165,7 +165,65 @@ function publicChatState(snapshot) {
  * the chat harness as five `concord_*` tools. Collisions in the dotted-to-underscored name
  * map are asserted here, at construction, rather than at first call.
  */
-export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, harness, instructionModules, channel = null, uiApp = null, mailboxDir = null, onClientReady = null }) {
+/**
+ * Delegate mode: a session that can ask for effects but never grant them.
+ *
+ * Over MCP the gate has always been a two-step from one party: call, receive a requestHash, call
+ * again with `_confirm` set to it. For a person, or for an agent the operator is watching, that is
+ * a real checkpoint. For an agent Concord spawned to work on its own, it is a formality — the
+ * delegate reads the hash out of the refusal and hands it straight back. The effect is recorded,
+ * but nobody approved it.
+ *
+ * `agent.delegate` solved the same problem inside the kernel by running its sub-plan with an
+ * empty approvals list, so every effect comes back as a recorded `blocked` and the parent decides.
+ * This is that rule for a session another process is driving: a confirm counts only if its exact
+ * hash is in a grants file the PARENT writes. Everything else blocks, and the request is appended
+ * to a log beside the grants file, so the parent reviews what the delegate asked for from a record
+ * rather than from the delegate's own account of it.
+ *
+ * The grants file must sit outside the delegate's workspace. Concord's file tools are confined to
+ * that workspace, so a delegate allowed files.write still cannot reach the one file that would
+ * let it approve itself. Placing it inside would quietly undo the entire mode, so it is refused.
+ *
+ * The file is re-read on every check, not cached, so a grant the parent adds while the delegate is
+ * running takes effect on its next attempt and a revoked one stops taking effect.
+ */
+const GRANT_HASH = /^[a-f0-9]{64}$/;
+
+export function createDelegateGrants(grantsFile, workspaceRoot) {
+  const file = path.resolve(grantsFile);
+  let directory;
+  try { directory = fs.realpathSync(path.dirname(file)); }
+  catch { throw new HarnessError('MCP_CONFIG', 'The grants file must be in a directory that exists'); }
+  const relative = path.relative(workspaceRoot, directory);
+  const inside = relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  if (inside) {
+    throw new HarnessError('MCP_CONFIG', 'The grants file must be outside the delegate workspace, or the delegate could write its own grants');
+  }
+  const requestsFile = `${file}.requests.jsonl`;
+  const recorded = new Set();
+
+  return {
+    file,
+    requestsFile,
+    granted(hash) {
+      if (typeof hash !== 'string' || !GRANT_HASH.test(hash)) return false;
+      // Absent, unreadable or malformed all mean the same thing: nothing is granted. A grants
+      // file that failed to parse must not fail open.
+      let parsed;
+      try { parsed = parseJson(fs.readFileSync(file, 'utf8')); } catch { return false; }
+      const grants = Array.isArray(parsed?.grants) ? parsed.grants : [];
+      return grants.includes(hash);
+    },
+    record(entry) {
+      if (recorded.has(entry.requestHash)) return;
+      recorded.add(entry.requestHash);
+      try { fs.appendFileSync(requestsFile, canonical(entry) + '\n'); } catch { /* the refusal itself still stands */ }
+    },
+  };
+}
+
+export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, harness, instructionModules, channel = null, uiApp = null, mailboxDir = null, onClientReady = null, delegate = null }) {
   const visibleRegistry = new Map([...registry].filter(([name, tool]) => policy.allowedTools.includes(name) && policy.allowedEffects.includes(tool.effect)));
   const nameMap = new Map();
   const wrapped = new Set();
@@ -193,7 +251,11 @@ export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, h
       input = rest;
     }
     const plan = buildRawPlan(toolName, input);
-    const approvals = confirmHash ? [confirmHash] : [];
+    // In delegate mode a confirm is honoured only when the parent granted that exact hash. The
+    // check is on the hash the caller supplied; the kernel then still requires it to equal the
+    // request hash it computes, so a granted hash cannot be spent on a different input.
+    const ungranted = Boolean(delegate && confirmHash && !delegate.granted(confirmHash));
+    const approvals = confirmHash && !ungranted ? [confirmHash] : [];
     let result;
     try {
       result = await runPlan({ plan, policy, registry, sourceLock, approvals, workspaceRoot });
@@ -204,6 +266,19 @@ export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, h
     }
     if (result.outcome.status === 'blocked') {
       const detail = blockedDetail(result);
+      if (delegate) {
+        delegate.record({ requestHash: result.outcome.requestHash, tool: toolName, effect: detail.effect, input: detail.input });
+        return {
+          content: [{
+            type: 'text', text: canonical({
+              status: 'blocked', tool: toolName, effect: detail.effect, input: detail.input,
+              requestHash: result.outcome.requestHash,
+              ...(ungranted ? { code: 'DELEGATE_UNGRANTED' } : {}),
+              hint: 'This session is a delegate and cannot approve its own effects. The request has been recorded for the operator; confirming this hash takes effect only after the operator grants it.',
+            }),
+          }],
+        };
+      }
       return {
         content: [{
           type: 'text', text: canonical({
@@ -237,6 +312,12 @@ export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, h
           snapshot = await harness.send(args.message);
         } else if (name === 'concord_approve') {
           if (typeof args.requestHash !== 'string') throw new McpProtocolError(-32602, 'Invalid params: "requestHash" is required');
+          // The chat harness is the second route to a grant, and closing only the raw-tool route
+          // would leave this one as the way round it.
+          if (delegate && !delegate.granted(args.requestHash)) {
+            delegate.record({ requestHash: args.requestHash, via: 'concord_approve' });
+            return { content: [{ type: 'text', text: canonical({ status: 'failed', code: 'DELEGATE_UNGRANTED', message: 'This session is a delegate and cannot approve its own effects. The request has been recorded for the operator.' }) }], isError: true };
+          }
           snapshot = await harness.approve(args.requestHash);
         } else if (name === 'concord_execute_plan') {
           snapshot = await harness.executePlan(args.plan);
@@ -408,7 +489,12 @@ export function createMcpServer({ registry, policy, sourceLock, workspaceRoot, h
             ...(uiApp ? { extensions: { [UI_EXTENSION]: { mimeTypes: [UI_MIME_TYPE] } } } : {}),
           },
           serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
-          instructions: 'Concord is a deterministic AI chat harness: every write, network, or process effect requires an exact content-derived approval hash before it runs. A raw tool call that needs a grant returns a "blocked" result with a requestHash; call the same tool again with "_confirm" set to that hash to execute it. The concord_* tools drive a stateful, instruction-grounded chat session over the same kernel; resources/* exposes the 12 reviewed source instruction modules.',
+          // A delegate is told plainly, at the first message, that it cannot approve itself. The
+          // standard text tells a caller to confirm its own hash, which is exactly the move this
+          // mode refuses, and an agent following stale instructions would just loop on refusals.
+          instructions: delegate
+            ? 'Concord is a deterministic AI chat harness, and this session is a DELEGATE. Every write, network, or process effect needs an exact approval hash, and in this session only the operator can grant one. A gated tool call returns "blocked" with a requestHash and the request is recorded for the operator; you cannot approve it yourself, and calling again with "_confirm" has no effect until the operator has granted that exact hash. Do the work that needs no grant, state plainly which effects you requested and why, and leave the decision to the operator. Pure and read tools run normally.'
+            : 'Concord is a deterministic AI chat harness: every write, network, or process effect requires an exact content-derived approval hash before it runs. A raw tool call that needs a grant returns a "blocked" result with a requestHash; call the same tool again with "_confirm" set to that hash to execute it. The concord_* tools drive a stateful, instruction-grounded chat session over the same kernel; resources/* exposes the 12 reviewed source instruction modules.',
         };
       case 'ping':
         return {};
@@ -509,7 +595,8 @@ export async function main(argv = process.argv.slice(2)) {
   // the source lock describe the same bytes.
   const uiAppPath = path.join(root, 'app', 'mcp-app.html');
   const uiApp = fs.existsSync(uiAppPath) ? fs.readFileSync(uiAppPath, 'utf8') : null;
-  const server = createMcpServer({ registry, policy, sourceLock, workspaceRoot, harness, instructionModules: resourceContext.instructions, channel, uiApp, mailboxDir, onClientReady: joinPeerHub });
+  const delegate = flags.grants ? createDelegateGrants(flags.grants, workspaceRoot) : null;
+  const server = createMcpServer({ registry, policy, sourceLock, workspaceRoot, harness, instructionModules: resourceContext.instructions, channel, uiApp, mailboxDir, onClientReady: joinPeerHub, delegate });
 
   // Watch the exchange and tell the client when what it should know has changed. This is the
   // push: the question is already in the tool description by the time the client re-reads, so
