@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "allowedTools": [
+    "files.read",
+    "files.write",
+    "files.writeText",
+    "files.edit",
+    "files.append",
+    "files.mkdir",
+    "tools.catalog",
+    "math.evaluate",
+    "time.now",
+    "json.hash",
+    "text.concat"
+  ],
+  "allowedEffects": ["pure", "read", "write"],
+  "allowedOrigins": [],
+  "maxTasks": 8,
+  "maxOutputBytes": 262144,
+  "maxJournalBytes": 4194304,
+  "timeoutMs": 120000
+}

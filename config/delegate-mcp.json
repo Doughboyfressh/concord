@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "concord": {
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": [
+        "C:\\Users\\Dough\\Documents\\Codex\\2026-10-15\\https-github-com-affaan-m-ecc\\outputs\\deterministic-harness\\src\\mcp.mjs",
+        "--workspace",
+        "C:\\Users\\Dough\\concord-arena",
+        "--policy",
+        "C:\\Users\\Dough\\Documents\\Codex\\2026-10-15\\https-github-com-affaan-m-ecc\\outputs\\deterministic-harness\\config\\delegate-policy.json",
+        "--autonomous",
+        "C:\\Users\\Dough\\.concord\\delegates\\autonomy.jsonl"
+      ]
+    }
+  }
+}
