@@ -86,6 +86,103 @@ async function setup(t, mode = 'ok', extra = {}) {
   return { root, settings, tool, context, input: { prompt: 'Hello fixture', sessionId: 'session-1' } };
 }
 
+// A stand-in for `codex exec` / `claude -p`: reads the whole prompt from stdin, writes an
+// answer, and exits with whatever code the case asks for. Deliberately not a protocol peer —
+// the point of the cli adapter is that there is no handshake to rely on.
+const cliFixture = `
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => { input += chunk; });
+process.stdin.on('end', () => {
+  const mode = process.env.CLI_CASE ?? 'ok';
+  if (mode === 'hang') { setTimeout(() => {}, 60000); return; }
+  if (mode === 'flood') { process.stdout.write('x'.repeat(200000)); process.exit(0); }
+  if (mode === 'fail') { process.stderr.write('agent refused: ' + process.env.SECRET_VALUE); process.exit(3); }
+  if (mode === 'json') { process.stdout.write(JSON.stringify({ result: 'answer for: ' + input.trim() })); process.exit(0); }
+  process.stdout.write('echo: ' + input.trim());
+  process.exit(0);
+});
+`;
+
+async function cliSetup(t, mode = 'ok', extra = {}) {
+  const root = await mkdtemp(path.join(tmpdir(), 'concord-cli-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const script = path.join(root, 'agent.mjs');
+  await writeFile(script, cliFixture);
+  const settings = {
+    adapter: 'cli', binary: process.execPath, args: [script],
+    env: { CLI_CASE: mode, SECRET_VALUE: 'super-secret-token', ...extra.env },
+    ...extra,
+  };
+  const [tool] = makeAgentTools({ dsh: { name: 'agent.run', ...settings } });
+  const context = { workspaceRoot: root, policy: { timeoutMs: 5000, maxOutputBytes: 32768 } };
+  return { root, tool, context, input: { prompt: 'do the thing', sessionId: 'session-1' } };
+}
+
+test('a cli agent is given the prompt on stdin and its answer is recorded', async t => {
+  const { tool, context, input } = await cliSetup(t);
+  assert.equal(tool.effect, 'process', 'spawning an agent is a gated effect like any other');
+  const result = await tool.execute(input, context);
+  assert.equal(result.adapter, 'cli');
+  assert.equal(result.exitCode, 0);
+  // The prompt reached the child, which is the whole point: the model supplies this, argv does not.
+  assert.equal(result.stdout, 'echo: do the thing');
+  assert.equal(result.truncated, false);
+  assert.ok(result.limitations.some(line => /does not control/.test(line)));
+  assert.ok(result.limitations.some(line => /not in this journal/.test(line)), 'the gate hole is stated, not hidden');
+});
+
+test('a cli agent that fails is evidence, not an exception', async t => {
+  // processRun's contract throws on non-zero exit. That would discard the stderr explaining
+  // why the agent refused, which is the only useful thing about a failed delegation.
+  const { tool, context, input } = await cliSetup(t, 'fail');
+  const result = await tool.execute(input, context);
+  assert.equal(result.exitCode, 3);
+  assert.match(result.stderr, /agent refused/);
+  // Configured environment values are redacted out of the child's own output.
+  assert.doesNotMatch(canonical(result), /super-secret-token/);
+});
+
+test('a cli answer is extracted only where the operator said it lives', async t => {
+  const plain = await cliSetup(t, 'json');
+  const withoutPath = await plain.tool.execute(plain.input, plain.context);
+  assert.equal(withoutPath.answer, undefined, 'no resultPath means no guessing at another agent output shape');
+
+  const pointed = await cliSetup(t, 'json', { resultPath: '/result' });
+  const withPath = await pointed.tool.execute(pointed.input, pointed.context);
+  assert.equal(withPath.answer, 'answer for: do the thing');
+});
+
+test('a cli agent is bounded in bytes, in time, and by abort', async t => {
+  const flood = await cliSetup(t, 'flood');
+  const bounded = await flood.tool.execute(flood.input, flood.context);
+  assert.equal(bounded.truncated, true, 'a prefix is reported as a prefix');
+  assert.ok(bounded.stdoutBytes <= flood.context.policy.maxOutputBytes);
+  assert.ok(bounded.limitations.some(line => /byte budget/.test(line)));
+
+  const slow = await cliSetup(t, 'hang');
+  await assert.rejects(
+    slow.tool.execute(slow.input, { ...slow.context, policy: { timeoutMs: 300, maxOutputBytes: 32768 } }),
+    { code: 'WORKER_TIMEOUT' });
+
+  const aborting = await cliSetup(t, 'hang');
+  const controller = new AbortController();
+  const running = aborting.tool.execute(aborting.input, { ...aborting.context, signal: controller.signal });
+  controller.abort();
+  await assert.rejects(running, { code: 'WORKER_ABORTED' });
+});
+
+test('a cli service needs no dsh home, provider or model, and an acp service must name its agent', () => {
+  // Those three are what DSH needs, and they stay required of DSH.
+  assert.throws(() => makeAgentTools({ dsh: { adapter: 'dsh', binary: process.execPath } }), { code: 'WORKER_CONFIG' });
+  // A cli agent takes its model from its own configuration, so demanding them here would have
+  // made the fields decorative.
+  assert.deepEqual(makeAgentTools({ dsh: { adapter: 'cli', binary: process.execPath } }).length, 2);
+  // An acp agent is pinned to an identity the operator states, the same discipline dsh applies.
+  assert.throws(() => makeAgentTools({ dsh: { adapter: 'acp', binary: process.execPath } }), { code: 'WORKER_CONFIG' });
+  assert.deepEqual(makeAgentTools({ dsh: { adapter: 'acp', binary: process.execPath, agentName: 'hermes-agent' } }).length, 2);
+});
+
 test('registration is optional, strict, immutable, and binds explicit configuration without exposing environment values', async t => {
   assert.deepEqual(makeAgentTools(), []);
   assert.throws(() => makeAgentTools({ hermes: {} }), { code: 'SCHEMA_MISMATCH' });
@@ -119,9 +216,11 @@ test('an array of named dsh services registers one tool per service plus a share
   const catalog = tools.find(t => t.name === 'dsh.catalog');
   assert.equal(catalog.effect, 'pure');
   const output = catalog.execute({}, {});
+  // `adapter` is reported now that a service can be dsh, acp or cli: which kind a service is
+  // decides what a caller can expect back from it, so discovery has to say which.
   assert.deepEqual(output.services, [
-    { name: 'dsh.coder.run', version: '1.0.0', provider: 'fixture-provider', model: 'coder-model' },
-    { name: 'dsh.research.run', version: '2.0.0', provider: 'fixture-provider', model: 'research-model' },
+    { adapter: 'dsh', name: 'dsh.coder.run', version: '1.0.0', provider: 'fixture-provider', model: 'coder-model' },
+    { adapter: 'dsh', name: 'dsh.research.run', version: '2.0.0', provider: 'fixture-provider', model: 'research-model' },
   ]);
   assert.equal(canonical(output).includes(base.home), false);
   assert.equal(canonical(output).includes(process.execPath), false);
