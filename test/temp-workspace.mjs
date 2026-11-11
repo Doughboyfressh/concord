@@ -43,5 +43,7 @@ export function tempDir(prefix) {
 
 /** The same, with symlinks resolved — what a workspace root needs on macOS and Windows. */
 export function realTempDir(prefix) {
-  return fs.realpathSync(tempDir(prefix));
+  // .native, because only the operating system's own resolution expands a Windows 8.3 short name
+  // (C:\\Users\\RUNNER~1) into the long one every child process will report.
+  return fs.realpathSync.native(tempDir(prefix));
 }

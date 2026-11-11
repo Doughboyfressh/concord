@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstatSync, readdirSync, readFileSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { digest, parseJson, validateSchema, HarnessError } from './value.mjs';
 import { readWorkspaceFile, workspaceFile } from './workspace-fs.mjs';
@@ -338,6 +338,10 @@ function runBounded({ executable, args, cwd, env, timeoutMs, maxOutputBytes, sig
  * longer exist, and a caller can tell that without rebuilding. A path outside the workspace, or
  * one that cannot be read, gets a null digest rather than a fabricated one.
  */
+function resolved(file) {
+  try { return realpathSync.native(file); } catch { return file; }
+}
+
 function bindDiagnostics(raw, root) {
   const cache = new Map();
   const digestOf = (file) => {
@@ -346,8 +350,11 @@ function bindDiagnostics(raw, root) {
     if (relative.startsWith('file:///')) {
       try { relative = new URL(relative).pathname.replace(/^\/([A-Za-z]:)/, '$1'); } catch { return null; }
     }
-    const absolute = path.isAbsolute(relative) ? relative : path.resolve(root, relative);
-    const rooted = path.relative(root, absolute);
+    // A toolchain reports the path the operating system resolved, which need not be spelled the
+    // way the workspace root was given (a Windows 8.3 short name, a macOS /var symlink). Compare
+    // the resolved forms, or a file inside the workspace is mistaken for one outside it.
+    const absolute = resolved(path.isAbsolute(relative) ? relative : path.resolve(root, relative));
+    const rooted = path.relative(resolved(root), absolute);
     if (!rooted || rooted.startsWith('..') || path.isAbsolute(rooted)) return null;
     const key = rooted.split(path.sep).join('/');
     if (!cache.has(key)) {
