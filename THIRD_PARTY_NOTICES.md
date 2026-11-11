@@ -2,6 +2,8 @@
 
 Concord's original kernel is maintained separately from the acquired upstream trees. Preserve each upstream license, copyright notice, attribution and bundled third-party notice when redistributing their material. Do not assume one repository license covers linked tools, target artifacts, hosted assets, model weights or paid services.
 
+The MIT license in `LICENSE` covers Concord's own kernel and application code. Catalogued upstream reference material (acquired source snapshots under `upstream/` once reproduced locally, and the inert indexes derived from it in `capabilities.lock.json` and `sources.lock.json`) remains under its own original license.
+
 | Source | Observed repository license | Pinned source |
 | --- | --- | --- |
 | ECC | MIT | [76aaa77d](https://github.com/affaan-m/ECC/tree/76aaa77df6adc5b889e689007bf99b9a4f74af34) |

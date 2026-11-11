@@ -1,5 +1,22 @@
 # Concord
 
+[![CI](https://github.com/Doughboyfressh/concord/actions/workflows/ci.yml/badge.svg)](https://github.com/Doughboyfressh/concord/actions/workflows/ci.yml)
+
+**A local harness for running AI agents you can audit.** The model never acts directly. It proposes a plan; Concord validates that plan against a policy, stops for your approval before anything writes a file, calls the network or starts a process, records every effect, and can replay a finished run from its journal without invoking a single tool again.
+
+![The Concord chat interface, showing the authority in force for the session](docs/images/chat.png)
+
+- **Propose, then authorize.** A model response is data. It cannot grant itself a capability or turn into an executable plan on its own.
+- **Exact approvals.** Each write, network or process effect needs a grant bound to the hash of that specific request.
+- **Deterministic replay.** Runs are journalled, and replay reproduces them byte for byte with no tool calls.
+- **Untrusted by default.** Tool output, skills and recalled memory reach the model as labelled reference data, outside the system prompt.
+- **Zero dependencies.** Node.js built-ins only: no `npm install`, no Electron. Browser automation speaks raw CDP to a Chromium you already have.
+- **Tested on Linux and Windows.** More than 600 tests run in CI on both.
+
+It works with any OpenAI-compatible endpoint, including a local model, and also runs as an MCP server (`npm run mcp`). The sections below are the detailed design notes.
+
+## Design
+
 Concord is a local AI **chat harness** combining the supplied projects' features, tools, instructions and ideas under one execution contract: **context → chat → propose → validate → authorize → execute → verify → replay → propose memory**.
 
 The new design is an evidence-bound plan. Models, structured judges, imported skills, browser observations, analysis tools and external agent workers all contribute data to an immutable task graph. The supervisor owns ordering, policy, approvals, postconditions and receipts. A model response cannot grant itself a capability or silently become an executable plan.
