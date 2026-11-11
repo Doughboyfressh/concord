@@ -31,6 +31,12 @@ jobs:
         with:
           chrome-version: stable
 
+      # Ubuntu 24.04 runners forbid unprivileged user namespaces, which Chromium's sandbox needs.
+      # Concord never passes --no-sandbox, so the runner is told to allow the sandbox instead.
+      - name: Allow Chromium's sandbox on the runner
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Validate (check, test, e2e)
         shell: bash
         env:
