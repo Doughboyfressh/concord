@@ -63,7 +63,12 @@ test('a client that refuses, stalls, or is cancelled fails the request instead o
 
   const quick = createClientChannel({ send: () => {}, timeoutMs: 20 });
   quick.rememberClient(CLIENT);
-  await assert.rejects(quick.request('sampling/createMessage', {}), (e) => e.code === 'PEER_TIMEOUT');
+  // The channel's deadline timer is unref'd and this channel has no transport holding the event
+  // loop open, so keep it alive until the deadline fires or the runner cancels the rest of the file.
+  const keepAlive = setInterval(() => {}, 1000);
+  try {
+    await assert.rejects(quick.request('sampling/createMessage', {}), (e) => e.code === 'PEER_TIMEOUT');
+  } finally { clearInterval(keepAlive); }
   assert.equal(quick.pendingCount(), 0);
 
   const controller = new AbortController();

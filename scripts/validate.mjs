@@ -13,6 +13,13 @@ for (const step of steps) {
   writeFileSync(path.join(evidence, step + '.log'), output);
   results.push({ step, passed: run.status === 0, exitCode: run.status, signal: run.signal });
   console.log(step + ': ' + (run.status === 0 ? 'PASS' : 'FAIL'));
+  // The full log goes to the evidence directory; a CI reader still needs to see what failed
+  // without downloading it.
+  if (run.status !== 0) {
+    const failed = output.split(/\r?\n/).filter(line => /^\s*not ok \d+/.test(line));
+    for (const line of failed.slice(0, 40)) console.log('  ' + line.trim());
+    if (!failed.length) console.log(output.slice(-2000));
+  }
 }
 const gitText = args => {
   const run = spawnSync('git', args, { encoding: 'utf8' });

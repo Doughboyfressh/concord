@@ -61,7 +61,7 @@ export function browserCandidates(platform, env = {}) {
       ['BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'],
       ['Chromium', 'Application', 'chrome.exe'],
     ]) {
-      for (const root of roots) out.push({ name: relative[relative.length - 1], executable: path.join(root, ...relative) });
+      for (const root of roots) out.push({ name: relative[relative.length - 1], executable: path.win32.join(root, ...relative) });
     }
     return out;
   }

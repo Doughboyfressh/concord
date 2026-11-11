@@ -512,7 +512,13 @@ test('an exit without an answer names the segv handler that hides the reason', a
 test('a decompiler that never answers fails at its deadline rather than hanging', async () => {
   const scripted = scriptedChild();
   const session = createSession({ spawn: () => scripted.child, callbacks: { answer: () => P.answerNothing() }, timeoutMs: 40 });
-  await assert.rejects(session.decompileAt({ space: 3, offset: 0n }), (error) => error.code === 'DECOMPILE_TIMEOUT');
+  // The deadline timer is unref'd so it never holds a real process open, and the scripted child
+  // owns no handle at all. Without something referenced the event loop drains before the deadline
+  // and the runner cancels the rest of this file.
+  const keepAlive = setInterval(() => {}, 1000);
+  try {
+    await assert.rejects(session.decompileAt({ space: 3, offset: 0n }), (error) => error.code === 'DECOMPILE_TIMEOUT');
+  } finally { clearInterval(keepAlive); }
 });
 
 test('two commands at once is refused, because one response cannot answer both', async () => {

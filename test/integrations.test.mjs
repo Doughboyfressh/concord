@@ -398,16 +398,18 @@ test('process.run passes only named ambient values and refuses echoed credential
 
 test('process.runMany executes selected entries concurrently, not sequentially', async () => {
   await batchFixture({
-    a: 'await new Promise(r => setTimeout(r, 300)); process.stdout.write("a-done");',
-    b: 'await new Promise(r => setTimeout(r, 300)); process.stdout.write("b-done");',
+    a: 'const s = Date.now(); await new Promise(r => setTimeout(r, 300)); process.stdout.write(s + " " + Date.now() + " a-done");',
+    b: 'const s = Date.now(); await new Promise(r => setTimeout(r, 300)); process.stdout.write(s + " " + Date.now() + " b-done");',
   }, async (tool, context) => {
-    const start = Date.now();
     const output = await tool.execute({ names: ['a', 'b'] }, context);
-    const elapsed = Date.now() - start;
-    assert.ok(elapsed < 550, `expected concurrent children to finish in ~300ms, took ${elapsed}ms`);
     const byName = Object.fromEntries(output.results.map(r => [r.name, r]));
-    assert.equal(byName.a.stdout, 'a-done');
-    assert.equal(byName.b.stdout, 'b-done');
+    assert.match(byName.a.stdout, /^\d+ \d+ a-done$/);
+    assert.match(byName.b.stdout, /^\d+ \d+ b-done$/);
+    // Each child reports when it was running. Overlapping intervals are what concurrency means;
+    // a wall-clock bound instead measured how long a loaded runner takes to start two processes.
+    const [aStart, aEnd] = byName.a.stdout.split(' ').map(Number);
+    const [bStart, bEnd] = byName.b.stdout.split(' ').map(Number);
+    assert.ok(aStart < bEnd && bStart < aEnd, `expected the children to overlap, got a=${aStart}-${aEnd} b=${bStart}-${bEnd}`);
   });
 });
 
