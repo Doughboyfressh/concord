@@ -58,6 +58,17 @@ export function parseFlags(argv, allowed = CHAT_FLAGS, usage = USAGE) {
   return flags;
 }
 
+/** Every `executable` a machine config names that is not an absolute path on this platform. */
+function foreignExecutables(value, found = []) {
+  if (Array.isArray(value)) { for (const item of value) foreignExecutables(item, found); return found; }
+  if (value === null || typeof value !== 'object') return found;
+  for (const [key, item] of Object.entries(value)) {
+    if (key === 'executable' && typeof item === 'string' && !path.isAbsolute(item)) found.push(item);
+    else foreignExecutables(item, found);
+  }
+  return found;
+}
+
 function readJson(file) {
   const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
   try {
@@ -111,7 +122,18 @@ export async function startChatServer({ flags = {}, entry = 'scripts/chat.mjs' }
   for (const [flag, file] of [['browser', 'browser.json'], ['decompiler', 'decompiler.json'], ['workers', 'workers.json'], ['web', 'web.json'], ['build', 'build.json']]) {
     if (flags[flag] !== undefined) continue;
     const candidate = path.join(root, 'config', file);
-    if (fs.existsSync(candidate)) flags = { ...flags, [flag]: candidate };
+    if (!fs.existsSync(candidate)) continue;
+    // These files describe one machine. The committed ones name Windows executables, and on any
+    // other platform such a path is not absolute, so the adapter would refuse it and take the
+    // whole launcher down over a tool nobody asked for. A defaulted file that cannot describe
+    // this machine is left out, out loud. A file named with an explicit flag is never skipped:
+    // that is the operator's own statement and is still refused rather than repaired.
+    const foreign = foreignExecutables(readJson(candidate));
+    if (foreign.length) {
+      console.error(`Concord: not loading config/${file} by default; it names an executable for another platform (${foreign[0]}). Pass --${flag} <file> to use one for this machine.`);
+      continue;
+    }
+    flags = { ...flags, [flag]: candidate };
   }
   const integrations = flags.integrations ? readJson(flags.integrations) : {};
   // The same credential decision the windowed launcher has always made, moved here so both

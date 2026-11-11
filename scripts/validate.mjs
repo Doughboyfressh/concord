@@ -13,6 +13,23 @@ for (const step of steps) {
   writeFileSync(path.join(evidence, step + '.log'), output);
   results.push({ step, passed: run.status === 0, exitCode: run.status, signal: run.signal });
   console.log(step + ': ' + (run.status === 0 ? 'PASS' : 'FAIL'));
+  // The full log goes to the evidence directory; a CI reader still needs to see what failed
+  // without downloading it.
+  if (run.status !== 0) {
+    const lines = output.split(/\r?\n/);
+    let shown = 0;
+    for (let i = 0; i < lines.length && shown < 40; i += 1) {
+      if (!/^\s*not ok \d+/.test(lines[i])) continue;
+      shown += 1;
+      console.log('  ' + lines[i].trim());
+      // The YAML block under a failure carries its reason; show that much and no more.
+      for (let j = i + 1; j < lines.length && j < i + 40 && !/^\s*\.\.\.\s*$/.test(lines[j]); j += 1) {
+        if (/^\s*(duration_ms|type):/.test(lines[j])) continue;
+        console.log('    ' + lines[j].trimEnd().slice(0, 400));
+      }
+    }
+    if (!shown) console.log(output.slice(-2000));
+  }
 }
 const gitText = args => {
   const run = spawnSync('git', args, { encoding: 'utf8' });

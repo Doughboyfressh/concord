@@ -83,6 +83,11 @@ test('live chat proposal and file effect have separate exact grants; replay repe
 });
 
 const SKILL_QUERY = 'Review this change for security vulnerabilities before shipping it.';
+// upstream/ is acquired out of band and git-ignored, so a fresh clone (and CI) has the skill index
+// but not the skill bodies. The tests that read a real body say so instead of failing; the
+// soft-fail path a fresh clone actually takes is covered by its own test below.
+const upstreamAcquired = fs.existsSync(path.join(root, 'upstream'));
+const needsUpstream = { skip: upstreamAcquired ? false : 'upstream/ sources are not acquired in this checkout' };
 
 test('selected retains the capability path needed to fetch a skill body', async () => {
   const temp = tempDir('concord-chat-flow-');
@@ -96,7 +101,7 @@ test('selected retains the capability path needed to fetch a skill body', async 
   } finally { fs.rmSync(temp, {recursive:true,force:true}); }
 });
 
-test('a resolvable skill match reaches the model as untrusted reference data, recorded as its own run', async () => {
+test('a resolvable skill match reaches the model as untrusted reference data, recorded as its own run', needsUpstream, async () => {
   const harness = setup(root); // the real repo root, where upstream/ is actually acquired
   const turn = await harness.send(SKILL_QUERY);
   assert.equal(turn.runs.length, 3, 'expected a skill-enrichment attempt, a memory-enrichment attempt, and the primary proposal attempt');
@@ -141,7 +146,7 @@ test('the skill-enrichment and memory-recall read effects never produce a pendin
   assert.equal(turn.pending, null);
 });
 
-test('live mode supplies acquired skills as untrusted reference data outside the system prompt', async () => {
+test('live mode supplies acquired skills as untrusted reference data outside the system prompt', needsUpstream, async () => {
   let receivedSystem, receivedPrompt;
   const model = { name: 'model.propose', version: 'fixture-1', effect: 'network', inputSchema: { type: 'object' }, config: { fixture: true },
     execute(input) { receivedSystem = input.system; receivedPrompt = JSON.parse(input.prompt); return { model: 'fixture-1', proposal: { reply: 'ok' } }; } };

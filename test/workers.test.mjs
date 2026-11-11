@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, mkdir, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir, rm, symlink, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -266,7 +266,8 @@ test('workspace resolution allows contained directories and rejects traversal', 
   const run = await setup(t);
   await mkdir(path.join(run.root, 'nested'));
   const output = await run.tool.execute({ ...run.input, workdir: 'nested' }, run.context);
-  assert.equal(output.cwd, path.join(run.root, 'nested'));
+  // The worker reports the resolved directory; the temp root may be spelled with a Windows short name.
+  assert.equal(output.cwd, path.join(await realpath(run.root), 'nested'));
   await assert.rejects(run.tool.execute({ ...run.input, workdir: '..' }, run.context), { code: 'WORKER_WORKSPACE' });
 });
 
